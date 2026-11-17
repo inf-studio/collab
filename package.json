@@ -38,7 +38,6 @@
   },
   "scripts": {
     "build": "vp pack",
-    "prepare": "vp pack",
     "prepublishOnly": "pnpm run build",
     "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs",
     "typecheck": "tsc --noEmit"
