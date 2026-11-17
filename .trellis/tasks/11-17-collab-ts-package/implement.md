@@ -45,4 +45,4 @@ npm pack --dry-run
 - [x] 仓库 `inf-studio/collab`（public）与 GitHub Packages 发布（0.1.0 → 0.1.1）
 - [x] 包名修正为 `@inf-studio/collab`（GitHub Packages 要求 scope == 仓库 owner）
 - [x] 全局安装并用包替换单文件插件；退役 shim 与 muke-pos-app 单文件
-- [ ] 包可见性仍为 private：API PATCH 返回 404（OAuth token 无包管理权限），需在 GitHub 包设置页手动改为 public
+- [ ] 包可见性仍为 private：**组织策略禁止公开包**（包设置页显示「Setting is disabled by organization administrators」，API PATCH 同因策略返回 404）。若确需 public，须由 org admin 在组织设置中放开；当前 private 不影响内部分发（安装需 read:packages token，已实测可用）
