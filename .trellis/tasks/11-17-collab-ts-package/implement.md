@@ -38,3 +38,11 @@ npm pack --dry-run
 - B 阶段：删 `packages/collab`，恢复 `plugins: []`，本地单文件仍在；
 - C 阶段：`opencode plugin remove @inf-studio/collab`，指回本地目录；
 - 任一阶段不改动既有存储格式（`collab/*` 键不变），数据无需迁移。
+
+
+## 阶段 C 完成记录（2026-11-17）
+
+- [x] 仓库 `inf-studio/collab`（public）与 GitHub Packages 发布（0.1.0 → 0.1.1）
+- [x] 包名修正为 `@inf-studio/collab`（GitHub Packages 要求 scope == 仓库 owner）
+- [x] 全局安装并用包替换单文件插件；退役 shim 与 muke-pos-app 单文件
+- [ ] 包可见性仍为 private：API PATCH 返回 404（OAuth token 无包管理权限），需在 GitHub 包设置页手动改为 public
