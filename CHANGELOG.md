@@ -5,7 +5,7 @@
 
 ## [0.1.0] - 2026-11-17
 
-首个版本：`@info-studio/collab` 由仓库内单文件插件 `.opencode/plugins/collab.js`
+首个版本：`@inf-studio/collab` 由仓库内单文件插件 `.opencode/plugins/collab.js`
 迁移为独立 TS 包。工具签名、文案、状态机、存储键与 `bid` 算法保持不变。
 
 ### Added

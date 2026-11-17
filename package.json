@@ -1,5 +1,5 @@
 {
-  "name": "@info-studio/collab",
+  "name": "@inf-studio/collab",
   "version": "0.1.0",
   "description": "Cross-session collaboration for OpenCode: ten native collab_* tools, a thread/inbox protocol and a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt).",
   "keywords": [

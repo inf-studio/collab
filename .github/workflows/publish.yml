@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 22.18
           registry-url: https://npm.pkg.github.com
-          scope: "@info-studio"
+          scope: "@inf-studio"
 
       - name: Install
         run: pnpm install --frozen-lockfile
@@ -34,7 +34,7 @@ jobs:
       - name: Debug auth
         run: |
           echo "registry=$(npm config get registry)"
-          echo "scope-registry=$(npm config get @info-studio:registry)"
+          echo "scope-registry=$(npm config get @inf-studio:registry)"
           npm whoami --registry https://npm.pkg.github.com || true
           sed -E 's/(_authToken=).*/\1***/' "$HOME/.npmrc" || true
         env:

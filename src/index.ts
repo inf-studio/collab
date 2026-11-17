@@ -11,7 +11,7 @@ import { createToolKit, registerTools } from './tools/index.ts';
 import type { CollabContext } from './types.ts';
 
 /**
- * `@info-studio/collab` — the zero-dependency port of
+ * `@inf-studio/collab` — the zero-dependency port of
  * `.opencode/plugins/collab.js`: cross-session collaboration (threads / inbox)
  * plus the cross-workspace hand-off chain (broadcast → score → atomic claim →
  * receipt), exposed as the ten native `collab_*` tools and one `context` hook.

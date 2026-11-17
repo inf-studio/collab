@@ -1,4 +1,4 @@
-# `@info-studio/collab`
+# `@inf-studio/collab`
 
 多会话（含跨工作区）协作插件：十个原生 `collab_*` 工具 + thread/inbox 协议 + 一条
 「广播 → 打分 → 原子领取 → 回执」的交接链路。
@@ -36,9 +36,9 @@
 ## 安装
 
 ```bash
-# 1) GitHub Packages（私有包，需要 @info-studio scope 的读权限）
-#    ~/.npmrc 里加：@info-studio:registry=https://npm.pkg.github.com
-opencode plugin add @info-studio/collab@0.1.0
+# 1) GitHub Packages（私有包，需要 @inf-studio scope 的读权限）
+#    ~/.npmrc 里加：@inf-studio:registry=https://npm.pkg.github.com
+opencode plugin add @inf-studio/collab@0.1.0
 
 # 2) 本地目录（开发期；不会缓存，改完即生效）
 #    opencode.json: { "plugins": ["./packages/collab"] }
@@ -56,7 +56,7 @@ opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"
 ### 卸载
 
 ```bash
-opencode plugin remove @info-studio/collab     # 包安装
+opencode plugin remove @inf-studio/collab     # 包安装
 # 目录/tarball 安装：删掉 opencode.json → plugins 里的对应条目
 ```
 
@@ -104,7 +104,7 @@ opencode plugin remove @info-studio/collab     # 包安装
 ## 开发
 
 ```bash
-pnpm --filter=@info-studio/collab build       # vp pack → dist/
+pnpm --filter=@inf-studio/collab build       # vp pack → dist/
 pnpm install
 pnpm typecheck
 pnpm test          # build + 279 项 harness + 12 项只读默认

@@ -1,8 +1,8 @@
-# collab TS 包化与 GitHub Packages 发布（`@info-studio/collab`）
+# collab TS 包化与 GitHub Packages 发布（`@inf-studio/collab`）
 
 > 来源：`11-17-collab-grant` 收口时确认：单文件 `.opencode/plugins/collab.js` 已约 3400 行，
 > 且 `.opencode/**` 被仓库 lint/typecheck 忽略，无法复用与分发。
-> 目标仓库/包：`inf-studio/collab` → npm scope `@info-studio` → 包名 `@info-studio/collab`。
+> 目标仓库/包：`inf-studio/collab` → npm scope `@inf-studio` → 包名 `@inf-studio/collab`。
 
 ## 背景
 
@@ -13,7 +13,7 @@
 ## 目标（两阶段，先 B 后 C）
 
 - **阶段 B（包化）**：`packages/collab` TS 包 + 构建 + 迁入 harness + 接入门禁；仍本地引用，不发布。
-- **阶段 C（发布）**：发布到 GitHub Packages，包名 `@info-studio/collab`，仓库 `inf-studio/collab`。
+- **阶段 C（发布）**：发布到 GitHub Packages，包名 `@inf-studio/collab`，仓库 `inf-studio/collab`。
 
 ## Requirements
 
@@ -28,12 +28,12 @@
 
 ## Acceptance Criteria
 
-- [ ] `packages/collab` 可构建，`pnpm --filter=@info-studio/collab build` 成功
+- [ ] `packages/collab` 可构建，`pnpm --filter=@inf-studio/collab build` 成功
 - [ ] 迁移后 harness 274/274 全绿，工具行为与单文件版逐字一致（抽查 5 个工具输出）
 - [ ] `pnpm typecheck` 覆盖该包且通过；`vp check` 无 error
 - [ ] 本地以目录/包两种方式都能被 `opencode` 加载（`/api/plugin` active、无 failed）
 - [ ] `npm pack` 产物不含源码外敏感文件；版本 0.1.0 可安装
-- [ ] GitHub Packages 发布后 `opencode plugin add @info-studio/collab@0.1.0` 在干净目录可用
+- [ ] GitHub Packages 发布后 `opencode plugin add @inf-studio/collab@0.1.0` 在干净目录可用
 - [ ] README 写清：能力范围、权限（会话读写）、默认只读开关、卸载方法
 
 ## 附带修复（本任务一并处理）

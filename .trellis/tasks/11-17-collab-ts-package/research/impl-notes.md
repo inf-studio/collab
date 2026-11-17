@@ -14,7 +14,7 @@
 | B4 `hooks/` | ✅（本次） | `src/hooks/context.ts`：`injectInbox`（未读注入 + 去重/游标）+ `injectChain`（交接链路提醒），合并为单个 `context` hook；单文件版没有额外 SessionStart hook（`reminded` 由 `chain.injectionFor` 承担），因此未新增 `session-start.ts` |
 | B5 `index.ts` 装配 | ✅（本次） | `Plugin.Plugin = { id:"collab", setup }`；tools transform → 事件流（`session.inbox.enqueued`）→ `context` hook → 日志 → cleanup；`__internals` 导出（harness 用） |
 | B6 harness 迁入 | ✅（本次） | `test/handoff-harness.mjs`（指向 `dist/`，**279 项**）+ `test/readonly-default.mjs`（**12 项**）；`package.json` `test` = build → 两个测试 |
-| B7 门禁 | ✅（本次） | 根 `typecheck:all` 加 `--filter=@info-studio/*`；`vp check` 覆盖 `packages/collab`（src+test 全绿） |
+| B7 门禁 | ✅（本次） | 根 `typecheck:all` 加 `--filter=@inf-studio/*`；`vp check` 覆盖 `packages/collab`（src+test 全绿） |
 | B8 双轨切换 | ⏸ 未做（按任务口径） | 本任务明确「不切换加载方式、不删单文件」。切换步骤已写进 `docs/collab.md` §13.3（含 `Duplicate plugin ID: collab` 风险与回滚） |
 | B9 行为对比 | ✅ | 274 项单文件用例在包内全绿 + 五个工具输出逐字一致（见 §4） |
 | 附 B1 修复 | ✅ | 单文件版已有修复（`collab.js:3652-3663`）；包内 `grant.ts` 用 `grantHalfOf()` 复刻；新增 S68（5 项断言） |
@@ -75,15 +75,15 @@
 ## 3. 构建 / 类型 / 测试原始输出
 
 ```
-$ pnpm --filter=@info-studio/collab build
+$ pnpm --filter=@inf-studio/collab build
 ℹ dist/index.js    153.28 kB │ gzip: 47.37 kB
 ℹ dist/index.d.ts    2.72 kB │ gzip:  1.25 kB
 ✔ Build complete in 2777ms
 
-$ pnpm --filter=@info-studio/collab typecheck
+$ pnpm --filter=@inf-studio/collab typecheck
 $ tsc --noEmit          # 无输出 = 0 error
 
-$ pnpm --filter=@info-studio/collab test
+$ pnpm --filter=@inf-studio/collab test
 === 279/279 checks passed      # 274 项单文件用例 + S68（5 项）
 === 12/12 checks passed        # readonly-default.mjs（R8）
 === 16/16 parity checks passed # 双轨对比（10 工具契约 + 5 预览输出）
@@ -118,7 +118,7 @@ npm notice total files: 5
 ## 4. 五个工具逐字对比（单文件 vs 包）
 
 对比脚本已固化进包内（双轨期回归门）：`packages/collab/scripts/parity-single-file.mjs`
-（= `pnpm --filter=@info-studio/collab parity`，已并入 `test`）。它用同一套假宿主、同一
+（= `pnpm --filter=@inf-studio/collab parity`，已并入 `test`）。它用同一套假宿主、同一
 `COLLAB_CONFIG`/`COLLAB_BROADCAST_DIR`/`COLLAB_GRANT_DIR`，只跑**预览**路径（不写任何存储），
 归一化动态值（`t_…` / `b_…` / `c_…` / 时钟 / 耗时）后比较：
 
@@ -182,9 +182,9 @@ PASS: all five outputs identical
 | 项 | 原因 |
 | --- | --- |
 | `/api/plugin` active（目录插件 / 包插件） | 任务口径「不切换加载方式」；切换会与单文件版 `id` 冲突（`Duplicate plugin ID: collab`），需 owner 在场时做一次真实交接观察（implement.md B8/C6） |
-| GitHub Packages 发布 / `opencode plugin add @info-studio/collab@0.1.0` | 阶段 C：需新建 `inf-studio/collab` 仓、CI `packages: write`、token；本次不发布 |
+| GitHub Packages 发布 / `opencode plugin add @inf-studio/collab@0.1.0` | 阶段 C：需新建 `inf-studio/collab` 仓、CI `packages: write`、token；本次不发布 |
 | `.github/workflows/collab.yml` 加包 job | 该 workflow 的设计前提是**不跑 `pnpm install`**（本仓 CI 全新 checkout 因 `../std-ui` 兄弟仓缺失装不上依赖）；包 build/typecheck/test 需要依赖，故只保留本地/可安装依赖的 CI 跑法（文档已注明） |
-| 根 `pnpm typecheck` 全量跑 | 会连带 `@std-x/*` / `@effects/*` 等，耗时且可能受其它会话在改的文件影响；已用等效的 `pnpm --filter=@info-studio/* typecheck` 验证新包在 filter 内且通过 |
+| 根 `pnpm typecheck` 全量跑 | 会连带 `@std-x/*` / `@effects/*` 等，耗时且可能受其它会话在改的文件影响；已用等效的 `pnpm --filter=@inf-studio/* typecheck` 验证新包在 filter 内且通过 |
 | 真实宿主上的 `ctx.session.update` / `switchAgent` | 假宿主覆盖了成功/403 两条路径（S54–S67）；真实宿主行为仍以单文件版的历史实测为准（同一代码路径） |
 
 ## 7. 本会话改动文件
@@ -198,7 +198,7 @@ PASS: all five outputs identical
 （`extractVerdict` 收窄字面量类型、去掉隐式 any）、`src/tools/broadcast.ts`（`create` 返回收窄）、
 `src/ids.ts`（去掉多余 spread，lint）、`src/types.ts`（注释与 harness 入口一致）。
 
-`packages/collab` 之外：`package.json`（`typecheck:all` 加 `@info-studio/*`）、
+`packages/collab` 之外：`package.json`（`typecheck:all` 加 `@inf-studio/*`）、
 `docs/collab.md`（§11.1 指针 + 新 §13）、`docs/development.md`（命令表/门禁说明）、
 `.trellis/spec/guides/cross-workspace-collab-guide.md`（§11 回归门补充包形态）、本记录。
 `pnpm-lock.yaml` 是本机 gitignored 文件，仅本地同步（未跟踪，不影响提交）。

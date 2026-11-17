@@ -4,7 +4,7 @@
 
 ```
 packages/collab/
-  package.json          # name @info-studio/collab, type module, exports ".", files ["dist"]
+  package.json          # name @inf-studio/collab, type module, exports ".", files ["dist"]
   tsdown.config.ts      # 或 vite.config.ts 的 tsdown 任务
   src/
     index.ts            # Plugin.define({ id:"collab", setup })
@@ -34,7 +34,7 @@ packages/collab/
 
 ```jsonc
 {
-  "name": "@info-studio/collab",
+  "name": "@inf-studio/collab",
   "version": "0.1.0",
   "type": "module",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
@@ -54,7 +54,7 @@ packages/collab/
 | --- | --- | --- |
 | B-1 | `.opencode/plugins/collab.js`（现状） | 不动 |
 | B-2 | `opencode.json` → `plugins: ["./packages/collab"]` | 目录插件，本地调试；同时停用本地单文件避免重复 id |
-| C | `opencode plugin add @info-studio/collab@0.1.0` | 包插件；注意缓存与「未监视依赖需重启」 |
+| C | `opencode plugin add @inf-studio/collab@0.1.0` | 包插件；注意缓存与「未监视依赖需重启」 |
 
 **重复 id 风险**：包插件 `id:"collab"` 与本地文件同名会 `Duplicate plugin ID`。切换时二选一，global shim 逻辑同步调整（shim 需识别包已安装）。
 
@@ -62,14 +62,14 @@ packages/collab/
 
 ```ini
 # .npmrc（不入库敏感 token；CI 用 NODE_AUTH_TOKEN）
-@info-studio:registry=https://npm.pkg.github.com
+@inf-studio:registry=https://npm.pkg.github.com
 //npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}
 ```
 
 - 仓库：`inf-studio/collab`（新仓；本仓只保留迁移前实现与 harness 快照）；
 - CI：tag `v*` → `pnpm build && npm publish`；`permissions: packages: write`；
 - 版本：`0.1.0` 起，遵循 semver；`CHANGELOG.md`；
-- 安装方需有 `@info-studio` scope 的读权限（私有包）。
+- 安装方需有 `@inf-studio` scope 的读权限（私有包）。
 
 ## 5. 安全
 

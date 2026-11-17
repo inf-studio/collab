@@ -2,7 +2,7 @@
  * Deterministic harness for the collab hand-off protocol + the hand-off chain
  * (no model calls, no real server, no extra dependencies).
  *
- *   pnpm --filter=@info-studio/collab test      # builds `dist/` first
+ *   pnpm --filter=@inf-studio/collab test      # builds `dist/` first
  *   node packages/collab/test/handoff-harness.mjs
  *
  * Imports the built package (`dist/index.js`, see `vite.config.ts`) and drives

@@ -1,7 +1,7 @@
 /**
  * R8 (read-only by default) for the packaged plugin.
  *
- *   pnpm --filter=@info-studio/collab test     # builds dist/ first
+ *   pnpm --filter=@inf-studio/collab test     # builds dist/ first
  *
  * The single-file `.opencode/plugins/collab.js` always had the write capability
  * (it patched a session's permissions and switched its agent). The package makes
