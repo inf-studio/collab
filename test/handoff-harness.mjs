@@ -111,6 +111,18 @@
  *   S67  protected sessions/descendants refused; a refused switch is readable,
  *        leaves the agent unchanged and writes no ledger file
  *
+ * S68 (post-archive) covers the `collab_grant` preview over a promote-only ledger.
+ *
+ * S69 (`11-18-collab-protected-receipt`) covers a protected *requester*:
+ * `receiptMode:"pull"` (the receipt is the claimant's own last answer, extracted
+ * once the lease lapses) + the only guard exception (`kind:reply` of that very
+ * bid, from that bid's claimant) + the unchanged `push` path.
+ *
+ * S70 (R7, same task) covers the extraction widening: `accept` / `handoff`
+ * claims are closed from the claimant's own answer too (only by the requester,
+ * never a protected claimant), and the blocked word list understands
+ * 「回执被硬拒 / 无法投递 / 改回写提案 / 已自愈」.
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -2400,7 +2412,9 @@ expect(
   JSON.stringify(afterLong.receipt?.note ?? '').slice(0, 120)
 );
 
-// --- S50 (R2/R3): only a *lapsed spawn* claim is extracted; protected never is.
+// --- S50 (R2/R3): a live lease is never extracted; protected / bystander never is.
+// (R7 later widened the *kind* filter — S70 covers accept/handoff claims; the
+// checks below stay valid because H2 already refuses a non-requester trigger.)
 const freshSid = addSpawnSession('ses_spawn_fresh');
 contexts.set(freshSid, [assistantMessage(`[handoff] BLOCKED ${'b_aaaa0000000000b1'} 已实施`, nowMs)]);
 const freshBid = 'b_aaaa0000000000b1';
@@ -2429,7 +2443,7 @@ writeRaw(acceptKindBid, {
 await call('collab_accept', { bid: acceptKindBid, confirm: false }, { sessionID: 'ses_a_second', agent: 'build' });
 const afterAcceptKind = bcRead(acceptKindBid);
 expect(
-  'S50 a lapsed accept-kind claim is not extracted either',
+  'S50 a lapsed accept-kind claim is not extracted by a bystander refresh (H2)',
   afterAcceptKind.state === 'open' && afterAcceptKind.attempts === 1 && !afterAcceptKind.receipt,
   JSON.stringify({ state: afterAcceptKind.state, attempts: afterAcceptKind.attempts })
 );
@@ -3375,6 +3389,567 @@ expect(
     s68Leftover.agentBefore === 'explore' &&
     !Array.isArray(s68Leftover.before),
   JSON.stringify(s68Leftover)
+);
+
+// ============================ S69 (protected requester → pull mode + bounded reply)
+// `11-18-collab-protected-receipt`: a peer broadcast whose requester is on the
+// protect list used to demand a `collab_send` receipt that the very same lineage
+// guard refuses — the takeover text told the model to walk into a wall, and the
+// only closure left was the lease-expiry heuristic. R1 = `receiptMode:"pull"` +
+// pull wording (in-session `[handoff]` line, extracted by the requester);
+// R2 = one bounded exception: `kind:reply` receipts of that very bid.
+const PROTECTED_REQ = 'ses_e1eb91cebffeTv1467ubJLKebk'; // schema line (built-in protect)
+const PROTECTED_OTHER = 'ses_e23a4a23fffe4c4m7UQFR8dUL3'; // the other built-in entry
+const protectedCtx = { sessionID: PROTECTED_REQ, agent: 'build' };
+
+// WS_L: empty → spawn, requester = protected line (pull mode).
+const WS_L = ws('l');
+const ISSUE_L = issueFile(
+  WS_L,
+  'fix-pull-requester.md',
+  '# pull 模式受保护发起方（11-17-collab-protected-receipt）\n\n`apps/pos/src/pull.ts`\n'
+);
+// WS_N: empty → spawn that never accepts (extraction + reply whitelist).
+const WS_N = ws('n');
+const ISSUE_N = issueFile(
+  WS_N,
+  'fix-pull-extract.md',
+  '# pull 提取（11-17-collab-protected-receipt）\n\n`apps/pos/src/extract.ts`\n'
+);
+// WS_M: non-protected requester with one strong candidate → push is unchanged.
+const WS_M = ws('m');
+const ISSUE_M = issueFile(
+  WS_M,
+  'fix-worker-store.md',
+  '# worker store 修复（11-17-worker-store）\n\n`packages/state/src/machine/worker/store.ts`\n'
+);
+sessions.ses_m1 = {
+  id: 'ses_m1',
+  agent: 'build',
+  title: '11-17-worker-store worker store 修复（push 对照）',
+  time: { updated: now - 60_000, busy: 0 },
+  location: { directory: WS_M }
+};
+contexts.set('ses_m1', [toolMessage('packages/state/src/machine/worker/store.ts')]);
+
+// --- S69a (R1): a protected requester's hand-off is pull, and says so.
+const s69Pull = await call('collab_broadcast', { workspace: WS_L, issuePath: ISSUE_L, confirm: true }, protectedCtx);
+out('S69 broadcast from a protected requester (spawn path)', s69Pull);
+const s69PullBid = bidOf(s69Pull);
+const s69PullRec = bcRead(s69PullBid);
+expect(
+  'S69 the record of a protected requester carries receiptMode:"pull"',
+  s69PullRec.receiptMode === 'pull' && s69PullRec.from?.sid === PROTECTED_REQ,
+  JSON.stringify({ receiptMode: s69PullRec.receiptMode, from: s69PullRec.from })
+);
+expect(
+  'S69 the broadcast result asks for the in-session [handoff] line',
+  s69Pull.includes('最后一条回复') && s69Pull.includes(`[handoff] DONE ${s69PullBid}`),
+  s69Pull.split('\n').slice(-5).join(' | ')
+);
+expect(
+  'S69 … and never demands a collab_send receipt to the protected requester',
+  !s69Pull.includes(`collab_send {target:"${PROTECTED_REQ}"`),
+  s69Pull.split('\n').slice(-5).join(' | ')
+);
+const s69Spawn = created.filter(info => info.location?.directory === WS_L).at(-1);
+const s69SpawnPrompt = prompts.filter(prompt => prompt.sessionID === s69Spawn?.id).at(-1);
+expect(
+  'S69 the spawned session is told to write the [handoff] line in its own reply',
+  Boolean(s69SpawnPrompt) &&
+    s69SpawnPrompt.text.includes('最后一条回复') &&
+    s69SpawnPrompt.text.includes(`[handoff] DONE ${s69PullBid}`) &&
+    !s69SpawnPrompt.text.includes(`collab_send {target:"${PROTECTED_REQ}"`),
+  s69SpawnPrompt?.text?.replace(/\s+/g, ' ').slice(0, 400)
+);
+expect(
+  'S69 the pull takeover prompt keeps ①③ and stays queue',
+  Boolean(s69SpawnPrompt) &&
+    s69SpawnPrompt.text.includes('①') &&
+    s69SpawnPrompt.text.includes('③') &&
+    s69SpawnPrompt.delivery === 'queue',
+  s69SpawnPrompt?.delivery
+);
+
+// --- S69b (R1): collab_accept speaks the same language for a pull record.
+const s69Accept = await call('collab_accept', { bid: s69PullBid, confirm: true }, { sessionID: s69Spawn.id, agent: 'explore' });
+out('S69 collab_accept on a pull record', s69Accept);
+expect(
+  'S69 collab_accept switches to pull wording (no collab_send, in-session line)',
+  s69Accept.includes('最后一条回复') && !s69Accept.includes(`collab_send {target:"${PROTECTED_REQ}"`),
+  s69Accept.split('\n').slice(-3).join(' | ')
+);
+
+// --- S69c (R4): a non-protected requester is untouched (push text + field).
+const s69Push = await call('collab_broadcast', { workspace: WS_M, issuePath: ISSUE_M, confirm: true }, {
+  sessionID: 'ses_req',
+  agent: 'build'
+});
+out('S69 broadcast from a normal requester (ask path)', s69Push);
+const s69PushBid = bidOf(s69Push);
+const s69PushRec = bcRead(s69PushBid);
+expect(
+  'S69 a non-protected requester stays push',
+  s69PushRec.receiptMode !== 'pull',
+  JSON.stringify({ receiptMode: s69PushRec.receiptMode ?? '(absent)' })
+);
+expect(
+  'S69 … and its text still asks for the collab_send receipt',
+  s69Push.includes(`collab_send {target:"ses_req", text:"[handoff] DONE ${s69PushBid}`),
+  s69Push.split('\n').slice(-4).join(' | ')
+);
+
+// --- S69d (R2): bounded reply — three conditions, then fail-closed for the rest.
+const s69N = await call('collab_broadcast', { workspace: WS_N, issuePath: ISSUE_N, confirm: true }, protectedCtx);
+const s69NBid = bidOf(s69N);
+const s69NSpawn = created.filter(info => info.location?.directory === WS_N).at(-1);
+const s69NRec = bcRead(s69NBid);
+out('S69 pull record used for the reply whitelist', JSON.stringify({
+  bid: s69NBid,
+  from: s69NRec.from?.sid,
+  claimBy: s69NRec.claim?.by,
+  receiptMode: s69NRec.receiptMode,
+  state: s69NRec.state
+}));
+expect(
+  "S69 the whitelist fixture really is \"this bid's requester + its claimant\"",
+  s69NRec.from?.sid === PROTECTED_REQ && s69NRec.claim?.by === s69NSpawn?.id && s69NRec.receiptMode === 'pull',
+  `${s69NRec.from?.sid} / ${s69NRec.claim?.by} / ${s69NRec.receiptMode}`
+);
+const s69Allowed = await call(
+  'collab_send',
+  { target: PROTECTED_REQ, kind: 'reply', mode: 'steer', text: `[handoff] DONE ${s69NBid} 已按提案改好`, confirm: true },
+  { sessionID: s69NSpawn.id, agent: 'build' }
+);
+out('S69 bounded reply from the claimant (allowed)', s69Allowed);
+expect(
+  'S69 the claimant\'s kind=reply receipt is delivered to the protected requester',
+  s69Allowed.includes('已投递') && s69Allowed.includes('白名单放行'),
+  s69Allowed.split('\n')[0]
+);
+expect(
+  'S69 … forced to queue even when steer was asked for',
+  prompts.at(-1).delivery === 'queue',
+  prompts.at(-1).delivery
+);
+expect(
+  'S69 … and it does not touch the record (applyReceipt owns the state)',
+  bcRead(s69NBid).state === 'claimed',
+  bcRead(s69NBid).state
+);
+const s69BidArg = await call(
+  'collab_send',
+  { target: PROTECTED_REQ, kind: 'reply', bid: s69NBid, text: '已收到，按提案完成', confirm: true },
+  { sessionID: s69NSpawn.id, agent: 'build' }
+);
+expect(
+  'S69 an explicit `bid` authorizes the bounded reply without a [handoff] line in the body',
+  s69BidArg.includes('已投递') && s69BidArg.includes('白名单放行'),
+  s69BidArg.split('\n')[0]
+);
+await expectFail(
+  'S69 a bystander (not the claimant) cannot reply to the protected requester',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'reply', text: `[handoff] DONE ${s69NBid} 伪造`, confirm: true },
+      { sessionID: 'ses_aaa', agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S69 another protected session is not this bid\'s requester → refused',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_OTHER, kind: 'reply', text: `[handoff] DONE ${s69NBid} 换个目标`, confirm: true },
+      { sessionID: s69NSpawn.id, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S69 a foreign bid (no record ties target + claimant) → refused',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'reply', text: '[handoff] DONE b_bbbb000000000000 别人的单', confirm: true },
+      { sessionID: s69NSpawn.id, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S69 request to the protected requester stays fail-closed',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, text: `[handoff] DONE ${s69NBid} 当成请求`, confirm: true },
+      { sessionID: s69NSpawn.id, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S69 note to the protected requester stays fail-closed',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'note', text: `[handoff] DONE ${s69NBid} 当成通知`, confirm: true },
+      { sessionID: s69NSpawn.id, agent: 'build' }
+    ),
+  /protect 名单/
+);
+const s69Thread = 't_pull_whitelist';
+store.set(`collab/threads/${s69Thread}`, {
+  threadID: s69Thread,
+  fromSession: PROTECTED_REQ,
+  toSession: s69NSpawn.id,
+  kind: 'request',
+  status: 'open',
+  msgs: [
+    {
+      cid: 'c_pull_0001',
+      kind: 'request',
+      text: 'pull 模式请求',
+      ts: nowMs,
+      from: PROTECTED_REQ,
+      fromSession: PROTECTED_REQ,
+      toSession: s69NSpawn.id
+    }
+  ],
+  createdAt: nowMs,
+  updatedAt: nowMs
+});
+const s69Reply = await call(
+  'collab_reply',
+  { threadID: s69Thread, text: `[handoff] DONE ${s69NBid} 收口`, confirm: true },
+  { sessionID: s69NSpawn.id, agent: 'build' }
+);
+out('S69 collab_reply on a thread whose counterpart is protected', s69Reply);
+expect(
+  'S69 collab_reply is whitelisted by the same rule',
+  s69Reply.includes('已投递') && s69Reply.includes('白名单放行'),
+  s69Reply.split('\n')[0]
+);
+
+// --- S69e (R4 / R1): the claimant's own answer closes the pull hand-off after the lease.
+contexts.set(s69NSpawn.id, [assistantMessage(`[handoff] DONE ${s69NBid} 已按提案改好`, nowMs + 5)]);
+const s69Lapsed = bcRead(s69NBid);
+writeRaw(s69NBid, {
+  ...s69Lapsed,
+  claim: { ...s69Lapsed.claim, at: nowMs - 301_000 },
+  updatedAt: nowMs - 301_000
+});
+await call('collab_broadcast', { workspace: WS_N, issuePath: ISSUE_N, confirm: true }, protectedCtx);
+const s69Closed = bcRead(s69NBid);
+expect(
+  'S69 pull 提取：the requester extracts `[handoff] DONE` from the claimant\'s last answer → done',
+  s69Closed.state === 'done' && s69Closed.receipt?.auto === true,
+  `state=${s69Closed.state} auto=${s69Closed.receipt?.auto}`
+);
+expect(
+  'S69 … receipt points at the claimant and stores only the summary',
+  s69Closed.receipt?.by === s69NSpawn.id && String(s69Closed.receipt?.note ?? '').includes('改好'),
+  JSON.stringify(s69Closed.receipt)
+);
+
+// --- S69f (R3): the "not closed" reminder explains the pull path.
+const s69ReminderBid = 'b_aaaa0000000000c9';
+writeRaw(s69ReminderBid, {
+  workspace: WS_A,
+  state: 'expired',
+  attempts: 4,
+  receiptMode: 'pull',
+  from: { sid: 'ses_req' }
+});
+const s69ReminderEvent = contextEvent('ses_req');
+await hooks.context(s69ReminderEvent);
+const s69ReminderText = textOf(s69ReminderEvent);
+out('S69 reminder for a pull hand-off', s69ReminderText);
+expect(
+  'S69 the pull reminder says no pushed receipt is expected (extraction instead)',
+  s69ReminderText.includes('无需等待推送回执') && s69ReminderText.includes('只读提取'),
+  s69ReminderText.slice(0, 400)
+);
+const s69PushReminderBid = 'b_aaaa0000000000ca';
+writeRaw(s69PushReminderBid, { workspace: WS_A, state: 'expired', attempts: 4, from: { sid: 'ses_req' } });
+const s69PushReminderEvent = contextEvent('ses_req');
+await hooks.context(s69PushReminderEvent);
+const s69PushReminderText = textOf(s69PushReminderEvent);
+expect(
+  'S69 a push reminder still points at collab_inbox',
+  s69PushReminderText.includes('collab_inbox 看回执') && !s69PushReminderText.includes('无需等待推送回执'),
+  s69PushReminderText.slice(0, 400)
+);
+
+// ================================ S70 (R7: extraction covers every claim kind)
+// `11-18-collab-protected-receipt` R7: `refresh()` used to extract a verdict only
+// for `claim.kind = spawn`, so an `accept` / `handoff` claim that never got a
+// pushed receipt stayed open until a human noticed (实例 `b_26325553fb615e57`).
+// Now every claim kind is closed from the claimant's own last answer once the
+// lease lapses — still: only the requester may trigger it (H2) and a protected
+// claimant is never read (R3). The blocked word list also learned the real
+// phrasings ("回执被硬拒 / 无法投递 / 改回写提案 / 已自愈").
+const S70_LAPSED_AT = nowMs - 301_000;
+/** A `claimed`, lease-lapsed WS_A record of the given claim kind. */
+const s70Claim = (bid, claim) =>
+  writeRaw(bid, {
+    workspace: WS_A,
+    state: 'claimed',
+    claim: { token: `k_${bid.slice(2, 10)}`, at: S70_LAPSED_AT, leaseMs: 300_000, ...claim }
+  });
+
+// --- S70a: `accept` claim + `[handoff] DONE` in the claimant's answer → done.
+const s70AcceptSid = addSpawnSession('ses_r7_accept');
+const s70AcceptBid = 'b_aaaa0000000000d1';
+contexts.set(s70AcceptSid, [assistantMessage(`[handoff] DONE ${s70AcceptBid} 已按提案改好，测试通过`, nowMs)]);
+s70Claim(s70AcceptBid, { by: s70AcceptSid, kind: 'accept' });
+await hooks.context(contextEvent('ses_req')); // the requester triggers the refresh
+const afterR7Accept = bcRead(s70AcceptBid);
+out('S70 accept-kind claim after the requester refresh', JSON.stringify(afterR7Accept.receipt ?? null));
+expect(
+  'S70 an accept-kind claim is closed from the claimant answer (R7)',
+  afterR7Accept.state === 'done' &&
+    afterR7Accept.receipt?.auto === true &&
+    afterR7Accept.receipt?.by === s70AcceptSid &&
+    afterR7Accept.attempts === 0,
+  JSON.stringify({ state: afterR7Accept.state, attempts: afterR7Accept.attempts, receipt: afterR7Accept.receipt })
+);
+
+// --- S70b: `handoff` claim + 「回执被硬拒 / 改回写提案」 → blocked (R7 words).
+const s70HandoffSid = addSpawnSession('ses_r7_handoff');
+const s70HandoffBid = 'b_aaaa0000000000d2';
+contexts.set(s70HandoffSid, [
+  assistantMessage('回执被硬拒、无法投递到发起方；已改回写提案 docs/issues/fix-x.md，不再改代码。', nowMs)
+]);
+s70Claim(s70HandoffBid, { by: s70HandoffSid, kind: 'handoff', threadID: 't_r7_handoff' });
+await hooks.context(contextEvent('ses_req'));
+const afterR7Handoff = bcRead(s70HandoffBid);
+out('S70 handoff-kind claim after the requester refresh', JSON.stringify(afterR7Handoff.receipt ?? null));
+expect(
+  'S70 a handoff-kind claim is closed as blocked from 「回执被硬拒 / 改回写提案」 (R7)',
+  afterR7Handoff.state === 'blocked' &&
+    afterR7Handoff.receipt?.auto === true &&
+    String(afterR7Handoff.receipt?.note ?? '').includes('改回写提案'),
+  JSON.stringify({ state: afterR7Handoff.state, note: afterR7Handoff.receipt?.note })
+);
+
+// --- S70c: no conclusion → the unchanged reopen path (attempts+1, claimant skipped).
+const s70QuietSid = addSpawnSession('ses_r7_quiet');
+const s70QuietBid = 'b_aaaa0000000000d3';
+contexts.set(s70QuietSid, [assistantMessage('我核对了一遍调用点，细节见上面的分析。', nowMs)]);
+s70Claim(s70QuietBid, { by: s70QuietSid, kind: 'accept' });
+await hooks.context(contextEvent('ses_req'));
+const afterR7Quiet = bcRead(s70QuietBid);
+expect(
+  'S70 no verdict keeps the old reopen path for accept/handoff claims too',
+  afterR7Quiet.state === 'open' &&
+    afterR7Quiet.attempts === 1 &&
+    afterR7Quiet.skipped.includes(s70QuietSid) &&
+    !afterR7Quiet.receipt,
+  JSON.stringify({ state: afterR7Quiet.state, attempts: afterR7Quiet.attempts, receipt: afterR7Quiet.receipt })
+);
+
+// --- S70d: a protected claimant is never read, never closed (R3).
+const s70ProtSid = 'ses_e1eb91cebffeTv1467ubJLKebk';
+const s70ProtBid = 'b_aaaa0000000000d4';
+contexts.set(s70ProtSid, [assistantMessage(`[handoff] DONE ${s70ProtBid} 已处理`, nowMs)]);
+s70Claim(s70ProtBid, { by: s70ProtSid, kind: 'accept' });
+const s70RealContext = ctx.session.context;
+let s70ProtectedReads = 0;
+ctx.session.context = async (input = {}) => {
+  if (input.sessionID === s70ProtSid) s70ProtectedReads += 1;
+  return s70RealContext(input);
+};
+await hooks.context(contextEvent('ses_req'));
+ctx.session.context = s70RealContext;
+const afterR7Prot = bcRead(s70ProtBid);
+expect(
+  'S70 a protected claimant is never read (R3)',
+  s70ProtectedReads === 0,
+  `${s70ProtectedReads} read(s)`
+);
+expect(
+  'S70 … and the hand-off is not auto-closed',
+  afterR7Prot.state === 'open' && afterR7Prot.attempts === 1 && !afterR7Prot.receipt,
+  JSON.stringify({ state: afterR7Prot.state, attempts: afterR7Prot.attempts, receipt: afterR7Prot.receipt })
+);
+
+// --- S70e: only the requester may trigger the extraction (H2).
+const s70BystanderSid = addSpawnSession('ses_r7_bystander');
+const s70BystanderBid = 'b_aaaa0000000000d5';
+contexts.set(s70BystanderSid, [assistantMessage(`[handoff] DONE ${s70BystanderBid} 已修好`, nowMs)]);
+s70Claim(s70BystanderBid, { by: s70BystanderSid, kind: 'accept' });
+await hooks.context(contextEvent('ses_a_target')); // a bystander of the same workspace
+const afterR7Bystander = bcRead(s70BystanderBid);
+expect(
+  "S70 a bystander's refresh never closes it (H2)",
+  afterR7Bystander.state === 'open' &&
+    afterR7Bystander.attempts === 1 &&
+    !afterR7Bystander.receipt &&
+    afterR7Bystander.skipped.includes(s70BystanderSid),
+  JSON.stringify({ state: afterR7Bystander.state, attempts: afterR7Bystander.attempts, receipt: afterR7Bystander.receipt })
+);
+
+// ==================== S71 (R8: a silent `acked` hand-off is extracted after 2h)
+// `refreshBroadcast` only reopens `claimed`, so an `acked` hand-off whose receipt
+// never arrived stayed `acked` forever (实例 `b_bdae848832cd51fb`). R8 lets the
+// requester read the claimant's last answer once the claim has been silent for
+// `ACKED_EXTRACT_MS` (2h): same verdict rules, same H2/R3 guards, and a read that
+// finds nothing leaves the record untouched (only `staleNoticedAt`, at most one
+// read per window).
+const S71_CLAIM_AT = nowMs - 121 * 60_000; // 2h01m of silence
+/** An `acked` WS_A record of the given age (ms before now). */
+const s71Acked = (bid, { by, kind = 'accept', ageMs = 121 * 60_000 }) =>
+  writeRaw(bid, {
+    workspace: WS_A,
+    state: 'acked',
+    ackedAt: nowMs - ageMs,
+    claim: { by, kind, token: `k_${bid.slice(2, 10)}`, at: nowMs - ageMs, leaseMs: 300_000 }
+  });
+
+// --- S71a: silent acked + a real receipt line in the claimant's answer → done.
+const s71DoneSid = addSpawnSession('ses_r8_done');
+const s71DoneBid = 'b_aaaa0000000000e1';
+contexts.set(s71DoneSid, [assistantMessage(`[handoff] DONE ${s71DoneBid} 已按提案改好`, nowMs)]);
+s71Acked(s71DoneBid, { by: s71DoneSid });
+await hooks.context(contextEvent('ses_req'));
+const afterR8Done = bcRead(s71DoneBid);
+out('S71 silent acked hand-off after the requester refresh', JSON.stringify(afterR8Done.receipt ?? null));
+expect(
+  'S71 an acked hand-off silent for 2h+ is closed from the claimant answer (R8)',
+  afterR8Done.state === 'done' &&
+    afterR8Done.receipt?.auto === true &&
+    afterR8Done.receipt?.by === s71DoneSid &&
+    afterR8Done.attempts === 0,
+  JSON.stringify({ state: afterR8Done.state, attempts: afterR8Done.attempts, receipt: afterR8Done.receipt })
+);
+
+// --- S71b: silent acked + no conclusion → unchanged, one read per window.
+const s71QuietSid = addSpawnSession('ses_r8_quiet');
+const s71QuietBid = 'b_aaaa0000000000e2';
+contexts.set(s71QuietSid, [assistantMessage('我核对了一遍调用点，细节见上面的分析。', nowMs)]);
+s71Acked(s71QuietBid, { by: s71QuietSid });
+const r8RealContext = ctx.session.context;
+let r8QuietReads = 0;
+ctx.session.context = async (input = {}) => {
+  if (input.sessionID === s71QuietSid) r8QuietReads += 1;
+  return r8RealContext(input);
+};
+await hooks.context(contextEvent('ses_req'));
+const afterR8Quiet = bcRead(s71QuietBid);
+await hooks.context(contextEvent('ses_req')); // second refresh inside the window
+ctx.session.context = r8RealContext;
+const afterR8Quiet2 = bcRead(s71QuietBid);
+expect(
+  'S71 no verdict keeps the acked state (no downgrade, no attempts++)',
+  afterR8Quiet.state === 'acked' && afterR8Quiet.attempts === 0 && !afterR8Quiet.receipt,
+  JSON.stringify({ state: afterR8Quiet.state, attempts: afterR8Quiet.attempts, receipt: afterR8Quiet.receipt })
+);
+expect(
+  'S71 … and stamps staleNoticedAt so the next window alone re-reads',
+  Number(afterR8Quiet2.staleNoticedAt) > 0 && r8QuietReads === 1,
+  `staleNoticedAt=${afterR8Quiet2.staleNoticedAt} reads=${r8QuietReads}`
+);
+
+// --- S71c: acked for only 1h (claimant may still be working) → never read.
+const s71FreshSid = addSpawnSession('ses_r8_fresh');
+const s71FreshBid = 'b_aaaa0000000000e3';
+contexts.set(s71FreshSid, [assistantMessage(`[handoff] DONE ${s71FreshBid} 已按提案改好`, nowMs)]);
+s71Acked(s71FreshBid, { by: s71FreshSid, ageMs: 60 * 60_000 });
+await hooks.context(contextEvent('ses_req'));
+const afterR8Fresh = bcRead(s71FreshBid);
+expect(
+  'S71 an acked hand-off younger than 2h is never read or closed (R8)',
+  afterR8Fresh.state === 'acked' &&
+    afterR8Fresh.attempts === 0 &&
+    !afterR8Fresh.receipt &&
+    !afterR8Fresh.staleNoticedAt,
+  JSON.stringify({ state: afterR8Fresh.state, attempts: afterR8Fresh.attempts, staleNoticedAt: afterR8Fresh.staleNoticedAt })
+);
+
+// --- S71d: only the requester may trigger the acked read (H2).
+const s71BystanderSid = addSpawnSession('ses_r8_bystander');
+const s71BystanderBid = 'b_aaaa0000000000e4';
+contexts.set(s71BystanderSid, [assistantMessage(`[handoff] DONE ${s71BystanderBid} 已修好`, nowMs)]);
+s71Acked(s71BystanderBid, { by: s71BystanderSid });
+await hooks.context(contextEvent('ses_a_target')); // bystander of the same workspace
+const afterR8Bystander = bcRead(s71BystanderBid);
+expect(
+  "S71 a bystander's refresh never reads or closes a silent acked hand-off (H2)",
+  afterR8Bystander.state === 'acked' && !afterR8Bystander.receipt && !afterR8Bystander.staleNoticedAt,
+  JSON.stringify({ state: afterR8Bystander.state, staleNoticedAt: afterR8Bystander.staleNoticedAt })
+);
+
+// --- S71e: a protected claimant is never read (R3).
+const s71ProtSid = 'ses_e1eb91cebffeTv1467ubJLKebk';
+const s71ProtBid = 'b_aaaa0000000000e5';
+contexts.set(s71ProtSid, [assistantMessage(`[handoff] DONE ${s71ProtBid} 已处理`, nowMs)]);
+s71Acked(s71ProtBid, { by: s71ProtSid });
+let r8ProtectedReads = 0;
+ctx.session.context = async (input = {}) => {
+  if (input.sessionID === s71ProtSid) r8ProtectedReads += 1;
+  return r8RealContext(input);
+};
+await hooks.context(contextEvent('ses_req'));
+ctx.session.context = r8RealContext;
+const afterR8Prot = bcRead(s71ProtBid);
+expect(
+  'S71 a protected claimant is never read for a silent acked hand-off (R3)',
+  r8ProtectedReads === 0 && afterR8Prot.state === 'acked' && !afterR8Prot.receipt,
+  `reads=${r8ProtectedReads} state=${afterR8Prot.state}`
+);
+
+// --- S71f: a decided record never re-opens the whitelist (review hardening).
+const s71DoneBid2 = 'b_aaaa0000000000e6';
+const s71DoneSid2 = addSpawnSession('ses_r8_done_reply');
+writeRaw(s71DoneBid2, {
+  workspace: WS_A,
+  state: 'done',
+  ackedAt: nowMs - 3 * 60 * 60_000,
+  claim: { by: s71DoneSid2, kind: 'accept', token: 'k_r8_done_reply', at: nowMs - 3 * 60 * 60_000, leaseMs: 300_000 },
+  receipt: { from: s71DoneSid2, by: s71DoneSid2, at: nowMs - 2 * 60 * 60_000, note: '已改好', auto: true }
+});
+const s71DoneReply = await expectFail(
+  'S71 a decided bid no longer authorizes a reply into the protected requester',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'reply', bid: s71DoneBid2, text: '[handoff] DONE 再说一句', confirm: true },
+      { sessionID: s71DoneSid2, agent: 'build' }
+    ),
+  /protect 名单/
+);
+expect(
+  'S71 … and the rejection is the plain lineage guard (no whitelist bypass)',
+  s71DoneReply.includes('拒绝投递'),
+  s71DoneReply
+);
+
+// --- S71g: an `acked` record without `claim.at` is never read (review hardening).
+const s71NoAtSid = addSpawnSession('ses_r8_no_at');
+const s71NoAtBid = 'b_aaaa0000000000e7';
+contexts.set(s71NoAtSid, [assistantMessage(`[handoff] DONE ${s71NoAtBid} 很久以前的结论`, nowMs)]);
+writeRaw(s71NoAtBid, {
+  workspace: WS_A,
+  state: 'acked',
+  ackedAt: nowMs - 5 * 60 * 60_000,
+  claim: { by: s71NoAtSid, kind: 'accept', token: 'k_r8_no_at', leaseMs: 300_000 }
+});
+let r8NoAtReads = 0;
+ctx.session.context = async (input = {}) => {
+  if (input.sessionID === s71NoAtSid) r8NoAtReads += 1;
+  return r8RealContext(input);
+};
+await hooks.context(contextEvent('ses_req'));
+ctx.session.context = r8RealContext;
+const afterR8NoAt = bcRead(s71NoAtBid);
+expect(
+  'S71 an acked record without claim.at is never extracted (0 reads, state untouched)',
+  r8NoAtReads === 0 &&
+    afterR8NoAt.state === 'acked' &&
+    afterR8NoAt.attempts === 0 &&
+    !afterR8NoAt.receipt &&
+    !afterR8NoAt.staleNoticedAt,
+  `reads=${r8NoAtReads} state=${afterR8NoAt.state} staleNoticedAt=${afterR8NoAt.staleNoticedAt}`
 );
 
 const failed = checks.filter(check => !check.ok);

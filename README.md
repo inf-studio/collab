@@ -124,6 +124,16 @@ pnpm test          # build + 279 项 harness + 12 项只读默认
 `skills/collab/SKILL.md` — 按需加载：工具速查、交接模板、权限/升级、排障清单。
 本机安装：`ln -s "$PWD/skills/collab" ~/.config/opencode/skills/collab`。
 
+## 遇到异常（缺陷上报）
+
+协作异常（护栏冲突、状态机死角、投递失败）会让交接静默挂起。请**保留现场并上报**：
+
+- 错误原文 + `bid`/`threadID` + 工具参数（正文可脱敏）
+- `collab_list` 输出（`state/attempts/lease`）
+- 写入 `~/.config/opencode/collab-reports/`，并（若配置了 `report.to`）用 `collab_send` 通知维护方
+
+> `0.1.3` 起插件将自动收集并落盘证据；详见 `skills/collab/SKILL.md` §六点五。
+
 ## 许可
 
 MPL-2.0

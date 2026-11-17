@@ -105,6 +105,23 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 4. 跨工作区只写 `docs/issues/**`；对端 git 一律只读。
 5. 一次交接只发一条；超时只提醒一次，不重投。
 
+## 六点五、遇到异常怎么办（缺陷上报）
+
+协作失败**不要静默重试或放弃**。按下面做，把现场留给维护方：
+
+1. **保留原文**：错误文案、`bid` / `threadID`、你调用的工具与参数（可脱敏正文）。
+2. **记录状态**：`collab_list` 的输出（含 `state/attempts/lease`）。
+3. **写到上报目录**（本机，随插件版本走）：
+   ```bash
+   mkdir -p ~/.config/opencode/collab-reports
+   # 把上面的信息贴进一个文件，文件名带时间与 bid
+   ```
+4. **通知维护方**（若已配置 `report.to` 别名）：
+   `collab_send { target:"<alias>", text:"[defect] <一句话> bid=<bid> 证据=<路径>", confirm:true }`
+5. 已知的「不是缺陷」：参数校验错误、对端不跑、目标在 protect 内（受保护回执见 pull 模式）。
+
+> 0.1.3 起插件会自动收集证据并落盘；在此之前请按上面手工上报。
+
 ## 七、安装与升级
 
 ```bash

@@ -79,6 +79,13 @@ export const BROADCAST_DIR =
 export const BCAST_THRESHOLD = 80;
 /** Ask lease: a `claimed` hand-off reopens after this. */
 export const BCAST_LEASE_MS = 300_000;
+/**
+ * R8: an `acked` hand-off has no lease (`refreshBroadcast` only reopens
+ * `claimed`), so a lost receipt used to keep it `acked` forever. After this much
+ * silence the requester may read the claimant's last answer — exactly the same
+ * read-only extraction as the `claimed` path, and at most once per window.
+ */
+export const ACKED_EXTRACT_MS = 2 * 60 * 60 * 1000;
 /** `attempts > BCAST_MAX_ATTEMPTS` → `expired`, escalate to a human. */
 export const BCAST_MAX_ATTEMPTS = 3;
 /** A candidate busy for longer than this gets a wake-up prompt and -10 points. */

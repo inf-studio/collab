@@ -238,6 +238,21 @@ export interface BroadcastRecord {
   declines?: Array<{ sid: string; at: number }>;
   attempts?: number;
   from?: { sid?: string; directory?: string };
+  /**
+   * R8: last time the requester looked at an `acked` claimant's answer and found
+   * no verdict. Stamped so a reminder-less refresh does not re-read the
+   * counterpart's history every single turn; cleared by nothing else.
+   */
+  staleNoticedAt?: number;
+  /**
+   * How the receiving side reports back:
+   *   `push` (default, absent on old records) — `collab_send` a `[handoff]`
+   *   receipt to the requester;
+   *   `pull` — the requester is on the protect list, so nothing can be pushed
+   *   to it: the claimant writes the `[handoff]` line in its own last answer and
+   *   the requester extracts it once the lease lapses.
+   */
+  receiptMode?: 'push' | 'pull';
   receipt?: { from?: string; by?: string; at?: number; note?: string; auto?: boolean };
   createdAt?: number;
   updatedAt?: number;

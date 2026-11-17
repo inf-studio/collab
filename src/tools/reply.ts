@@ -1,6 +1,6 @@
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
 import type { ToolDefinition } from '../types.ts';
-import { jsonInput } from './shared.ts';
+import { canReplyToProtected, jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
 /**
@@ -19,11 +19,18 @@ export function replyTool(kit: ToolKit): ToolDefinition {
       'Reply on an existing hand-off thread: sugar for collab_send {kind:"reply", threadID} against the ' +
       "thread's counterpart (resolved from storage, so no target is needed). Only a participant of the thread " +
       "may reply. Always delivered with mode=queue, so it never interrupts the requester's running turn. " +
-      'Requires confirm:true; otherwise it only previews.',
+      'A protected counterpart is only reachable as the bounded receipt of the bid it broadcast and the caller ' +
+      'claimed. Requires confirm:true; otherwise it only previews.',
     input: jsonInput({
       properties: {
         threadID: { type: 'string', description: 'Thread to answer (`t_…`), as received in the request.' },
         text: { type: 'string', description: 'Reply body (no prefix needed; it is added for you).' },
+        bid: {
+          type: 'string',
+          description:
+            'Bounded receipt only: the `b_…` hand-off this reply closes. Omit to let the body carry it ' +
+            '(`[handoff] DONE b_… <summary>`).'
+        },
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false/omitted only returns the preview.'
@@ -66,7 +73,18 @@ export function replyTool(kit: ToolKit): ToolDefinition {
 
       const { mode, forced } = resolveMode('queue', context?.agent);
       const target = await resolveTarget(counterpart);
-      return dispatch({ context, input, kind: 'reply', threadID, mode, forced, notes, target });
+      // R2: this is a reply by definition; only the bid decides whether the
+      // protect guard may be bypassed (that bid's requester + its claimant).
+      const allowProtectedReply = Boolean(
+        canReplyToProtected({
+          kind: 'reply',
+          target: target.sessionID,
+          sender: me,
+          bid: input?.bid,
+          text: input?.text
+        })
+      );
+      return dispatch({ context, input, kind: 'reply', threadID, mode, forced, notes, target, allowProtectedReply });
     }
   };
 }

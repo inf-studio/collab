@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, BROADCAST_DIR, EXPECTED } from '../constants.ts';
 import { claimLock, persistRefresh, readBroadcast, releaseLock, updateLock, writeBroadcast } from '../core/claim.ts';
 import { grantFile } from '../core/grants.ts';
+import { createLineage } from '../core/lineage.ts';
 import {
   broadcastID,
   normalizeExpected,
@@ -19,7 +20,7 @@ import type { ToolKit } from './shared.ts';
 /** `collab_broadcast` — cross-workspace (peer) hand-off: score, write, ask/spawn. */
 export function broadcastTool(kit: ToolKit): ToolDefinition {
   const { deps, deliverAsk } = kit;
-  const { ctx, chain } = deps;
+  const { ctx, chain, readConfig } = deps;
 
   return {
     name: 'collab_broadcast',
@@ -85,6 +86,15 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         mtimeMs
       });
       const preview = input?.confirm !== true;
+      // R1 (pull): a requester on the protect list can never receive a pushed
+      // receipt — the same lineage guard that protects it refuses the
+      // `collab_send` the takeover text would ask for. Such a hand-off is
+      // `pull`: the claimant writes the `[handoff]` line in its own last answer
+      // and the requester extracts it once the lease lapses (`refresh`).
+      const requesterProtected = Boolean(
+        me && (await createLineage(ctx).protectedAncestor(String(me), readConfig().protect))
+      );
+      const receiptMode: 'push' | 'pull' = requesterProtected ? 'pull' : 'push';
       const head = [
         `bid=${bid}  scope=peer  workspace=${workspace}`,
         `提案: ${issuePath}  标题: "${proposal.title}"  期望: ${expected}`,
@@ -122,7 +132,11 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
                   ? `top-1 ${top?.sid} 已 busy ${Math.round(busy)}min：确认后会补发 1 条叫醒 prompt。`
                   : `已补发 1 条叫醒 prompt → ${top?.sid}（busy ${Math.round(busy)}min）。`
                 : '没有需要补发/重投的动作（只提醒发起方一次，见 SessionStart 注入）。',
-            `回执格式: [handoff] DONE|BLOCKED ${bid} <摘要>（必须由承接方 ${record?.claim?.by ?? 'ses_…'} 发送）`
+            `回执格式: [handoff] DONE|BLOCKED ${bid} <摘要>（${
+              record?.receiptMode === 'pull'
+                ? 'pull 模式：由承接方写在它自己最后一条回复里，租约到期后只读提取；发起方在 protect 名单内，不要 collab_send'
+                : `必须由承接方 ${record?.claim?.by ?? 'ses_…'} 发送`
+            }）`
           ].join('\n')
         };
       }
@@ -240,6 +254,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           reminded: [],
           replies: [],
           from: { sid: me, directory: ctx?.location?.directory },
+          receiptMode,
           createdAt: Date.now()
         };
         // R1: the spawned session lives in *another* workspace, whose
@@ -281,7 +296,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
               : '新会话已创建，但接管请求投递失败（用 collab_send 补发）。',
             // R1: the same three actions the new session was told, so the
             // requester can re-send them verbatim if delivery failed.
-            ...handoffActions({ bid, requester: me, spawn: true }),
+            ...handoffActions({ bid, requester: me, spawn: true, receiptMode }),
             `该会话不会被删除（collab_list 标 [bootstrap]）；对端不动作时，租约到期会只读提取它的结论并自动闭环。`
           ].join('\n')
         };
@@ -310,6 +325,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         reminded: [],
         replies: [],
         from: { sid: me, directory: ctx?.location?.directory },
+        receiptMode,
         createdAt: Date.now()
       });
 
@@ -334,8 +350,11 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
             : `top-1 ${top.sid} → 未投递 prompt：它下一次模型请求会看到群组广播，用 collab_accept {bid:"${bid}"} 领取。`,
           // R1: the receiving side must accept *and* send a receipt; posting the
           // conclusion in its own session is explicitly not "done" (pilot G1).
-          ...handoffActions({ bid, requester: me }),
-          `推辞: collab_send {target:"${me ?? 'ses_…'}", text:"DECLINE ${bid} <理由>", confirm:true}（由被问询的 top-1 发回；不带 bid 且同时有多个问询时不会被采纳）`
+          // In `pull` mode the receipt *is* the in-session conclusion instead.
+          ...handoffActions({ bid, requester: me, receiptMode }),
+          receiptMode === 'pull'
+            ? `推辞: 不领取即可（5 分钟不答自动顺延下一候选；pull 模式没有推送，不需要 DECLINE 回执）`
+            : `推辞: collab_send {target:"${me ?? 'ses_…'}", text:"DECLINE ${bid} <理由>", confirm:true}（由被问询的 top-1 发回；不带 bid 且同时有多个问询时不会被采纳）`
         ].join('\n')
       };
     }

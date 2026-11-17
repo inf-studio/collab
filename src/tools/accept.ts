@@ -1,10 +1,30 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_MAX_ATTEMPTS, BROADCAST_DIR, MAX_STORED } from '../constants.ts';
 import { claimLock, isValidBid, persistRefresh, readBroadcast, releaseLock, writeBroadcast } from '../core/claim.ts';
 import { createLineage } from '../core/lineage.ts';
-import type { JsonObject, ToolDefinition } from '../types.ts';
+import type { BroadcastRecord, JsonObject, ToolDefinition } from '../types.ts';
 import { shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
+
+/**
+ * R1: how the claiming session reports back. `push` = a `collab_send` receipt to
+ * the requester; `pull` (requester on the protect list) = the `[handoff]` line in
+ * its own last answer, which the requester extracts when the lease lapses.
+ */
+function receiptLines(record: BroadcastRecord): string[] {
+  const bid = record.bid;
+  if (record.receiptMode === 'pull') {
+    return [
+      `完成后回执（pull 模式，必写）: 在本会话最后一条回复里写一行 \`[handoff] DONE ${bid} <commit sha 或摘要>\`；`,
+      `   做不了: 写 \`[handoff] BLOCKED ${bid} <原因>\`。发起方 ${record.from?.sid ?? 'ses_…'} 在 protect 名单内，`,
+      '   不要 collab_send——租约到期后它会只读提取你最后一条回复并自动闭环。'
+    ];
+  }
+  return [
+    `完成后回执（必发）: collab_send {target:"${record.from?.sid ?? 'ses_…'}", ` +
+      `text:"[handoff] DONE ${bid} <commit sha 或摘要>", confirm:true}`
+  ];
+}
 
 /**
  * `collab_accept` — atomic claim of a broadcast hand-off (one winner via
@@ -24,7 +44,9 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       "protected line). A session that reports another `location.directory` than the broadcast's workspace is " +
       "refused. A spawned session's own call moves it from `claimed` to `acked`. After claiming, implement and " +
       'report back with `collab_send {target:"<requester sid>", text:"[handoff] DONE <bid> <摘要>", confirm:true}` — ' +
-      'writing the conclusion in your own session is NOT a receipt. Requires confirm:true; otherwise it only previews.',
+      'writing the conclusion in your own session is NOT a receipt. Exception (`receiptMode:"pull"`, requester on ' +
+      'the protect list): that target cannot be written to, so the `[handoff] DONE|BLOCKED <bid> …` line in your ' +
+      'own last answer IS the receipt — the result says so. Requires confirm:true; otherwise it only previews.',
     input: jsonInput({
       properties: {
         bid: {
@@ -108,9 +130,9 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           return {
             content: [
               `你已领取 ${bid}（state=${record.state}，kind=${activeClaim.kind}，token=${activeClaim.token}）。`,
-              // R1 ②: a copy-pasteable receipt — answering in this session is not "done".
-              `完成后回执（必发）: collab_send {target:"${record.from?.sid ?? 'ses_…'}", ` +
-                `text:"[handoff] DONE ${bid} <commit sha 或摘要>", confirm:true}`
+              // R1 ②: a copy-pasteable receipt — answering in this session is not
+              // "done" (push), or *is* the receipt (pull, protected requester).
+              ...receiptLines(record)
             ].join('\n')
           };
         }
@@ -190,8 +212,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           notified.delivered
             ? `已通知发起方 ${record.from?.sid}（message=${notified.message ?? '?'}）。`
             : `未通知发起方：${notified.reason}`,
-          `完成后回执（必发）: collab_send {target:"${record.from?.sid ?? 'ses_…'}", ` +
-            `text:"[handoff] DONE ${bid} <commit sha 或摘要>", confirm:true}`,
+          ...receiptLines(record),
           ...notes.map(note => `注: ${note}`)
         ].join('\n')
       };

@@ -1,5 +1,6 @@
 import type { ConfigReader } from '../config.ts';
 import {
+  ACKED_EXTRACT_MS,
   BCAST_LEASE_MS,
   BCAST_DONE_STATES,
   MAX_STORED,
@@ -297,9 +298,9 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
   }
 
   /**
-   * Lease refresh with the R2 auto-receipt in front of it:
-   *   `claimed` + `claim.kind = spawn` + lease lapsed **+ the caller is the
-   *   requester** → read the spawned session's own answer once. A verdict closes
+   * Lease refresh with the auto-receipt in front of it:
+   *   `claimed` + lease lapsed (any `claim.kind`) **+ the caller is the
+   *   requester** → read the claimant's own answer once. A verdict closes
    *   the hand-off (`done` / `blocked`, receipt with `auto:true` and a
    *   ≤200-char summary) — **no reopen, no `attempts++`, no new session**.
    *   No verdict / unreadable session → the unchanged `refreshBroadcast` path.
@@ -309,6 +310,19 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * counterpart's answer; a same-workspace bystander or a session of another
    * workspace only gets the old lease logic — it must never read the
    * counterpart's body or flip the bid.
+   *
+   * R7: the read is not limited to `claim.kind = spawn` any more. `accept`
+   * (a member that claimed it itself) and `handoff` (a local thread hand-off)
+   * used to be left to a pushed receipt forever; both are closed from the
+   * claimant's own answer the same way once the lease lapses, so a lost receipt
+   * cannot keep a hand-off open for hours.
+   *
+   * R8: an `acked` hand-off has **no** lease at all, so it used to stay there
+   * forever when the receipt never arrived. After `ACKED_EXTRACT_MS` of silence
+   * the same read is allowed (requester only, never a protected claimant). A
+   * read that finds no verdict leaves the state untouched — no downgrade, no
+   * `attempts++` — and only stamps `staleNoticedAt`, so the retry happens at
+   * most once per window instead of on every single refresh.
    *
    * The returned record is *not* written: callers keep using `persistRefresh`,
    * which sees the state change and writes it once.
@@ -321,22 +335,41 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     if (!record) return record;
     const current = normalizeBroadcast(record);
     const claim = asObject(current.claim);
-    const lapsed =
+    const claimAt = Number(claim.at || 0);
+    // `lapsed` already requires `claim.by`; R7 drops the old `claim.kind`
+    // filter (spawn / accept / handoff all qualify).
+    const lapsedClaim =
       current.state === 'claimed' &&
       Boolean(claim.by) &&
-      now - Number(claim.at || 0) > (Number(claim.leaseMs) || BCAST_LEASE_MS);
-    if (!lapsed || claim.kind !== 'spawn' || !current.from?.sid) return refreshBroadcast(record, now);
+      now - claimAt > (Number(claim.leaseMs) || BCAST_LEASE_MS);
+    // R8: `acked` is not a lease state, so silence is measured against a fixed
+    // 2-hour window; a fresh `acked` claim (the claimant may still be working)
+    // is never read. `claimAt > 0` is required: a record without `claim.at`
+    // would make `now - 0` look infinitely stale and `since: 0` would treat an
+    // ancient answer as the verdict.
+    const staleAcked =
+      current.state === 'acked' && Boolean(claim.by) && claimAt > 0 && now - claimAt > ACKED_EXTRACT_MS;
+    if ((!lapsedClaim && !staleAcked) || !current.from?.sid || !claim.by) return refreshBroadcast(record, now);
     // H2: the requester is the only actor allowed to close from the answer.
     if (!actor || String(actor) !== String(current.from.sid)) return refreshBroadcast(record, now);
     // R3: `[protected*]` sessions never participate — no read, old logic only.
     if (await createLineage(ctx).protectedAncestor(String(claim.by), readConfig().protect)) {
       return refreshBroadcast(record, now);
     }
+    // R8: one read per window; between reads there is nothing new to extract.
+    if (staleAcked && Number(current.staleNoticedAt ?? 0) && now - Number(current.staleNoticedAt) < ACKED_EXTRACT_MS) {
+      return refreshBroadcast(record, now);
+    }
     const verdict = await extractVerdict(String(claim.by), {
-      since: Number(claim.at || 0),
+      since: claimAt,
       bid: current.bid
     });
-    if (!verdict) return refreshBroadcast(record, now);
+    if (!verdict) {
+      if (!staleAcked) return refreshBroadcast(record, now);
+      // No conclusion: leave the hand-off exactly as it is (`acked`, same
+      // attempts) and only remember that this window has been checked.
+      return { ...current, staleNoticedAt: now };
+    }
     const sid = String(claim.by);
     releaseLock(current.bid, [sid, String(claim.spawner ?? '')]);
     return {
@@ -424,7 +457,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
               ` 发起方=${requester || '(缺失，用 collab_inbox 查)'} → ${handoffActions({
                 bid: record.bid,
                 requester,
-                leaseMin
+                leaseMin,
+                // R1 (pull): a protected requester cannot receive a pushed
+                // receipt, so the ask line must not demand one.
+                receiptMode: record.receiptMode === 'pull' ? 'pull' : 'push'
               }).join(' ')}`
           );
           writeBroadcast({
@@ -454,10 +490,17 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       const stale = record.state === 'expired' || now - claimAt > BCAST_LEASE_MS;
       if (!stale) continue;
       const who = record.claim?.by ? ` 接手 ${record.claim.by}` : '';
+      // R3: a `pull` hand-off closes from the claimant's own answer, so there is
+      // no pushed receipt to wait for — say that instead of pointing at
+      // `collab_inbox` (which will never carry one).
+      const pull = record.receiptMode === 'pull';
       lines.push(
-        `- 交接未闭环 ${record.bid}：${truncate(record.title ?? '(untitled)', 60)} state=${record.state}${who} 自 ${fmtTime(claimAt)} 起 → 用 collab_inbox 看回执；回执格式 [handoff] DONE|BLOCKED <${record.bid}> <摘要>。${
-          record.state === 'expired' ? ' attempts 已超限，需人接手。' : ''
-        }`
+        `- 交接未闭环 ${record.bid}：${truncate(record.title ?? '(untitled)', 60)} state=${record.state}${who} 自 ${fmtTime(claimAt)} 起 → ${
+          pull
+            ? `pull 模式（发起方在 protect 名单内）：无需等待推送回执，租约到期后会只读提取承接方的最后一条回复` +
+              `（其中应有 [handoff] DONE|BLOCKED <${record.bid}> <摘要>）。`
+            : `用 collab_inbox 看回执；回执格式 [handoff] DONE|BLOCKED <${record.bid}> <摘要>。`
+        }${record.state === 'expired' ? ' attempts 已超限，需人接手。' : ''}`
       );
       writeBroadcast({ ...record, reminded: dedupe([...(record.reminded ?? []), sessionID]) });
     }

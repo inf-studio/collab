@@ -1,7 +1,7 @@
 import { KINDS } from '../constants.ts';
 import { isValidThreadID, newThreadID, normalizeKind, normalizeThreadID } from '../ids.ts';
 import type { ToolDefinition } from '../types.ts';
-import { jsonInput } from './shared.ts';
+import { canReplyToProtected, jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
 /**
@@ -22,11 +22,19 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       'interrupts the turn it is running; `steer` must be explicit and is forced back to `queue` for read-only ' +
       'agents (explore/plan). Body is prefixed `[collab:<from>][<kind>:<threadID>] `. Requires confirm:true — ' +
       'with confirm:false it only previews. Targets in the `protect` list — and any descendant of one — are ' +
-      "refused; a kind=reply must target the thread's counterpart and only a participant may send it.",
+      "refused; a kind=reply must target the thread's counterpart and only a participant may send it. " +
+      'One exception: a bounded receipt — kind=reply naming (in `bid` or the body) a hand-off that the ' +
+      'protected target itself broadcast and the caller claimed — is queued through as the hand-off receipt.',
     input: jsonInput({
       properties: {
         target: { type: 'string', description: 'Session id (`ses_…`) or an alias from collab.json.' },
         text: { type: 'string', description: 'Message body (no prefix needed; it is added for you).' },
+        bid: {
+          type: 'string',
+          description:
+            'Bounded receipt only: the `b_…` hand-off this message closes. Omit to let the body carry it ' +
+            '(`[handoff] DONE b_… <summary>`). Never needed for a normal request/note.'
+        },
         kind: {
           type: 'string',
           enum: KINDS,
@@ -57,7 +65,10 @@ export function sendTool(kit: ToolKit): ToolDefinition {
     async execute(input, context) {
       const notes: string[] = [];
       const me = context?.sessionID;
-      let kind = normalizeKind(input?.kind);
+      // R2: the *requested* kind decides whether a bounded receipt applies; the
+      // reply-without-threadID downgrade below must not hide it.
+      const requestedKind = normalizeKind(input?.kind);
+      let kind = requestedKind;
       let threadID = normalizeThreadID(input?.threadID);
 
       if (threadID && !isValidThreadID(threadID)) {
@@ -101,7 +112,18 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             mode,
             forced,
             notes,
-            target: resolved
+            target: resolved,
+            // R2: only a bounded receipt (this bid's requester + its claimant,
+            // kind=reply) gets through the protect guard.
+            allowProtectedReply: Boolean(
+              canReplyToProtected({
+                kind,
+                target: resolved.sessionID,
+                sender: me,
+                bid: input?.bid,
+                text: input?.text
+              })
+            )
           });
         }
       }
@@ -109,7 +131,33 @@ export function sendTool(kit: ToolKit): ToolDefinition {
 
       const { mode, forced } = resolveMode(input?.mode, context?.agent);
       const target = await resolveTarget(input?.target);
-      return dispatch({ context, input, kind, threadID, mode, forced, notes, target });
+      // R2: a protected requester still gets the receipt of the very bid it
+      // broadcast — as a `kind:reply` from that bid's own claimant, with a fresh
+      // thread. Without this the downgrade above would turn the receipt into a
+      // `request`, which must stay fail-closed.
+      const boundedReply = canReplyToProtected({
+        kind: requestedKind,
+        target: target.sessionID,
+        sender: me,
+        bid: input?.bid,
+        text: input?.text
+      });
+      if (boundedReply) {
+        kind = 'reply';
+        const downgraded = notes.findIndex(note => note.includes('kind=reply 缺少 threadID'));
+        if (downgraded >= 0) notes.splice(downgraded, 1);
+      }
+      return dispatch({
+        context,
+        input,
+        kind,
+        threadID,
+        mode,
+        forced,
+        notes,
+        target,
+        allowProtectedReply: Boolean(boundedReply)
+      });
     }
   };
 }

@@ -56,6 +56,8 @@ export function normalizeBroadcast(record: JsonObject): BroadcastRecord {
         }
       : undefined,
     attempts: Number(record.attempts) || 0,
+    // R8: retry stamp of the `acked` extraction (absent on old records).
+    staleNoticedAt: Number(record.staleNoticedAt) || undefined,
     createdAt: Number(record.createdAt) || 0,
     updatedAt: Number(record.updatedAt) || 0
   };
@@ -295,7 +297,9 @@ export function persistRefresh(
     (before?.attempts ?? 0) !== after.attempts ||
     (before?.skipped ?? []).length !== (after.skipped ?? []).length ||
     Boolean(before?.claim) !== Boolean(after.claim) ||
-    (before?.asked?.sid ?? '') !== (after.asked?.sid ?? '');
+    (before?.asked?.sid ?? '') !== (after.asked?.sid ?? '') ||
+    // R8: the `acked` extraction retry stamp must survive the refresh as well.
+    Number(before?.staleNoticedAt ?? 0) !== Number(after.staleNoticedAt ?? 0);
   return changed ? writeBroadcast(after) : after;
 }
 

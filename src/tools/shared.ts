@@ -1,6 +1,7 @@
 import type { ConfigReader } from '../config.ts';
-import { BCAST_LEASE_MS, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
+import { BCAST_DONE_STATES, BCAST_LEASE_MS, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
 import type { HandoffChain } from '../core/chain.ts';
+import { readBroadcast } from '../core/claim.ts';
 import { createLineage } from '../core/lineage.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
@@ -8,12 +9,60 @@ import { handoffActions } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import type { WakeSignal } from '../ids.ts';
 import { errText, log } from '../log.ts';
-import type { CollabContext, JsonObject, SessionInfoLike, ToolContext, ToolResult } from '../types.ts';
+import type { BroadcastRecord, CollabContext, JsonObject, SessionInfoLike, ToolContext, ToolResult } from '../types.ts';
 import { asObject, fmtTime, sessionState, shortID, truncate, truncateRaw } from '../util.ts';
 
 /** `jsonInput` — the object schema every tool declares (extra keys refused). */
 export function jsonInput(schema: JsonObject): JsonObject {
   return { type: 'object', additionalProperties: false, ...schema };
+}
+
+/** A `bid` written inside a message body (same shape the DECLINE parser uses). */
+const RECEIPT_BID_RE = /\b(b_[0-9a-f]{8,32})\b/;
+
+/**
+ * R2 (bounded reply) — the *only* message that may be delivered into a
+ * protected session. A protected requester can never be written to
+ * (fail-closed), yet the hand-off it started still has exactly one legitimate
+ * answer: the receipt of the session that claimed that very bid. Three
+ * conditions must **all** hold:
+ *   ① `kind` is `reply`;
+ *   ② `target` is the `from.sid` of the record the bid names;
+ *   ③ `sender` is that record's `claim.by`.
+ * A `request` / `note` / `steer`, a foreign bid, a bystander or an unknown
+ * sender stays refused, and so does a **decided** record (`done` / `blocked` /
+ * `expired`): a closed hand-off has nothing left to report, so the whitelist
+ * must not become a generic way into the protected line. Returns the matching
+ * record, or `undefined` (= refuse); the record itself is never modified —
+ * `applyReceipt` still owns the state.
+ *
+ * The bid comes from the explicit `bid` argument first, then from the body
+ * (`[handoff] DONE b_… …`), so an existing receipt command needs no new field.
+ */
+export function canReplyToProtected({
+  kind,
+  target,
+  sender,
+  bid,
+  text
+}: {
+  kind: unknown;
+  target: unknown;
+  sender: string | undefined;
+  bid?: unknown;
+  text?: unknown;
+}): BroadcastRecord | undefined {
+  if (normalizeKind(kind) !== 'reply') return undefined;
+  if (!sender) return undefined;
+  const wanted = String(bid ?? '').trim() || RECEIPT_BID_RE.exec(String(text ?? ''))?.[1] || '';
+  if (!wanted) return undefined;
+  const record = readBroadcast(wanted);
+  if (!record) return undefined;
+  // A decided hand-off is not a receipt anymore: fail-closed again.
+  if (BCAST_DONE_STATES.includes(String(record.state))) return undefined;
+  if (String(record.from?.sid ?? '') !== String(target ?? '')) return undefined;
+  if (String(record.claim?.by ?? '') !== String(sender)) return undefined;
+  return record;
 }
 
 export interface ToolDeps {
@@ -52,6 +101,8 @@ export interface ToolKit {
     forced: boolean;
     notes: string[];
     target: Target;
+    /** R2: a bounded reply (`canReplyToProtected`) — the only guard bypass. */
+    allowProtectedReply?: boolean;
   }): Promise<ToolResult>;
   waitForReply(threadID: string, timeoutMs: number, context: ToolContext | undefined): Promise<ToolResult>;
   deliverAsk(input: {
@@ -123,7 +174,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     mode,
     forced,
     notes,
-    target
+    target,
+    allowProtectedReply = false
   }: {
     context: ToolContext | undefined;
     input: JsonObject | undefined;
@@ -133,6 +185,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     forced: boolean;
     notes: string[];
     target: Target;
+    allowProtectedReply?: boolean;
   }): Promise<ToolResult> {
     const config = readConfig();
     const body = String(input?.text ?? '').trim();
@@ -141,13 +194,18 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const { sessionID, alias, info } = target;
     // Lineage guard: the target itself *or* any ancestor in the protect list.
     // Fail-closed, replies included — see the note in `docs/collab.md` §11.4.
+    // R2: the single exception is a *bounded* reply — this bid's own requester,
+    // from this bid's own claimant, as `kind:reply` — decided before the call by
+    // `canReplyToProtected`; nothing else may bypass the guard.
     const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
-    if (guard) {
+    if (guard && !allowProtectedReply) {
       const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
       throw new Error(
         `拒绝投递：目标 ${sessionID}${alias ? `（别名 ${alias}）` : ''} ${where}在 protect 名单内` +
           `（${CONFIG_PATH} 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。${
-            kind === 'reply' ? '回执同样适用该护栏（fail-closed）。' : ''
+            kind === 'reply'
+              ? '回执同样适用该护栏（fail-closed）；只有「本单发起方 + 该单领取人 + 该 bid」的 kind=reply 回执是白名单例外。'
+              : ''
           }`
       );
     }
@@ -161,9 +219,15 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const targetLine =
       `${sessionID}${alias ? ` (alias=${alias})` : ''}  agent=${info?.agent ?? '?'}  ` +
       `state=${sessionState(info)}  title="${truncate(info?.title ?? '(untitled)', 60)}"`;
-    const modeLine = forced ? 'queue(forced)' : mode;
+    const modeLine = forced || (guard && allowProtectedReply) ? 'queue(forced)' : mode;
+    const delivery = guard && allowProtectedReply ? 'queue' : mode;
     const tailNotes = [...(notes ?? [])];
     if (forced) tailNotes.push('只读 agent：已强制 queue（入队，不打断对方当前轮）。');
+    if (guard && allowProtectedReply) {
+      tailNotes.push(
+        '本单由该受保护会话发起：回执按白名单放行（kind=reply + bid 归属该记录 + 领取人本人），强制 queue 投递。'
+      );
+    }
 
     if (input?.confirm !== true) {
       return {
@@ -182,7 +246,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const admitted = await ctx.session.prompt({
       sessionID,
       text,
-      delivery: mode,
+      delivery,
       metadata: {
         collab: {
           from,
@@ -314,6 +378,9 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const requester = String(record?.from?.sid ?? '');
     const from = senderLabel(requester) || 'handoff';
     const leaseMin = Math.round(BCAST_LEASE_MS / 60_000);
+    // R1 (pull): a protected requester cannot receive a pushed receipt, so the
+    // takeover text asks for the in-session `[handoff]` line instead.
+    const receiptMode: 'push' | 'pull' = record?.receiptMode === 'pull' ? 'pull' : 'push';
     const body = [
       `[collab-handoff] ${record.title ?? '(untitled)'}`,
       `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
@@ -324,8 +391,12 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       '按顺序完成（三步都不要省略）：',
       // R1 (G1): accept → receipt → "analysing in-session is not done", with
       // copy-pasteable commands (full sid + bid).
-      ...handoffActions({ bid: record.bid, requester, spawn, leaseMin }),
-      spawn ? '确实做不了：发 BLOCKED 回执，不要静默挂起。' : '',
+      ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode }),
+      spawn
+        ? receiptMode === 'pull'
+          ? '确实做不了：在最后一条回复里写 BLOCKED 回执（不要 collab_send），不要静默挂起。'
+          : '确实做不了：发 BLOCKED 回执，不要静默挂起。'
+        : '',
       wake ? '（你已 busy 超过 30 分钟，这条是叫醒消息：不打断当前轮，排在下一轮）' : ''
     ]
       .filter(Boolean)

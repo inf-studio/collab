@@ -1,5 +1,5 @@
 import { isAbsolute, basename } from 'node:path';
-import { BCAST_DONE_STATES, BOOTSTRAP_TITLE_RE } from '../constants.ts';
+import { ACKED_EXTRACT_MS, BCAST_DONE_STATES, BOOTSTRAP_TITLE_RE } from '../constants.ts';
 import { allBroadcasts, leaseVerdict } from '../core/claim.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { ToolDefinition } from '../types.ts';
@@ -104,8 +104,15 @@ export function listTool(kit: ToolKit): ToolDefinition {
         .map(record => {
           // R1-4: read-only lease verdict — no refresh, no lock release here.
           const lease = leaseVerdict(record, now);
+          // R8: `acked` has no lease; after ACKED_EXTRACT_MS of silence the
+          // requester's next refresh may close it from the claimant's answer.
+          const claimAt = Number(record.claim?.at ?? 0);
+          const silent =
+            record.state === 'acked' && claimAt && now - claimAt > ACKED_EXTRACT_MS
+              ? ` 静默=${Math.floor((now - claimAt) / 3_600_000)}h 可自动提取`
+              : '';
           return (
-            `- ${record.bid} ${record.state}${lease ? ` lease=${lease}` : ''} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
+            `- ${record.bid} ${record.state}${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''
             }`

@@ -92,8 +92,15 @@ const VERDICT_PENDING_RE =
 /**
  * Strong "no work needed" wording → `blocked`. Checked *before* the generic DONE
  * words, because 「已完成/已修复」 must never be read as "implemented".
+ *
+ * R7: real answers also close a hand-off by saying the receipt was refused and
+ * the proposal was updated instead (`回执被硬拒` / `无法投递` / `改回写提案`), or
+ * that the symptom healed itself (`已自愈` / `无需改动`). None of these contain a
+ * negation or a promise, so they are safe to read as `blocked` (with the answer
+ * as the reason). A `[handoff] DONE|BLOCKED <bid>` line still wins over them.
  */
-const BLOCKED_VERDICT_RE = /已实施|已修复|无需|不需要|已完成|not needed|already/i;
+const BLOCKED_VERDICT_RE =
+  /已实施|已修复|无需|不需要|已完成|回执被[^。\n]{0,20}拒|无法投递|改回写提案|回写提案|已自愈|不需要改|无需改动|not needed|already/i;
 /** Generic completion wording → `done` (only the last answer is judged on this). */
 const DONE_VERDICT_RE = /完成|done|fixed/i;
 /**
@@ -210,26 +217,52 @@ export function verdictFromTexts(texts: string[] | undefined, { bid }: { bid?: s
  * and the broadcast result so all three say the same three things — after the
  * pilot, an `explore` session answered in its own turn, called nothing, and the
  * bid stayed `claimed`.
+ *
+ * `receiptMode: 'pull'` (requester on the protect list) swaps only step ②/③:
+ * a `collab_send` into a protected requester is refused by the very guard that
+ * protects it, so the receipt is the claimant's own last answer and the
+ * requester extracts it from there. `push` (default) is unchanged.
  */
 export function handoffActions({
   bid,
   requester,
   spawn = false,
-  leaseMin = 5
+  leaseMin = 5,
+  receiptMode = 'push'
 }: {
   bid: string;
   requester?: string;
   spawn?: boolean;
   leaseMin?: number;
+  receiptMode?: 'push' | 'pull';
 }): string[] {
   const target = requester || 'ses_…';
-  const lines = [
-    `① 领取（先做；领取即 acked）：collab_accept {bid:"${bid}", confirm:true}`,
+  const lines = [`① 领取（先做；领取即 acked）：collab_accept {bid:"${bid}", confirm:true}`];
+  if (receiptMode === 'pull') {
+    // R1 (pull): the requester is on the protect list, so a `collab_send` into
+    // it is refused by the same guard that protects it — asking for one is
+    // asking for a wall. The receipt is the claimant's own last answer instead,
+    // read once by the requester when the lease lapses (see `refresh`).
+    lines.push(
+      `② 回执（pull 模式，必写）: 在本会话最后一条回复里写一行 \`[handoff] DONE ${bid} <摘要>\`；` +
+        '发起方在租约到期后只读提取（这条回复就是回执）。',
+      `   无法实施/判定无需处理: 同一行改成 \`[handoff] BLOCKED ${bid} <原因>\`。`,
+      '   不要尝试 collab_send：发起方在 protect 名单内，投递会被拒绝。',
+      '③ 只分析、不调用工具 = 未完成：结论必须写在本会话最后一条回复里（含上面的 [handoff] 行）。'
+    );
+    if (!spawn) {
+      lines.push(
+        `   没余力/不接：不领取即可（${leaseMin} 分钟不答自动顺延下一候选；pull 模式没有推送，不需要回执）`
+      );
+    }
+    return lines;
+  }
+  lines.push(
     `② 回执（必发，二选一）: collab_send {target:"${target}", text:"[handoff] DONE ${bid} <摘要>", confirm:true}`,
     `   无法实施/判定无需处理: collab_send {target:"${target}", text:"[handoff] BLOCKED ${bid} <原因>", confirm:true}`,
     '③ 只分析、不调用工具 = 未完成：结论必须用上面的 collab_send 真正发出。' +
       '（② 里的文字只是格式示例——复述/回显它不算回执，也不会被自动闭环。）'
-  ];
+  );
   if (!spawn) {
     lines.push(
       `   没余力/不接：collab_send {target:"${target}", text:"DECLINE ${bid} <理由>", confirm:true}` +
