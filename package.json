@@ -1,6 +1,6 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cross-session collaboration for OpenCode: ten native collab_* tools, a thread/inbox protocol and a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt).",
   "keywords": [
     "collab",
@@ -34,14 +34,15 @@
     }
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
     "build": "vp pack",
     "prepublishOnly": "pnpm run build",
     "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:skill": "node scripts/check-skill.mjs"
   },
   "dependencies": {
     "@opencode/plugin": "^2.3.0"

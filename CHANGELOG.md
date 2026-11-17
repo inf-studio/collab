@@ -3,6 +3,11 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-11-17
+
+- 包可见性改为 public（`publishConfig.access`）
+- 新增 `skills/collab/SKILL.md`（随包分发）与 CI frontmatter 校验
+
 ## [0.1.0] - 2026-11-17
 
 首个版本：`@inf-studio/collab` 由仓库内单文件插件 `.opencode/plugins/collab.js`

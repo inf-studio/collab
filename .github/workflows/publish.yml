@@ -28,10 +28,13 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Validate skill
+        run: node scripts/check-skill.mjs
+
       - name: Build
         run: pnpm build
 
       - name: Publish
-        run: npm publish --access restricted --tag latest
+        run: npm publish --access public --tag latest
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
