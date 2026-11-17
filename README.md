@@ -119,6 +119,11 @@ pnpm test          # build + 279 项 harness + 12 项只读默认
 源码结构：`src/core`（存储/领取/打分/回执/血缘）、`src/tools`（十个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/index.ts`（`Plugin.define` 等价装配）。
 
+## Skill（给 agent 的操作手册）
+
+`skills/collab/SKILL.md` — 按需加载：工具速查、交接模板、权限/升级、排障清单。
+本机安装：`ln -s "$PWD/skills/collab" ~/.config/opencode/skills/collab`。
+
 ## 许可
 
 MPL-2.0
