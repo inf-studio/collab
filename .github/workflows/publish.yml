@@ -31,6 +31,15 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Debug auth
+        run: |
+          echo "registry=$(npm config get registry)"
+          echo "scope-registry=$(npm config get @info-studio:registry)"
+          npm whoami --registry https://npm.pkg.github.com || true
+          sed -E 's/(_authToken=).*/\1***/' "$HOME/.npmrc" || true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish
         run: npm publish
         env:
