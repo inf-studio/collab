@@ -1,0 +1,741 @@
+diff -ruN plugins/inject-subagent-context.js /data/project/collab/.opencode/plugins/inject-subagent-context.js
+--- plugins/inject-subagent-context.js	2026-11-17 16:01:53.982769745 +0800
++++ /data/project/collab/.opencode/plugins/inject-subagent-context.js	2026-11-17 16:01:54.174775340 +0800
+@@ -423,147 +423,198 @@
+   return true
+ }
+ 
+-// OpenCode plugin factory: `export default async (input) => hooks`.
+-// OpenCode 1.2.x iterates every module export and invokes it as a function
+-// (packages/opencode/src/plugin/index.ts — `for ([_, fn] of Object.entries(mod)) await fn(input)`);
+-// the previous `{ id, server }` object shape failed with
+-// `TypeError: fn is not a function` in 1.2.x.
+-export default async ({ directory, platform: hostPlatform = process.platform, env = process.env }) => {
+-  const ctx = new TrellisContext(directory)
+-  debugLog("inject", "Plugin loaded, directory:", directory)
+-
+-  return {
+-      "tool.execute.before": async (input, output) => {
+-        try {
+-          if (process.env.TRELLIS_HOOKS === "0" || process.env.TRELLIS_DISABLE_HOOKS === "1") {
+-            return
+-          }
+-          debugLog("inject", "tool.execute.before called, tool:", input?.tool)
++/**
++ * Build the shared `tool.execute.before` handler. Takes the v1-shaped
++ * `(input, output)` pair; the v2 adapter below bridges its single mutable
++ * event into the same two views.
++ */
++function createToolExecuteBeforeHook(ctx, hostPlatform, env) {
++  return async (input, output) => {
++    try {
++      if (process.env.TRELLIS_HOOKS === "0" || process.env.TRELLIS_DISABLE_HOOKS === "1") {
++        return
++      }
++      debugLog("inject", "tool.execute.before called, tool:", input?.tool)
+ 
+-          const toolName = input?.tool?.toLowerCase()
+-          if (toolName === "bash") {
+-            if (injectTrellisContextIntoBash(ctx, input, output, hostPlatform, env)) {
+-              debugLog("inject", "Injected TRELLIS_CONTEXT_ID into Bash command")
+-            }
+-            return
+-          }
++      const toolName = input?.tool?.toLowerCase()
++      // v1 tool ids are "bash"/"task"; OpenCode 2.0 renamed them to
++      // "shell"/"subagent" (confirmed against the released v2.0.15 source:
++      // tool/plugin/shell.ts `export const name = "shell"`, subagent.ts
++      // `export const name = "subagent"` — no aliases). Match both so the
++      // same handler serves either major.
++      if (toolName === "bash" || toolName === "shell") {
++        if (injectTrellisContextIntoBash(ctx, input, output, hostPlatform, env)) {
++          debugLog("inject", "Injected TRELLIS_CONTEXT_ID into shell command")
++        }
++        return
++      }
+ 
+-          if (toolName !== "task") {
+-            return
+-          }
++      if (toolName !== "task" && toolName !== "subagent") {
++        return
++      }
+ 
+-          const args = output?.args
+-          if (!args) return
++      const args = output?.args
++      if (!args) return
+ 
+-          const rawSubagentType = args.subagent_type
+-          // Strip "trellis-" prefix added by v0.5.0-beta.5 agent rename migration
+-          const subagentType = (rawSubagentType || "").replace(/^trellis-/, "")
+-          const originalPrompt = args.prompt || ""
+-
+-          debugLog("inject", "Task tool called, subagent_type:", rawSubagentType)
+-
+-          if (!AGENTS_ALL.includes(subagentType)) {
+-            debugLog("inject", "Skipping - unsupported subagent_type")
+-            return
+-          }
++      // v1 passes the agent selector as `subagent_type`; v2 renamed it to
++      // `agent`. v2 Agent IDs may be namespaced ("project/trellis-implement")
++      // while the v1 value is bare — normalize to the bare name before
++      // stripping the "trellis-" prefix added by the v0.5.0-beta.5 agent
++      // rename migration.
++      const rawSubagentType = args.subagent_type ?? args.agent
++      const bareType = String(rawSubagentType || "").split(/[/:]/).pop() || ""
++      const subagentType = bareType.replace(/^trellis-/, "")
++      const originalPrompt = args.prompt || ""
++
++      debugLog("inject", "Task tool called, subagent_type:", rawSubagentType)
++
++      if (!AGENTS_ALL.includes(subagentType)) {
++        debugLog("inject", "Skipping - unsupported subagent_type")
++        return
++      }
+ 
+-          // Resolve active task in this priority order (only later steps
+-          // run when earlier ones miss):
+-          //   1. Exact session runtime context lookup for input.sessionID
+-          //   2. `Active task: <path>` hint in the dispatch prompt
+-          //      (explicit per-dispatch override — beats single-session
+-          //      inference so multi-window users can disambiguate)
+-          //   3. Single-session fallback — only when exactly 1 session
+-          //      runtime file exists locally
+-          let taskDir = null
+-          let taskSource = null
+-
+-          const contextKey = ctx.getContextKey(input)
+-          if (contextKey) {
+-            const context = ctx.readContext(contextKey)
+-            const exactRef = ctx.normalizeTaskRef(context?.current_task || "")
+-            if (exactRef) {
+-              taskDir = exactRef
+-              taskSource = `session:${contextKey}`
+-            }
+-          }
++      // Resolve active task in this priority order (only later steps
++      // run when earlier ones miss):
++      //   1. Exact session runtime context lookup for input.sessionID
++      //   2. `Active task: <path>` hint in the dispatch prompt
++      //      (explicit per-dispatch override — beats single-session
++      //      inference so multi-window users can disambiguate)
++      //   3. Single-session fallback — only when exactly 1 session
++      //      runtime file exists locally
++      let taskDir = null
++      let taskSource = null
++
++      const contextKey = ctx.getContextKey(input)
++      if (contextKey) {
++        const context = ctx.readContext(contextKey)
++        const exactRef = ctx.normalizeTaskRef(context?.current_task || "")
++        if (exactRef) {
++          taskDir = exactRef
++          taskSource = `session:${contextKey}`
++        }
++      }
+ 
+-          if (!taskDir) {
+-            const hintRef = extractActiveTaskHint(originalPrompt)
+-            if (hintRef) {
+-              const hintNormalized = ctx.normalizeTaskRef(hintRef)
+-              if (hintNormalized) {
+-                const hintDir = ctx.resolveTaskDir(hintNormalized)
+-                if (hintDir && existsSync(hintDir)) {
+-                  taskDir = hintNormalized
+-                  taskSource = "prompt-hint"
+-                  debugLog("inject", "Resolved task from Active task: hint:", hintNormalized)
+-                }
+-              }
++      if (!taskDir) {
++        const hintRef = extractActiveTaskHint(originalPrompt)
++        if (hintRef) {
++          const hintNormalized = ctx.normalizeTaskRef(hintRef)
++          if (hintNormalized) {
++            const hintDir = ctx.resolveTaskDir(hintNormalized)
++            if (hintDir && existsSync(hintDir)) {
++              taskDir = hintNormalized
++              taskSource = "prompt-hint"
++              debugLog("inject", "Resolved task from Active task: hint:", hintNormalized)
+             }
+           }
++        }
++      }
+ 
+-          if (!taskDir) {
+-            const fallback = ctx._resolveSingleSessionFallback()
+-            if (fallback?.taskPath) {
+-              const fallbackDir = ctx.resolveTaskDir(fallback.taskPath)
+-              if (fallbackDir && existsSync(fallbackDir)) {
+-                taskDir = fallback.taskPath
+-                taskSource = fallback.source
+-                debugLog("inject", "Resolved task via single-session fallback:", taskDir, "source:", taskSource)
+-              }
+-            }
++      if (!taskDir) {
++        const fallback = ctx._resolveSingleSessionFallback()
++        if (fallback?.taskPath) {
++          const fallbackDir = ctx.resolveTaskDir(fallback.taskPath)
++          if (fallbackDir && existsSync(fallbackDir)) {
++            taskDir = fallback.taskPath
++            taskSource = fallback.source
++            debugLog("inject", "Resolved task via single-session fallback:", taskDir, "source:", taskSource)
+           }
++        }
++      }
+ 
+-          // Agents requiring task directory
+-          if (AGENTS_REQUIRE_TASK.includes(subagentType)) {
+-            // subagentType is already stripped of "trellis-" prefix above
+-            if (!taskDir) {
+-              debugLog("inject", "Skipping - no current task")
+-              return
+-            }
+-            const taskDirFull = ctx.resolveTaskDir(taskDir)
+-            if (!taskDirFull || !existsSync(taskDirFull)) {
+-              debugLog("inject", "Skipping - task directory not found")
+-              return
+-            }
+-          }
++      // Agents requiring task directory
++      if (AGENTS_REQUIRE_TASK.includes(subagentType)) {
++        // subagentType is already stripped of "trellis-" prefix above
++        if (!taskDir) {
++          debugLog("inject", "Skipping - no current task")
++          return
++        }
++        const taskDirFull = ctx.resolveTaskDir(taskDir)
++        if (!taskDirFull || !existsSync(taskDirFull)) {
++          debugLog("inject", "Skipping - task directory not found")
++          return
++        }
++      }
+ 
+-          // Check for [finish] marker
+-          const isFinish = originalPrompt.toLowerCase().includes("[finish]")
++      // Check for [finish] marker
++      const isFinish = originalPrompt.toLowerCase().includes("[finish]")
+ 
+-          // Get context based on agent type
+-          let context = ""
+-          switch (subagentType) {
+-            case "implement":
+-              context = getImplementContext(ctx, taskDir)
+-              break
+-            case "check":
+-              context = isFinish
+-                ? getFinishContext(ctx, taskDir)
+-                : getCheckContext(ctx, taskDir)
+-              break
+-            case "research":
+-              context = getResearchContext(ctx, taskDir)
+-              break
+-          }
++      // Get context based on agent type
++      let context = ""
++      switch (subagentType) {
++        case "implement":
++          context = getImplementContext(ctx, taskDir)
++          break
++        case "check":
++          context = isFinish
++            ? getFinishContext(ctx, taskDir)
++            : getCheckContext(ctx, taskDir)
++          break
++        case "research":
++          context = getResearchContext(ctx, taskDir)
++          break
++      }
+ 
+-          if (!context) {
+-            debugLog("inject", "No context to inject")
+-            return
+-          }
++      if (!context) {
++        debugLog("inject", "No context to inject")
++        return
++      }
+ 
+-          const newPrompt = buildPrompt(subagentType, originalPrompt, context, isFinish)
++      const newPrompt = buildPrompt(subagentType, originalPrompt, context, isFinish)
+ 
+-          // Mutate args in-place — whole-object replacement does NOT work for the task tool
+-          // because the runtime holds a local reference to the same args object.
+-          args.prompt = newPrompt
++      // Mutate args in-place — whole-object replacement does NOT work for the task tool
++      // because the runtime holds a local reference to the same args object.
++      args.prompt = newPrompt
+ 
+-          debugLog("inject", "Injected context for", subagentType, "prompt length:", newPrompt.length)
++      debugLog("inject", "Injected context for", subagentType, "prompt length:", newPrompt.length)
+ 
+-        } catch (error) {
+-          debugLog("inject", "Error in tool.execute.before:", error.message, error.stack)
+-        }
+-      }
++    } catch (error) {
++      debugLog("inject", "Error in tool.execute.before:", error.message, error.stack)
++    }
++  }
++}
++
++// Dual OpenCode entrypoint (v1 >= 1.18.29 and v2).
++//   - v1 calls `server(input)` and merges the returned hook map
++//     (`{tool: string, sessionID, agent}` input + `{args}` output).
++//   - v2 calls `setup(ctx)` and registers `ctx.tool.hook("execute.before")`
++//     with a single mutable event (`{tool, sessionID, agent, input}`). The
++//     adapter bridges that event into the v1-shaped pair so both share one
++//     handler. OpenCode 2.0 renamed the tool ids ("bash" -> "shell",
++//     "task" -> "subagent") and the agent selector arg ("subagent_type" ->
++//     "agent"); the shared handler matches both spellings.
++export default {
++  id: "trellis-inject-subagent-context",
++
++  async server({ directory, platform: hostPlatform = process.platform, env = process.env }) {
++    const ctx = new TrellisContext(directory)
++    debugLog("inject", "Plugin loaded (v1 server), directory:", directory)
++    return {
++      "tool.execute.before": createToolExecuteBeforeHook(ctx, hostPlatform, env),
++    }
++  },
++
++  async setup(pluginCtx) {
++    const directory = pluginCtx?.location?.directory
++    // v1 never calls `setup()` on a module that exports `server()` — its
++    // loader short-circuits on the `server` export, so v1 injection happens
++    // entirely through `server()`. Stand down on any host that calls
++    // `setup()` without the location/tool domains: registration needs the
++    // real v2 context.
++    if (!directory || !pluginCtx?.tool?.hook) {
++      debugLog("inject", "setup() skipped: host has no location/tool domain (incomplete setup context)")
++      return
+     }
++    const ctx = new TrellisContext(directory)
++    debugLog("inject", "Plugin loaded (v2 setup), directory:", directory)
++    const handler = createToolExecuteBeforeHook(ctx, process.platform, process.env)
++
++    await pluginCtx.tool.hook("execute.before", (event) => {
++      const args = event?.input
++      if (!args || typeof args !== "object") return
++      return handler(
++        { tool: event.tool, sessionID: event.sessionID, agent: event.agent },
++        { args },
++      )
++    })
++  },
+ }
+diff -ruN plugins/inject-workflow-state.js /data/project/collab/.opencode/plugins/inject-workflow-state.js
+--- plugins/inject-workflow-state.js	2026-11-17 16:01:53.982769745 +0800
++++ /data/project/collab/.opencode/plugins/inject-workflow-state.js	2026-11-17 16:01:54.170775224 +0800
+@@ -5,16 +5,21 @@
+  * Per-turn UserPromptSubmit equivalent for OpenCode.
+  *
+  * On every model request, inject a short <workflow-state> breadcrumb
+- * into the in-memory copy of the latest user message via
+- * `experimental.chat.messages.transform`. Stored history and the TUI
+- * are not modified (issue #553). Breadcrumb text is pulled exclusively
+- * from the project's workflow.md [workflow-state:STATUS] tag blocks —
+- * workflow.md is the single source of truth. There are no fallback
+- * tables in this plugin: when workflow.md is missing or a tag is
++ * into the in-memory copy of the latest user message. Stored history and
++ * the TUI are not modified (issue #553). Breadcrumb text is pulled
++ * exclusively from the project's workflow.md [workflow-state:STATUS] tag
++ * blocks — workflow.md is the single source of truth. There are no
++ * fallback tables in this plugin: when workflow.md is missing or a tag is
+  * absent, the breadcrumb degrades to a generic
+  * "Refer to workflow.md for current step." line so users see (and fix)
+  * the broken state instead of the plugin silently masking it.
+  *
++ * Dual OpenCode entrypoint (v1 >= 1.18.29 and v2), same layout as
++ * session-start.js: v1 calls `server()` for the
++ * `experimental.chat.messages.transform` hook, v2 calls `setup(ctx)` and
++ * registers `ctx.session.hook("context")`. The v2 `compaction` hook is
++ * not registered — the breadcrumb orients agent replies only.
++ *
+  * Silently skips when:
+  *   - No .trellis/ directory
+  *   - No active task in the session runtime context
+@@ -26,8 +31,10 @@
+ import {
+   MESSAGES_TRANSFORM_HOOK,
+   latestUserPromptText,
++  latestUserPromptTextV2,
+   platformInputFromMessages,
+   prependEphemeralText,
++  prependEphemeralTextV2,
+ } from "../lib/context-visibility.js"
+ import { TrellisContext, debugLog, isTrellisSubagent } from "../lib/trellis-context.js"
+ 
+@@ -178,12 +185,23 @@
+   return `<workflow-state>\n${header}\n${body}\n</workflow-state>`
+ }
+ 
+-// OpenCode 1.2.x expects plugins to be factory functions (see inject-subagent-context.js comment).
+-export default async ({ directory }) => {
+-  const ctx = new TrellisContext(directory)
+-  debugLog("workflow-state", "Plugin loaded, directory:", directory)
++function hooksDisabled() {
++  return (
++    process.env.TRELLIS_HOOKS === "0" ||
++    process.env.TRELLIS_DISABLE_HOOKS === "1" ||
++    process.env.OPENCODE_NON_INTERACTIVE === "1"
++  )
++}
++
++export default {
++  id: "trellis-workflow-state",
+ 
+-  return {
++  // OpenCode v1 (>= 1.18.29): `server()` returns the v1 hook map.
++  async server({ directory }) {
++    const ctx = new TrellisContext(directory)
++    debugLog("workflow-state", "Plugin loaded (v1 server), directory:", directory)
++
++    return {
+       [MESSAGES_TRANSFORM_HOOK]: async (_input, output) => {
+         try {
+           const messages = output?.messages
+@@ -195,10 +213,7 @@
+             debugLog("workflow-state", "Skipping trellis subagent turn:", platformInput?.agent)
+             return
+           }
+-          if (process.env.TRELLIS_HOOKS === "0" || process.env.TRELLIS_DISABLE_HOOKS === "1") {
+-            return
+-          }
+-          if (process.env.OPENCODE_NON_INTERACTIVE === "1") {
++          if (hooksDisabled()) {
+             return
+           }
+           if (!ctx.isTrellisProject()) {
+@@ -236,5 +251,63 @@
+           )
+         }
+       },
+-  }
++    }
++  },
++
++  // OpenCode v2: `setup(ctx)` registers the domain-hook equivalent.
++  // v1 never calls `setup()` on a module that exports `server()` — its loader
++  // short-circuits on the `server` export, so v1 injection happens entirely
++  // through `server()`. Stand down on any host that calls `setup()` without
++  // the location/session domains: registration needs the real v2 context.
++  async setup(pluginCtx) {
++    const directory = pluginCtx?.location?.directory
++    if (!directory || !pluginCtx?.session?.hook) {
++      debugLog("workflow-state", "setup() skipped: host has no location/session domain (incomplete setup context)")
++      return
++    }
++    const ctx = new TrellisContext(directory)
++    debugLog("workflow-state", "Plugin loaded (v2 setup), directory:", directory)
++
++    await pluginCtx.session.hook("context", (event) => {
++      try {
++        if (isTrellisSubagent(event)) {
++          debugLog("workflow-state", "Skipping trellis subagent turn:", event?.agent)
++          return
++        }
++        if (hooksDisabled()) {
++          return
++        }
++        if (!ctx.isTrellisProject()) {
++          return
++        }
++
++        const originalText = latestUserPromptTextV2(event?.messages)
++        if (promptHasSkipKeyword(originalText, readSkipKeyword(directory))) {
++          debugLog("workflow-state", "Skipping turn: skip keyword present in prompt")
++          return
++        }
++
++        const templates = loadBreadcrumbs(directory)
++        const task = getActiveTask(ctx, { sessionID: event?.sessionID, agent: event?.agent })
++        const breadcrumb = task
++          ? buildBreadcrumb(task.id, task.status, templates, task.source)
++          : buildBreadcrumb(null, "no_task", templates)
++
++        prependEphemeralTextV2(event?.messages, breadcrumb, "workflowState")
++        debugLog(
++          "workflow-state",
++          "Injected breadcrumb for task",
++          task ? task.id : "none",
++          "status",
++          task ? task.status : "no_task",
++        )
++      } catch (error) {
++        debugLog(
++          "workflow-state",
++          "Error in session context hook:",
++          error instanceof Error ? error.message : String(error),
++        )
++      }
++    })
++  },
+ }
+diff -ruN plugins/session-start.js /data/project/collab/.opencode/plugins/session-start.js
+--- plugins/session-start.js	2026-11-17 16:01:53.982769745 +0800
++++ /data/project/collab/.opencode/plugins/session-start.js	2026-11-17 16:01:54.170775224 +0800
+@@ -3,9 +3,18 @@
+  * Trellis Session Start Plugin
+  *
+  * Injects compact SessionStart context into the copy of the latest user
+- * message that OpenCode sends to the model. Uses
+- * `experimental.chat.messages.transform` so TUI / Web / SQLite history
++ * message that OpenCode sends to the model, so TUI / Web / SQLite history
+  * stay untouched (issue #553).
++ *
++ * Dual OpenCode entrypoint (v1 >= 1.18.29 and v2):
++ *   - v1 calls `server()` and merges the returned hook map.
++ *   - v2 calls `setup(ctx)` and registers through domain hooks.
++ * Both read the same injection core below; only the transport differs:
++ *   v1 `experimental.chat.messages.transform` ({info, parts}[] transcript)
++ *   v2 `ctx.session.hook("context")` ({role, content}[] request messages)
++ * The v2 `compaction` hook is deliberately NOT registered: v1 fired the
++ * transform on compaction too, but the session context exists to orient
++ * agent replies, not compaction summaries.
+  */
+ 
+ import { TrellisContext, debugLog, isTrellisSubagent } from "../lib/trellis-context.js"
+@@ -13,7 +22,9 @@
+   MESSAGES_TRANSFORM_HOOK,
+   platformInputFromMessages,
+   prependEphemeralText,
++  prependEphemeralTextV2,
+   transcriptHasAssistantMessage,
++  transcriptHasAssistantMessageV2,
+ } from "../lib/context-visibility.js"
+ import { buildSessionContext } from "../lib/session-utils.js"
+ 
+@@ -23,43 +34,96 @@
+   return context.replace(FIRST_REPLY_NOTICE_RE, "")
+ }
+ 
+-// OpenCode 1.2.x expects plugins to be factory functions (see inject-subagent-context.js comment).
+-export default async ({ directory }) => {
+-  const ctx = new TrellisContext(directory)
+-  debugLog("session", "Plugin loaded, directory:", directory)
++function hooksDisabled() {
++  return (
++    process.env.TRELLIS_HOOKS === "0" ||
++    process.env.TRELLIS_DISABLE_HOOKS === "1" ||
++    process.env.OPENCODE_NON_INTERACTIVE === "1"
++  )
++}
+ 
+-  return {
+-    [MESSAGES_TRANSFORM_HOOK]: async (_input, output) => {
+-      try {
+-        const messages = output?.messages
+-        const platformInput = platformInputFromMessages(messages)
+-        const agent = platformInput?.agent || "unknown"
+-        debugLog("session", "messages.transform called, agent:", agent)
++export default {
++  id: "trellis-session-start",
+ 
+-        if (isTrellisSubagent(platformInput)) {
+-          debugLog("session", "Skipping trellis subagent turn:", agent)
+-          return
++  // OpenCode v1 (>= 1.18.29): `server()` returns the v1 hook map.
++  async server({ directory }) {
++    const ctx = new TrellisContext(directory)
++    debugLog("session", "Plugin loaded (v1 server), directory:", directory)
++
++    return {
++      [MESSAGES_TRANSFORM_HOOK]: async (_input, output) => {
++        try {
++          const messages = output?.messages
++          const platformInput = platformInputFromMessages(messages)
++          const agent = platformInput?.agent || "unknown"
++          debugLog("session", "messages.transform called, agent:", agent)
++
++          if (isTrellisSubagent(platformInput)) {
++            debugLog("session", "Skipping trellis subagent turn:", agent)
++            return
++          }
++
++          if (hooksDisabled()) {
++            debugLog("session", "Skipping - hooks disabled")
++            return
++          }
++
++          let context = buildSessionContext(ctx, platformInput)
++          if (transcriptHasAssistantMessage(messages)) {
++            context = stripFirstReplyNotice(context)
++          }
++          debugLog("session", "Built context, length:", context.length)
++          prependEphemeralText(messages, context)
++        } catch (error) {
++          debugLog("session", "Error in messages.transform:", error.message, error.stack)
+         }
++      },
++    }
++  },
++
++  // OpenCode v2: `setup(ctx)` registers the domain-hook equivalent.
++  //
++  // v1 never calls `setup()` on a module that exports `server()` — its loader
++  // short-circuits on the `server` export, so v1 injection happens entirely
++  // through `server()`. (v1's promise adapter does invoke `setup()`, but only
++  // for separately-registered v2 promise plugins, whose context carries no
++  // `location`/`session` domains.) Stand down on any host that calls
++  // `setup()` without the required domains: registration needs the real v2
++  // host context.
++  async setup(pluginCtx) {
++    const directory = pluginCtx?.location?.directory
++    if (!directory || !pluginCtx?.session?.hook) {
++      debugLog("session", "setup() skipped: host has no location/session domain (incomplete setup context)")
++      return
++    }
++    const ctx = new TrellisContext(directory)
++    debugLog("session", "Plugin loaded (v2 setup), directory:", directory)
++
++    await pluginCtx.session.hook("context", (event) => {
++      try {
++        const agent = event?.agent || "unknown"
++        debugLog("session", "session context hook called, agent:", agent)
+ 
+-        if (process.env.TRELLIS_HOOKS === "0" || process.env.TRELLIS_DISABLE_HOOKS === "1") {
+-          debugLog("session", "Skipping - TRELLIS_HOOKS disabled")
++        if (isTrellisSubagent(event)) {
++          debugLog("session", "Skipping trellis subagent turn:", agent)
+           return
+         }
+ 
+-        if (process.env.OPENCODE_NON_INTERACTIVE === "1") {
+-          debugLog("session", "Skipping - non-interactive mode")
++        if (hooksDisabled()) {
++          debugLog("session", "Skipping - hooks disabled")
+           return
+         }
+ 
++        const platformInput = { sessionID: event?.sessionID, agent: event?.agent }
+         let context = buildSessionContext(ctx, platformInput)
+-        if (transcriptHasAssistantMessage(messages)) {
++        if (transcriptHasAssistantMessageV2(event?.messages)) {
+           context = stripFirstReplyNotice(context)
+         }
+         debugLog("session", "Built context, length:", context.length)
+-        prependEphemeralText(messages, context)
++        prependEphemeralTextV2(event?.messages, context, "sessionStart")
+       } catch (error) {
+-        debugLog("session", "Error in messages.transform:", error.message, error.stack)
++        debugLog("session", "Error in session context hook:", error.message, error.stack)
+       }
+-    },
+-  }
++    })
++  },
+ }
+diff -ruN lib/context-visibility.js /data/project/collab/.opencode/lib/context-visibility.js
+--- lib/context-visibility.js	2026-11-17 16:01:53.982769745 +0800
++++ /data/project/collab/.opencode/lib/context-visibility.js	2026-11-17 16:01:54.174775340 +0800
+@@ -146,3 +146,80 @@
+   }
+   return true
+ }
++
++// ============================================================
++// OpenCode 2.x request-message helpers
++//
++// v1 `experimental.chat.messages.transform` passed `{info, parts}[]`
++// transcript rows. v2 replaced it with `ctx.session.hook("context")`
++// whose `event.messages` are flat `{role, content: Part[]}[]` request
++// messages (`Message` from @opencode/ai). The helpers above keep
++// serving the v1 path; these serve the v2 path. Hook mutations affect
++// only the outgoing model request, never stored history, so the v2
++// injected parts are marked via `metadata.trellis` instead of the v1
++// `synthetic` flag — the marker lets a sibling Trellis plugin tell an
++// injected part from the user's own text regardless of hook order.
++// ============================================================
++
++/** True when the part was injected by a Trellis plugin on this request. */
++function isTrellisInjectedPartV2(part) {
++  const trellis = part?.metadata?.trellis
++  return Boolean(trellis && typeof trellis === "object")
++}
++
++/** Index of the last `{role, content}` user request message. */
++export function findLatestUserMessageIndexV2(messages) {
++  if (!Array.isArray(messages)) return -1
++  for (let i = messages.length - 1; i >= 0; i--) {
++    if (messages[i]?.role === "user") return i
++  }
++  return -1
++}
++
++/** Concatenated ordinary user text of the latest user request message. */
++export function latestUserPromptTextV2(messages) {
++  const index = findLatestUserMessageIndexV2(messages)
++  if (index < 0) return ""
++  const content = messages[index].content
++  if (typeof content === "string") return content
++  if (!Array.isArray(content)) return ""
++  return content
++    .filter(part => part?.type === "text" && !isTrellisInjectedPartV2(part))
++    .map(part => (typeof part.text === "string" ? part.text : ""))
++    .filter(text => text !== "")
++    .join("\n\n")
++}
++
++/** True once the request carries any assistant message (v1 parity gate). */
++export function transcriptHasAssistantMessageV2(messages) {
++  if (!Array.isArray(messages)) return false
++  return messages.some(message => message?.role === "assistant")
++}
++
++/**
++ * Slot-replace the latest user request message with a clone whose content
++ * carries the Trellis text part first. The original message object and its
++ * `content` array are never mutated, mirroring the v1 ephemeral contract.
++ */
++export function prependEphemeralTextV2(messages, text, kind) {
++  if (!Array.isArray(messages)) return false
++  if (typeof text !== "string") return false
++  const index = findLatestUserMessageIndexV2(messages)
++  if (index < 0) return false
++  const original = messages[index]
++  const content = typeof original.content === "string"
++    ? [{ type: "text", text: original.content }]
++    : Array.isArray(original.content)
++      ? original.content.slice()
++      : []
++  content.unshift({
++    type: "text",
++    text,
++    metadata: { trellis: { [kind]: true } },
++  })
++  messages[index] = {
++    ...original,
++    content,
++  }
++  return true
++}
+diff -ruN lib/trellis-context.js /data/project/collab/.opencode/lib/trellis-context.js
+--- lib/trellis-context.js	2026-11-17 16:01:53.982769745 +0800
++++ /data/project/collab/.opencode/lib/trellis-context.js	2026-11-17 16:01:54.174775340 +0800
+@@ -64,14 +64,19 @@
+   return safeValue ? `${platformName}_${safeValue}` : `${platformName}_${hashValue(value)}`
+ }
+ 
+-// Matches `trellis-implement`, `trellis-check`, `trellis-research` exactly.
+-// Used by chat.message plugins to skip injection inside Trellis sub-agent turns.
+-const TRELLIS_SUBAGENT_RE = /^trellis-(implement|check|research)$/
++// Matches `trellis-implement`, `trellis-check`, `trellis-research` exactly,
++// optionally behind a namespace separator (`project/trellis-implement`,
++// `org:trellis-implement`) because OpenCode 2.x Agent IDs may be scoped.
++// Used by the per-turn context plugins to skip injection inside Trellis
++// sub-agent turns.
++const TRELLIS_SUBAGENT_RE = /^(?:[A-Za-z0-9_.-]+[/:])?trellis-(implement|check|research)$/
+ 
+ /**
+- * Return true when the OpenCode `chat.message` input represents a Trellis
+- * sub-agent turn. `input.agent` is set by OpenCode when a Task tool spawns a
+- * child session with a custom agent (see `packages/opencode/src/tool/task.ts`).
++ * Return true when the OpenCode chat input represents a Trellis sub-agent
++ * turn. `input.agent` is set by OpenCode when a Task tool spawns a child
++ * session with a custom agent (see `packages/opencode/src/tool/task.ts`).
++ * v1 `messages.transform` passes `{sessionID, agent}`; the v2 session
++ * `context` hook event carries the same `agent` field.
+  */
+ export function isTrellisSubagent(input) {
+   if (!input || typeof input !== "object") return false
