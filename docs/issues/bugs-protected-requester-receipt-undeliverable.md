@@ -1,6 +1,6 @@
 # 广播发起方在 `BUILTIN_PROTECT` 内时，领取方永远发不出回执（DONE / BLOCKED 均被拒）——peer handoff 无法闭环
 
-> **状态**：已复核（2026-11-18，`@inf-studio/collab` 维护方）——**部分成立（修正描述后成立）**，待修复
+> **状态**：✅ 已修复（`@inf-studio/collab@0.1.2`，2026-11-18）
 > **范围**：跨工作区（`@inf-studio/collab` 插件本体）
 > **关联**：提案方工作区 `/data/project/std-ui`；受影响 bid `b_bdae848832cd51fb`；
 > 触发场景提案 `std-ui/docs/issues/bugs-popconfirm-confirm-event.md`
@@ -161,3 +161,15 @@ grep -n "BUILTIN_PROTECT" \
 - **不采纳 C**（另造 bid 级等待语义，与 `extractVerdict` 重复）。
 
 修复归属：`@inf-studio/collab` 仓库；发版后回写「已修复（版本号）」。
+
+
+## 修复结果（0.1.2）
+
+- **pull 模式**：受保护发起方的广播写 `receiptMode:"pull"`，接管请求/`collab_accept`/提醒均不再要求
+  `collab_send`，改为「在承接方最后一条回复写 `[handoff] DONE|BLOCKED <bid>`」，由发起方只读提取闭环。
+- **限界 reply**：`kind=reply` + 该 bid 的发起方 + 该单领取人 + bid 归属，四条同时满足才放行（强制 `queue`）；
+  `done/blocked/expired` 的单不再放行；`request`/`note`/`steer` 仍 fail-closed。
+- **提取扩面**：`spawn`/`accept`/`handoff` 的 `claimed` 租约到期均可由发起方提取；`acked` 静默 2h 同样可提取。
+- 回归：`310/310` + `12/12`；文档已迁入插件仓 `docs/collab.md` §11.4/§11.4.1/§12.5。
+
+> 复核过程中确认：提案的「永远停在 acked」表述已收窄——该状态现在有 2h 静默提取路径。
