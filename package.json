@@ -1,0 +1,56 @@
+{
+  "name": "@info-studio/collab",
+  "version": "0.1.0",
+  "description": "Cross-session collaboration for OpenCode: ten native collab_* tools, a thread/inbox protocol and a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt).",
+  "keywords": [
+    "collab",
+    "handoff",
+    "multi-agent",
+    "opencode",
+    "opencode-plugin"
+  ],
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/inf-studio/collab.git"
+  },
+  "homepage": "https://github.com/inf-studio/collab#readme",
+  "bugs": {
+    "url": "https://github.com/inf-studio/collab/issues"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://npm.pkg.github.com"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "prepublishOnly": "pnpm run build",
+    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "6.0.3",
+    "vite-plus": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

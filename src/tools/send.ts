@@ -1,0 +1,115 @@
+import { KINDS } from '../constants.ts';
+import { isValidThreadID, newThreadID, normalizeKind, normalizeThreadID } from '../ids.ts';
+import type { ToolDefinition } from '../types.ts';
+import { jsonInput } from './shared.ts';
+import type { ToolKit } from './shared.ts';
+
+/**
+ * `collab_send` — the raw delivery primitive: envelope + thread bookkeeping via
+ * `dispatch`, with the reply-routing guards (a reply must come from a
+ * participant and go to the thread's counterpart).
+ */
+export function sendTool(kit: ToolKit): ToolDefinition {
+  const { deps, resolveTarget, resolveMode, dispatch } = kit;
+  const { threads } = deps;
+
+  return {
+    name: 'collab_send',
+    description:
+      "Send a message into another OpenCode session's input stream (asynchronous admit, does NOT wait for a reply). " +
+      'A message is part of a hand-off thread: kind request|reply|note (default request) plus a threadID ' +
+      "(auto-generated when omitted). Default mode is `queue`, which waits for the target's next turn and never " +
+      'interrupts the turn it is running; `steer` must be explicit and is forced back to `queue` for read-only ' +
+      'agents (explore/plan). Body is prefixed `[collab:<from>][<kind>:<threadID>] `. Requires confirm:true — ' +
+      'with confirm:false it only previews. Targets in the `protect` list — and any descendant of one — are ' +
+      "refused; a kind=reply must target the thread's counterpart and only a participant may send it.",
+    input: jsonInput({
+      properties: {
+        target: { type: 'string', description: 'Session id (`ses_…`) or an alias from collab.json.' },
+        text: { type: 'string', description: 'Message body (no prefix needed; it is added for you).' },
+        kind: {
+          type: 'string',
+          enum: KINDS,
+          description:
+            'request (default) = ask the target to do something; reply = answer an existing thread ' +
+            '(requires threadID); note = informational, does not change the thread status.'
+        },
+        threadID: {
+          type: 'string',
+          description:
+            'Thread to attach to. Omit for a new request (auto-generated). A reply without threadID is ' +
+            'treated as a new request and the result says so.'
+        },
+        mode: {
+          type: 'string',
+          enum: ['queue', 'steer'],
+          description:
+            "queue (default) waits for the target's next turn — does not interrupt. " +
+            'steer merges into the running turn and may interrupt it: only use it deliberately.'
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'Must be true to actually deliver. false/omitted only returns the preview.'
+        }
+      },
+      required: ['target', 'text', 'confirm']
+    }),
+    async execute(input, context) {
+      const notes: string[] = [];
+      const me = context?.sessionID;
+      let kind = normalizeKind(input?.kind);
+      let threadID = normalizeThreadID(input?.threadID);
+
+      if (threadID && !isValidThreadID(threadID)) {
+        throw new Error(`threadID 格式不合法："${threadID}"（期望 t_<base36ts>_<rand>，或省略以自动生成）`);
+      }
+      if (kind === 'reply' && !threadID) {
+        kind = 'request';
+        notes.push('kind=reply 缺少 threadID → 已按新请求处理（并自动生成 threadID）');
+      }
+
+      // Reply routing: caller must be a participant and the target must be the
+      // thread's counterpart. Without both checks a leaked threadID is enough
+      // to forge a reply (T1) or to write it into someone else's thread (T2).
+      if (kind === 'reply' && threadID) {
+        const thread = await threads.read(threadID);
+        if (!thread) {
+          kind = 'request';
+          notes.push(`storage 里没有 thread ${threadID} → 已按新请求处理`);
+        } else if (!me) {
+          notes.push('无会话上下文（无 sessionID）：未校验 reply 的参与者与对端。');
+        } else if (me !== thread.fromSession && me !== thread.toSession) {
+          throw new Error(
+            `拒绝回执：当前会话 ${me} 不是 thread ${threadID} 的参与方` +
+              `（发起方 ${thread.fromSession ?? '?'}，对端 ${thread.toSession ?? '?'}）。未发送任何内容。`
+          );
+        } else {
+          const counterpart = thread.fromSession === me ? thread.toSession : thread.fromSession;
+          const resolved = await resolveTarget(input?.target);
+          if (counterpart && resolved.sessionID !== counterpart) {
+            throw new Error(
+              `拒绝回执：thread ${threadID} 的对端是 ${counterpart}，与 target ${resolved.sessionID} 不一致。` +
+                `回执请用 collab_reply {threadID}（自动路由）。未发送任何内容。`
+            );
+          }
+          const { mode, forced } = resolveMode(input?.mode, context?.agent);
+          return dispatch({
+            context,
+            input,
+            kind,
+            threadID,
+            mode,
+            forced,
+            notes,
+            target: resolved
+          });
+        }
+      }
+      if (!threadID) threadID = newThreadID();
+
+      const { mode, forced } = resolveMode(input?.mode, context?.agent);
+      const target = await resolveTarget(input?.target);
+      return dispatch({ context, input, kind, threadID, mode, forced, notes, target });
+    }
+  };
+}
