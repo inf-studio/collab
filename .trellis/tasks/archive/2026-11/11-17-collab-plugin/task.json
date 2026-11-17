@@ -1,0 +1,28 @@
+{
+  "id": "collab-plugin",
+  "name": "collab-plugin",
+  "title": "collab 插件化（V2 server plugin：原生工具 + 事件注入）",
+  "description": "把 collab.mjs 的能力做成 V2 插件：ctx.tool 注册 collab_send/inbox/wait/list，ctx.event 订阅实时收，ctx.session.hook(context) 注入未读，ctx.storage 持久化游标，全局配置走 collab.json",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "@长久同学^v^",
+  "assignee": "@长久同学^v^",
+  "createdAt": "2026-11-17",
+  "completedAt": "2026-11-17",
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {
+    "notes": "已交付：.opencode/plugins/collab.js（4 工具 + 事件注入 + 全局配置）。已验证：插件加载无 failed、工具可调、投递落 metadata.collab、confirm:false 只预览、protect 拒绝、idle wait 1ms、alias 生效。未验证：①未读注入的运行时可见性 ②重启后游标持久 ③独立 trellis-check 复核（实现子代理因余额中断）。"
+  }
+}

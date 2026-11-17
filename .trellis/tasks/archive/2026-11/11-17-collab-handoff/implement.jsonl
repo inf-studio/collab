@@ -1,0 +1,4 @@
+{"file": "docs/collab.md", "reason": "CLI + 插件的用法 SSOT，交接协议节要写在这里"}
+{"file": ".trellis/spec/guides/cross-session-collab-guide.md", "reason": "选路/硬规则/API 语义（prompt≠generate）"}
+{"file": ".trellis/tasks/archive/2026-11/11-17-collab-plugin/research/events.md", "reason": "V2 事件类型探测结论（session.inbox.enqueued）"}
+{"file": ".trellis/tasks/archive/2026-11/11-17-collab-verify/research/verify.md", "reason": "上一轮实测：注入冗余、只读 agent 无工具、持久化未验"}

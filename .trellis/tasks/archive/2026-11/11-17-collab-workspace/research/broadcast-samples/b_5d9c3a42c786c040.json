@@ -1,0 +1,69 @@
+{
+  "bid": "b_5d9c3a42c786c040",
+  "scope": "peer",
+  "workspace": "/tmp/collab-sandbox/b",
+  "issuePath": "docs/issues/fix-sandbox-handoff.md",
+  "title": "sandbox worker store 交接（11-17-collab-sandbox）",
+  "expected": "implement",
+  "affectedFiles": [
+    "packages/state/src/machine/worker/store.ts"
+  ],
+  "candidates": [
+    {
+      "sid": "ses_e1909c413ffeQD5CoNmRdd7796",
+      "score": 91,
+      "why": [
+        "file:tmp/collab-sandbox/b/packages/state/src/machine/worker/store.ts",
+        "title:sandbox",
+        "title:worker",
+        "title:store",
+        "task:11-17-collab-sandbox",
+        "agent:build",
+        "recent:1m"
+      ]
+    },
+    {
+      "sid": "ses_e1909c346ffeCw1L3NIqrEE6yZ",
+      "score": 18,
+      "why": [
+        "title:sandbox",
+        "agent:build",
+        "recent:1m"
+      ]
+    }
+  ],
+  "state": "done",
+  "attempts": 0,
+  "skipped": [],
+  "seenBy": [
+    "ses_e1909c346ffeCw1L3NIqrEE6yZ",
+    "ses_e1909c413ffeQD5CoNmRdd7796"
+  ],
+  "reminded": [],
+  "replies": [
+    {
+      "from": "ses_e1909c346ffeCw1L3NIqrEE6yZ",
+      "at": 1794876408729,
+      "text": "sandbox-receipt"
+    }
+  ],
+  "from": {
+    "sid": "ses_e19134f21ffeqkDolblhkxF2CL",
+    "directory": "/data/project/muke-pos-app"
+  },
+  "createdAt": 1794876402260,
+  "updatedAt": 1794876408730,
+  "claim": {
+    "by": "ses_e1909c346ffeCw1L3NIqrEE6yZ",
+    "kind": "accept",
+    "token": "k_mwjz2j9a_a0oo",
+    "at": 1794876407038,
+    "leaseMs": 300000
+  },
+  "ackedAt": 1794876407037,
+  "receipt": {
+    "from": "ses_e1909c346ffeCw1L3NIqrEE6yZ",
+    "at": 1794876408729,
+    "note": "sandbox-receipt"
+  }
+}

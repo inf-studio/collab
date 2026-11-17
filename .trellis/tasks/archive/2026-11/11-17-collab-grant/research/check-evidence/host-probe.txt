@@ -1,0 +1,27 @@
+$ opencode api post /api/session --data '{"title":"check-grant-probe-1117","agent":"explore","location":{"directory":"/tmp/opencode/check-ws"}}'
+{"data":{"id":"ses_e17a20da0ffe0UyhAw9M7TY00m","agent":"explore","title":"check-grant-probe-1117","location":{"directory":"/tmp/opencode/check-ws"}}}
+
+$ opencode api patch /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m --data '{"permissions":[{"action":"read","resource":"*","effect":"allow"},{"action":"collab_list","resource":"*","effect":"deny"}]}'
+exit=0
+
+$ opencode api get /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m
+permissions=[{"action":"read","resource":"*","effect":"allow"},{"action":"collab_list","resource":"*","effect":"deny"}]
+
+$ opencode api patch /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m --data '{"permissions":[... base + 4 missing collab allows ...]}'
+exit=0
+
+$ opencode api get /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m
+permissions=[{"action":"read","resource":"*","effect":"allow"},{"action":"collab_list","resource":"*","effect":"deny"},{"action":"collab_inbox","resource":"*","effect":"allow"},{"action":"collab_wait","resource":"*","effect":"allow"},{"action":"collab_reply","resource":"*","effect":"allow"},{"action":"collab_send","resource":"*","effect":"allow"}]
+
+$ opencode api post /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m/agent --data '{"agent":"build"}'
+exit=0
+
+$ opencode api get /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m
+{"agent":"build","permissions":[{"action":"read","resource":"*","effect":"allow"},{"action":"collab_list","resource":"*","effect":"deny"},{"action":"collab_inbox","resource":"*","effect":"allow"},{"action":"collab_wait","resource":"*","effect":"allow"},{"action":"collab_reply","resource":"*","effect":"allow"},{"action":"collab_send","resource":"*","effect":"allow"}]}
+
+$ opencode api delete /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m
+exit=0
+
+$ opencode api get /api/session/ses_e17a20da0ffe0UyhAw9M7TY00m
+{"_tag":"SessionNotFoundError","sessionID":"ses_e17a20da0ffe0UyhAw9M7TY00m","message":"Session not found: ses_e17a20da0ffe0UyhAw9M7TY00m"}
+HTTP 404 Not Found

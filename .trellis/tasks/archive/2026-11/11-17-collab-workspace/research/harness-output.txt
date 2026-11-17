@@ -1,0 +1,526 @@
+
+--- S1 send preview (confirm:false)
+未投递（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+目标: ses_bbb  agent=explore  state=busy  title="B"
+kind=request  thread=t_mwjzyjtv_8jkv
+模式: queue
+将发送:
+[collab:ses_aaa…_aaa][request:t_mwjzyjtv_8jkv] 预览测试
+delivered prompts so far: 0
+
+--- S2 send confirm (build → explore, mode omitted)
+已投递 → ses_bbb  agent=explore  state=busy  title="B"
+kind=request  thread=t_mwjzyjty_dfxo  status=open
+mode=queue  message=msg_1  delivery=queue
+提示: 对方回执后可 collab_wait {threadID} 等结果；不要用 steer 打断对方的当前轮。
+prompt delivery=queue metadata={"from":"ses_aaa…_aaa","fromSessionID":"ses_aaa","cid":"c_mwjzyjtz_nlhj","kind":"request","threadID":"t_mwjzyjty_dfxo","ts":1794877900775}
+
+--- S2 thread record
+{
+ "threadID": "t_mwjzyjty_dfxo",
+ "fromSession": "ses_aaa",
+ "toSession": "ses_bbb",
+ "kind": "request",
+ "status": "open",
+ "msgs": [
+  {
+   "threadID": "t_mwjzyjty_dfxo",
+   "cid": "c_mwjzyjtz_nlhj",
+   "kind": "request",
+   "text": "请处理任务 T",
+   "ts": 1794877900775,
+   "from": "ses_aaa…_aaa",
+   "fromSession": "ses_aaa",
+   "toSession": "ses_bbb"
+  }
+ ],
+ "createdAt": 1794877900775,
+ "updatedAt": 1794877900775
+}
+
+--- S3 send from explore with mode:steer
+已投递 → ses_aaa  agent=build  state=busy  title="A"
+kind=request  thread=t_mwjzyju0_drj3  status=open
+mode=queue(forced)  message=msg_2  delivery=queue
+注: 只读 agent：已强制 queue（入队，不打断对方当前轮）。
+提示: 对方回执后可 collab_wait {threadID} 等结果；不要用 steer 打断对方的当前轮。
+prompt delivery=queue
+
+--- S4 first request (message NOT in request)
+[
+ {
+  "type": "text",
+  "text": "[collab] 待处理请求 1 条\n- request t_manual_0001 from=ses_bbb: 需要你复核 X → 处理后用 collab_reply {threadID:\"t_manual_0001\"}\n全文/状态用 collab_inbox。"
+ }
+]
+
+--- S5 second request (same message again)
+[]
+
+--- S6 message already in request (metadata cid)
+[]
+
+--- S7 message already in request (text fallback, no metadata)
+[]
+
+--- S8 collab_reply from explore
+已投递 → ses_aaa  agent=build  state=busy  title="A"
+kind=reply  thread=t_mwjzyjty_dfxo  status=answered
+mode=queue(forced)  message=msg_3  delivery=queue
+注: 只读 agent：已强制 queue（入队，不打断对方当前轮）。
+提示: 回执已记入 thread；对端可用 collab_wait {threadID} 取到全文。
+target prompt sessionID=ses_aaa delivery=queue
+
+--- S8 thread status
+answered
+
+--- S9 collab_wait {threadID} with an existing reply
+thread t_mwjzyjty_dfxo 收到回执（status=answered）:
+from=ses_bbb…_bbb (ses_bbb)  09:11:40
+
+已完成 T
+
+--- S9 collab_wait {threadID} on an unknown thread (now fails fast)
+没有 thread t_missing_0000：threadID 可能拼错，或该 thread 由别的项目/目录（不同 location）创建。请用 collab_inbox 核对 threadID；若请求刚发出，稍后重试。
+
+--- S10 collab_inbox (ses_bbb)
+[collab] 本会话还没有任何跨会话消息。
+
+--- S11 kind:reply without threadID (preview)
+未投递（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+目标: ses_bbb  agent=explore  state=busy  title="B"
+kind=request  thread=t_mwjzyjz9_bonq
+模式: queue
+注: kind=reply 缺少 threadID → 已按新请求处理（并自动生成 threadID）
+将发送:
+[collab:ses_aaa…_aaa][request:t_mwjzyjz9_bonq] 忘记带 threadID 的回执
+
+--- S12 request whose thread is answered
+[]
+
+--- S13 collab_inbox (ses_aaa)
+[collab] 共 4 条，未读 0 条（显示最近 4 条，单条上限 4000 字）:
+09:11:40  [request] thread=t_manual_0001  from=ses_bbb (ses_bbb)  seen injected status=open
+    需要你复核 X
+09:11:40  [request] thread=t_manual_0002  from=ses_bbb (ses_bbb)  seen injected status=open
+    已在请求里的消息
+09:11:40  [note] thread=t_manual_0003  from=cli-user (cli-user)  seen injected status=open
+    CLI 发来的消息
+09:11:40  [request] thread=t_answered_0001  from=ses_bbb (ses_bbb)  seen injected status=answered
+    已完成的请求
+回执用 collab_reply {threadID}；等结果用 collab_wait {threadID}；无 thread 的 legacy 消息无需回执。
+
+--- S14 send to a protected session
+拒绝投递：目标 ses_e1eb91cebffeTv1467ubJLKebk 本身在 protect 名单内（/root/.config/opencode/collab.json 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。
+
+--- S14 send to self
+拒绝投递：target 就是当前会话本身（会导致自我排队）。未发送任何内容。
+
+--- S14 reply on an unknown thread
+storage 里没有 thread t_ghost_0001：无法确定对端。请改用 collab_send {target, kind:"reply", threadID:"t_ghost_0001", text, confirm:true} 显式指定目标。
+
+--- S14 malformed threadID
+threadID 格式不合法："nope"（期望 t_<base36ts>_<rand>，或省略以自动生成）
+
+--- S15 collab_list
+5 个会话（id / agent / state / loc / updated / title）:
+ses_aaa  build  busy  loc=harness  --:--:--  "A"  [self]
+ses_bbb  explore  busy  loc=harness  --:--:--  "B"
+ses_e1eb91cebffeTv1467ubJLKebk  build  busy  loc=harness  --:--:--  "schema"  alias=schema [protected]
+ses_child  trellis-implement  busy  loc=harness  --:--:--  "child of schema"  [protected-child] parent=ses_e1eb…Kebk
+ses_grand  trellis-implement  busy  loc=harness  --:--:--  "grandchild of schema"  [protected-child] parent=ses_chil…hild
+[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。
+
+--- S16 collab_wait {target} (idle mode)
+目标已空闲：ses_bbb agent=explore（耗时 0ms）
+
+--- S17 protected session's direct child
+…
+  ✓ S17 send to a direct child is rejected — 1ms / 拒绝投递：目标 ses_child 的祖先（第 1 级）ses_e1eb91cebffeTv1467ubJLKebk 在 protect 名单内（/root/.config/opencode/collab.json 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。
+  ✓ S17 rejection names the ancestor + depth 1 — 拒绝投递：目标 ses_child 的祖先（第 1 级）ses_e1eb91cebffeTv1467ubJLKebk 在 protect 名单内（/root/.config/opencode/collab.json 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。
+
+--- S17 collab_list
+10 个会话（id / agent / state / loc / updated / title）:
+ses_aaa  build  busy  loc=harness  --:--:--  "A"  [self]
+ses_bbb  explore  busy  loc=harness  --:--:--  "B"
+ses_e1eb91cebffeTv1467ubJLKebk  build  busy  loc=harness  --:--:--  "schema"  alias=schema [protected]
+ses_child  trellis-implement  busy  loc=harness  --:--:--  "child of schema"  [protected-child] parent=ses_e1eb…Kebk
+ses_grand  trellis-implement  busy  loc=harness  --:--:--  "grandchild of schema"  [protected-child] parent=ses_chil…hild
+ses_ccc  build  busy  loc=harness  --:--:--  "C"
+ses_ddd  build  busy  loc=harness  --:--:--  "D"
+ses_req  build  busy  loc=a  09:11:40  "11-17-collab-workspace 收口"
+ses_a_target  build  idle  loc=a  09:10:40  "11-17-collab-workspace machine cfg 修复"
+ses_a_second  build  idle  loc=a  09:11:40  "别的活儿（无关）"
+[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。
+  ✓ S17 list marks [protected-child] + parent=<short> — ses_child  trellis-implement  busy  loc=harness  --:--:--  "child of schema"  [protected-child] parent=ses_e1eb…Kebk
+
+--- S18 protected session's grandchild
+…
+  ✓ S18 send to a grandchild is rejected — 1ms / 拒绝投递：目标 ses_grand 的祖先（第 2 级）ses_e1eb91cebffeTv1467ubJLKebk 在 protect 名单内（/root/.config/opencode/collab.json 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。
+  ✓ S18 rejection reports the 2nd-level ancestor — 拒绝投递：目标 ses_grand 的祖先（第 2 级）ses_e1eb91cebffeTv1467ubJLKebk 在 protect 名单内（/root/.config/opencode/collab.json 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。
+
+--- S19 thread
+t_mwjzyk13_h84u
+  ✓ S19 non-participant collab_reply is rejected — 0ms / 拒绝回执：当前会话 ses_ccc 不是 thread t_mwjzyk13_h84u 的参与方（发起方 ses_aaa，对端 ses_bbb）。未发送任何内容。
+  ✓ S19 non-participant collab_wait is rejected — 1ms / 拒绝等待：当前会话 ses_ccc 不是 thread t_mwjzyk13_h84u 的参与方（发起方 ses_aaa，对端 ses_bbb）。
+
+--- S20 reply misrouted to an unrelated target
+…
+  ✓ S20 kind:reply to a non-counterpart target is rejected — 0ms / 拒绝回执：thread t_mwjzyk13_h84u 的对端是 ses_aaa，与 target ses_ddd 不一致。回执请用 collab_reply {threadID}（自动路由）。未发送任何内容。
+  ✓ S20 non-participant kind:reply is rejected — 0ms / 拒绝回执：当前会话 ses_ccc 不是 thread t_mwjzyk13_h84u 的参与方（发起方 ses_aaa，对端 ses_bbb）。未发送任何内容。
+  ✓ S20 thread not polluted — msgs 1→1
+  ✓ S20 nothing delivered to the unrelated target
+  ✓ S20 legit reply still accepted — kind=reply  thread=t_mwjzyk13_h84u  status=answered
+  ✓ S21 round-1 reply is returned
+
+--- S21 second request on the same thread
+…
+  ✓ S21 second request reopens the thread (open) — kind=request  thread=t_mwjzyk15_3vwp  status=open
+  ✓ S21 wait does not return the stale reply — 1001ms / 等待回执超时：thread t_mwjzyk15_3vwp 在 1000ms 内没有新的 kind=reply 消息（只看最后一次 request 之后的回执；可加大 timeoutMs，或让对端 collab_reply {threadID}）
+  ✓ S21 reused thread is reminded again — [{"type":"text","text":"[collab] 待处理请求 1 条\n- request t_mwjzyk15_3vwp from=ses_aaa: S21 round 2 → 处理后用 collab_reply {threadID:\"t_mwjzyk15_3vwp\"}\n全文/状态用 collab_inbox。"}]
+  ✓ S21 round-2 reply is returned
+
+--- S22 legacy injection
+[{"type":"text","text":"[collab] 待处理请求 1 条\n- request - from=cli-user: legacy 无 thread 的消息 → 无 thread 关联，无需回执；直接处理即可（或 collab_send 发起新请求）\n全文/状态用 collab_inbox。"}]
+  ✓ S22 legacy message injected
+  ✓ S22 legacy hint has no collab_reply
+  ✓ S22 no literal "undefined" threadID
+  ✓ S22 legacy record has no threadID
+  ✓ S22 collab_wait malformed threadID fails fast — 0ms / threadID 格式不合法："not-a-thread"（期望 t_<base36ts>_<rand>，从 collab_inbox 或请求正文里取）
+  ✓ S22 collab_wait unknown threadID fails fast — 0ms / 没有 thread t_ghost_9999：threadID 可能拼错，或该 thread 由别的项目/目录（不同 location）创建。请用 collab_inbox 核对 threadID；若请求刚发出，稍后重试。
+  ✓ S22 both failures are immediate (<500ms) — 0ms
+
+--- S23 broadcast preview (peer, WS_B)
+…
+
+--- S23 preview
+未广播（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_466c6371838acb0e  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/b
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+群组成员 2 个根会话（已排除子会话与 [protected*]），匹配分（阈值 80）:
+   85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+    2  ses_b2  agent=explore  "bench 压测脚本"  why=[recent:60m]
+top-1 ses_b1 score=85 → 不投递任何 prompt（接管请求走它的下一轮 context 注入，0 调用）；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE / 5 分钟不答 → 顺延下一候选（attempts+1）
+  ✓ S23 preview produced a bid — b_466c6371838acb0e
+  ✓ S23 top candidate is ses_b1 (≥80) —    85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+  ✓ S23 why names the matched file —    85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+  ✓ S23 why names the matched title word(s) —    85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+  ✓ S23 why names the shared task line —    85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+  ✓ S23 why names the agent match —    85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+  ✓ S23 child sessions are not candidates — 未广播（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_466c6371838acb0e  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/b
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+群组成员 2 个根会话（已排除子会话与 [protected*]），匹配分（阈值 80）:
+   85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+    2  ses_b2  agent=explore  "bench 压测脚本"  why=[recent:60m]
+top-1 ses_b1 score=85 → 不投递任何 prompt（接管请求走它的下一轮 context 注入，0 调用）；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE / 5 分钟不答 → 顺延下一候选（attempts+1）
+  ✓ S23 protected sessions are not candidates — 未广播（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_466c6371838acb0e  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/b
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+群组成员 2 个根会话（已排除子会话与 [protected*]），匹配分（阈值 80）:
+   85  ses_b1  agent=build  "11-17-worker-store worker store 重构"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+    2  ses_b2  agent=explore  "bench 压测脚本"  why=[recent:60m]
+top-1 ses_b1 score=85 → 不投递任何 prompt（接管请求走它的下一轮 context 注入，0 调用）；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE / 5 分钟不答 → 顺延下一候选（attempts+1）
+  ✓ S23 no prompt is sent while previewing
+  ✓ S23 preview wrote nothing to the broadcast dir
+  ✓ S23b busy>30min candidate still clears the threshold —    86  ses_d1  agent=build  "11-17-worker-store worker store state machine 修复"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, title:state, task:11-17-worker-store, agent:build, recent:1m, busy:-10(45m)]
+  ✓ S23b preview announces the wake-up — 未广播（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_84a63c21230e3f61  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/d
+提案: docs/issues/fix-worker-busy.md  标题: "worker store state machine 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+群组成员 1 个根会话（已排除子会话与 [protected*]），匹配分（阈值 80）:
+   86  ses_d1  agent=build  "11-17-worker-store worker store state machine 修复"  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, title:state, task:11-17-worker-store, agent:build, recent:1m, busy:-10(45m)]
+top-1 ses_d1 score=86 已 busy 45min → 确认后补发 1 条 queue prompt 叫醒；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE / 5 分钟不答 → 顺延下一候选（attempts+1）
+
+--- S23b confirm (busy top-1)
+已广播 peer 交接：bid=b_84a63c21230e3f61（写入 /tmp/collab-harness-ThqO6C/broadcast，其余成员 0 模型调用）
+bid=b_84a63c21230e3f61  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/d
+提案: docs/issues/fix-worker-busy.md  标题: "worker store state machine 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+匹配分（阈值 80）:
+   86  ses_d1  busy=45min  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, title:state, task:11-17-worker-store, agent:build, recent:1m, busy:-10(45m)]
+top-1 ses_d1 busy 45min → 已补发 1 条 queue prompt 叫醒。
+领取: collab_accept {bid:"b_84a63c21230e3f61", confirm:true}（原子，只有一个 winner）；回执: [handoff] DONE|BLOCKED b_84a63c21230e3f61 <摘要>
+  ✓ S23b exactly one wake prompt — ["ses_d1"]
+  ✓ S23b wake prompt is queued (never steer) — queue
+  ✓ S23b wake prompt carries the hand-off ask — [collab:ses_req…_req][request] [collab-handoff] worker store state machine 修复（11-17-worker-store）
+提案：docs/issues/fix-worker-busy.md（工作区 /tmp/collab-harness-ThqO
+  ✓ S23b record is open and keeps the ranking — {"sid":"ses_d1","score":86,"why":["file:packages/state/src/machine/worker/store.ts","title:worker","title:store","title:state","task:11-17-worker-store","agent:build","recent:1m","busy:-10(45m)"]}
+
+--- S24 broadcast confirmed (WS_B)
+已广播 peer 交接：bid=b_466c6371838acb0e（写入 /tmp/collab-harness-ThqO6C/broadcast，其余成员 0 模型调用）
+bid=b_466c6371838acb0e  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/b
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+匹配分（阈值 80）:
+   85  ses_b1  busy=0min  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, task:11-17-worker-store, agent:build, recent:10m]
+    2  ses_b2  busy=0min  why=[recent:60m]
+top-1 ses_b1 → 未投递 prompt：它下一次模型请求会看到群组广播，用 collab_accept {bid:"b_466c6371838acb0e"} 领取。
+领取: collab_accept {bid:"b_466c6371838acb0e", confirm:true}（原子，只有一个 winner）；回执: [handoff] DONE|BLOCKED b_466c6371838acb0e <摘要>
+  ✓ S24 broadcast file written — b_466c6371838acb0e.json,b_84a63c21230e3f61.json
+  ✓ S24 record is open with ranked candidates
+  ✓ S24 idle top-1 gets no prompt (file-only broadcast)
+
+--- S25 concurrent accept #1
+已领取 b_466c6371838acb0e（winner，token=k_mwjzykwk_2l14，state=acked，lease=300000ms）
+scope=peer workspace=/tmp/collab-harness-ThqO6C/ws/b 期望=implement
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"
+影响面(1): packages/state/src/machine/worker/store.ts
+跨仓护栏：只允许改目标仓 docs/issues/**，git 只读，不 push；实施由目标仓 owner 复核提交。
+已通知发起方 ses_req（message=msg_11）。
+完成后回执: [handoff] DONE b_466c6371838acb0e <commit sha 或摘要>（用 collab_send 发给 ses_req）
+
+--- S25 concurrent accept #2
+已被 ses_b1 领取（bid=b_466c6371838acb0e，token=k_mwjzykwk_2l14）—— 你不是 winner。不要重复领取，也不要再拉新。
+  ✓ S25 exactly one winner — 1 winner(s)
+  ✓ S25 loser is told who claimed it — 已被 ses_b1 领取（bid=b_466c6371838acb0e，token=k_mwjzykwk_2l14）—— 你不是 winner。不要重复领取，也不要再拉新。
+  ✓ S25 record is acked with the winner — {"by":"ses_b1","kind":"accept","token":"k_mwjzykwk_2l14","at":1794877902164,"leaseMs":300000}
+  ✓ S25 requester was notified with a note — prompts→ses_req
+  ✓ S25 a third accept cannot steal it — 已被 ses_b1 领取（bid=b_466c6371838acb0e state=acked）—— 不要重复领取，也不要再拉新。
+  ✓ S25 preview on a claimed bid reports the state — 已被 ses_b1 领取（bid=b_466c6371838acb0e state=acked）—— 不要重复领取，也不要再拉新。
+  ✓ S26 repeated broadcast is idempotent (same bid, no new file) — b_466c6371838acb0e / 2
+  ✓ S26 repeated broadcast says so — 已存在同一内容的交接（bid 幂等，不新建）：state=acked attempts=0
+  ✓ S26 edited proposal yields a new bid — b_8539e10f254c4a66 vs b_466c6371838acb0e
+  ✓ S26 preview still wrote nothing
+
+--- S27 concurrent spawn #1
+已广播并拉新（无候选 ≥80）：bid=b_e81e92c04b399f61
+bid=b_e81e92c04b399f61  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/c
+提案: docs/issues/fix-nobody-home.md  标题: "nobody home"  期望: implement
+影响面(1): apps/pos/src/main.ts
+新会话: ses_spawn_1 agent=explore loc=/tmp/collab-harness-ThqO6C/ws/c title="impl:fix-nobody-home"
+已向新会话投递接管请求（queue）。
+回执格式: [handoff] DONE|BLOCKED b_e81e92c04b399f61 <摘要>；该会话不会被删除（collab_list 标 [bootstrap]）。
+
+--- S27 concurrent spawn #2
+未拉新：bid 已被 ses_req 领取（并发下只有一个 winner）。
+bid=b_e81e92c04b399f61  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/c
+提案: docs/issues/fix-nobody-home.md  标题: "nobody home"  期望: implement
+影响面(1): apps/pos/src/main.ts
+用 collab_accept {bid:"b_e81e92c04b399f61"} 查看/接手；不要重复拉新。
+  ✓ S27 exactly one session spawned — 1 session(s)
+  ✓ S27 spawned session carries location.directory — {"directory":"/tmp/collab-harness-ThqO6C/ws/c"}
+  ✓ S27 spawned session defaults to explore — explore
+  ✓ S27 spawned session title is impl:<slug> — impl:fix-nobody-home
+  ✓ S27 record is claimed by the spawned session — {"by":"ses_spawn_1","kind":"spawn","token":"k_mwjzykwn_tm7o","at":1794877902167,"leaseMs":300000,"spawner":"ses_req"}
+  ✓ S27 spawned session received the ask — prompt→spawn
+  ✓ S27 loser does not spawn again — 未拉新：bid 已被 ses_req 领取（并发下只有一个 winner）。
+  ✓ S27 agent:build without agentConfirm is refused — 0ms / 拒绝拉新：agent="build" 需要每次显式确认（传 agentConfirm:true）。默认 explore 是只读的，不需要该参数。未创建任何会话。
+  ✓ S27 refused build spawn created no session — 0
+  ✓ S27 agent:build with agentConfirm:true spawns a build session — {"id":"ses_spawn_2","agent":"build","title":"impl:fix-build-confirm","time":{"created":1794877902168,"updated":1794877902168},"location":{"directory":"/tmp/collab-harness-ThqO6C/ws/e"}}
+[collab] handoff b_466c6371838acb0e → done
+  ✓ S28 receipt moves the bid to done — done
+  ✓ S28 receipt is recorded with its note — {"from":"ses_b1","at":1794877902169,"note":"shipped-in-abc1234"}
+  ✓ S28 a closed bid cannot be claimed — 广播 b_466c6371838acb0e 已闭环（state=done）：shipped-in-abc1234。无需领取。
+
+--- S29 after lease expiry
+未领取（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_84a63c21230e3f61 scope=peer state=open attempts=1
+提案: docs/issues/fix-worker-busy.md  标题: "worker store state machine 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+候选 top: ses_d1 score=86
+  ✓ S29 expired lease reopens with attempts=1 — {"attempts":1,"state":"open"}
+  ✓ S29 expired holder is skipped — ["ses_d1"]
+  ✓ S29 attempts > 3 → expired, escalation instead of re-delivery — 0ms / 广播 b_84a63c21230e3f61 已 expired（attempts=5 > 3）：需人工接手，不再自动重投。
+  ✓ S29 expired state is persisted — expired
+
+--- S30 collab_list (WS_B)
+4 个会话（id / agent / state / loc / updated / title）:
+ses_b1  build  idle  loc=b  09:01:40  "11-17-worker-store worker store 重构"
+ses_b2  explore  idle  loc=b  08:11:40  "bench 压测脚本"
+ses_b_child  trellis-implement  idle  loc=b  09:11:40  "11-17-worker-store child"  parent=ses_b1…s_b1
+ses_e23a4a23fffe4c4m7UQFR8dUL3  build  idle  loc=b  09:11:40  "11-17-worker-store parity"  alias=parity [protected]
+[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。
+  ✓ S30 directory filter only returns that workspace — ses_b1  build  idle  loc=b  09:01:40  "11-17-worker-store wo | ses_b2  explore  idle  loc=b  08:11:40  "bench 压测脚本" | ses_b_child  trellis-implement  idle  loc=b  09:11:40  "11-1 | ses_e23a4a23fffe4c4m7UQFR8dUL3  build  idle  loc=b  09:11:40
+  ✓ S30 children stay listed with parent= — 4 个会话（id / agent / state / loc / updated / title）:
+ses_b1  build  idle  loc=b  09:01:40  "11-17-worker-store worker store 重构"
+ses_b2  explore  idle  loc=b  08:11:40  "bench 压测脚本"
+ses_b_child  trellis-implement  idle  loc=b  09:11:40  "11-17-worker-store child"  parent=ses_b1…s_b1
+ses_e23a4a23fffe4c4m7UQFR8dUL3  build  idle  loc=b  09:11:40  "11-17-worker-store parity"  alias=parity [protected]
+[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。
+  ✓ S30 spawned session is marked [bootstrap] — ses_spawn_1  explore  idle  loc=c  09:11:42  "impl:fix-nobody-home"  [bootstrap]
+  ✓ S30 list shows open hand-offs — 2 个会话（id / agent / state / loc / updated / title）:
+ses_c_member  build  idle  loc=c  08:41:40  "C 仓旁观会话"
+ses_spawn_1  explore  idle  loc=c  09:11:42  "impl:fix-nobody-home"  [bootstrap]
+[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。
+未闭环交接:
+- b_e81e92c04b399f61 claimed scope=peer "$ nobody home" 提案=docs/issues/fix-nobody-home.md 承接=ses_spawn_1 attempts=0
+  ✓ S30 peer scope refuses a path outside docs/issues/ — 0ms / 拒绝广播：issuePath "app/main.ts" 不在 /tmp/collab-harness-ThqO6C/ws/b/docs/issues/ 下（peer scope 只允许目标仓 docs/issues/**，见跨仓写边界）。
+  ✓ S30 peer scope refuses a missing proposal — 0ms / 提案文件不存在："docs/issues/fix-nope.md"（先写提案，再广播）
+
+--- S30 broadcast in own workspace
+已广播 peer 交接：bid=b_d020adf4ae7b3f77（写入 /tmp/collab-harness-ThqO6C/broadcast，其余成员 0 模型调用）
+bid=b_d020adf4ae7b3f77  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/a
+提案: docs/issues/fix-collab-self.md  标题: "collab 自测（11-17-collab-workspace）"  期望: implement
+影响面(1): packages/machine/src/cfg/impl.ts
+匹配分（阈值 80）:
+   89  ses_a_target  busy=0min  why=[file:packages/machine/src/cfg/impl.ts, title:collab, title:workspace, title:machine, task:11-17-collab-workspace, agent:build, recent:1m]
+   15  ses_a_second  busy=0min  why=[agent:build, recent:0m]
+top-1 ses_a_target → 未投递 prompt：它下一次模型请求会看到群组广播，用 collab_accept {bid:"b_d020adf4ae7b3f77"} 领取。
+领取: collab_accept {bid:"b_d020adf4ae7b3f77", confirm:true}（原子，只有一个 winner）；回执: [handoff] DONE|BLOCKED b_d020adf4ae7b3f77 <摘要>
+
+--- S30 injection #1
+[{"type":"text","text":"[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 接管请求 b_d020adf4ae7b3f77：collab 自测（11-17-collab-workspace）（提案 docs/issues/fix-collab-self.md，期望 implement，影响面 packages/machine/src/cfg/impl.ts） → 有余力请 collab_accept {bid:\"b_d020adf4ae7b3f77\", confirm:true}（= ACCEPT）；没余力就回一条 \"DECLINE <理由>\" 让下一候选接手；5 分钟不答自动顺延。"}]
+
+--- S30 injection #2
+[]
+  ✓ S30 broadcast injected into a group member — [{"type":"text","text":"[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 接管请求 b_d020adf4ae7b3f77：collab 自测（11-17-collab-workspace）（提案 docs/issues/fix-collab-self.md，期望 implement，影响面 packages/machine/src/cfg/impl.ts） → 有余力请 collab_accept {bid:\"b_d020adf4ae7b3f77\", confirm:true}（= ACCEPT）；没余力就回一条 \"DECLINE <理由>\" 让下一候选接手；5 分钟不答自动顺延。"}]
+  ✓ S30 broadcast injected only once per session — []
+  ✓ S30 child sessions get no broadcast — []
+  ✓ S30 protected lines get no broadcast — []
+
+--- S30 reminder #1
+[{"type":"text","text":"[collab] 新消息 1 条\n- note    b_466c6371838acb0e from=ses_b1: [handoff] DONE b_466c6371838acb0e shipped-in-abc1234\n全文/状态用 collab_inbox。\n\n[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 交接未闭环 b_d020adf4ae7b3f77：collab 自测（11-17-collab-workspace） state=acked 接手 ses_a_target 自 09:05:42 起 → 用 collab_inbox 看回执；回执格式 [handoff] DONE|BLOCKED <b_d020adf4ae7b3f77> <摘要>。"}]
+
+--- S30 reminder #2
+[]
+  ✓ S30 unclosed hand-off is reminded to its requester — [{"type":"text","text":"[collab] 新消息 1 条\n- note    b_466c6371838acb0e from=ses_b1: [handoff] DONE b_466c6371838acb0e shipped-in-abc1234\n全文/状态用 collab_inbox。\n\n[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 交接未闭环 b_d020adf4ae7b3f77：collab 自测（11-17-collab-workspace） state=acked 接手 ses_a_target 自 09:05:42 起 → 用 collab_inbox 看回执；回执格式 [handoff] DONE|BLOCKED <b_d020adf4ae7b3f77> <摘要>。"}]
+  ✓ S30 reminder happens only once — []
+
+--- S30c collab_handoff (local, multi-candidate)
+已投递 → ses_a_target  agent=build  state=idle  title="11-17-collab-workspace machine cfg 修复"
+kind=request  thread=t_mwjzykyn_5cu1  status=open
+mode=queue  message=msg_14  delivery=queue
+注: 多候选：按匹配分选中 ses_a_target（score=85，why=[file:packages/machine/src/cfg/impl.ts, title:machine, title:cfg, task:11-17-collab-workspace, agent:build, recent:1m]）。
+提示: 对方回执后可 collab_wait {threadID} 等结果；不要用 steer 打断对方的当前轮。
+bid=b_d407378f58dc7317  thread=t_mwjzykyn_5cu1（local scope，回执用 collab_reply {threadID}）
+等结果: collab_wait {threadID:"t_mwjzykyn_5cu1", timeoutMs:…}
+  ✓ S30c handoff picked the matching session via the score — kind=request  thread=t_mwjzykyn_5cu1  status=open
+  ✓ S30c handoff delivered one queued prompt
+  ✓ S30c local bid is acked with the target + thread — {"scope":"local","state":"acked","thread":"t_mwjzykyn_5cu1"}
+  ✓ S30c thread is open on the receiver side — "open"
+[collab] handoff b_d407378f58dc7317 → done
+  ✓ S30c receipt closes the local bid — done
+
+--- S31 spawn in WS_H
+…
+
+--- S31 spawn result
+已广播并拉新（无候选 ≥80）：bid=b_9f9857bc8993f9fa
+bid=b_9f9857bc8993f9fa  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/h
+提案: docs/issues/fix-spawn-ack.md  标题: "spawn 自领取"  期望: implement
+影响面(1): apps/pos/src/main.ts
+新会话: ses_spawn_3 agent=explore loc=/tmp/collab-harness-ThqO6C/ws/h title="impl:fix-spawn-ack"
+已向新会话投递接管请求（queue）。
+回执格式: [handoff] DONE|BLOCKED b_9f9857bc8993f9fa <摘要>；该会话不会被删除（collab_list 标 [bootstrap]）。
+  ✓ S31 spawn created exactly one session at the target location — {"count":1,"loc":"/tmp/collab-harness-ThqO6C/ws/h"}
+  ✓ S31 spawned hand-off starts claimed by the new session — {"by":"ses_spawn_3","kind":"spawn","token":"k_mwjzyl0d_0s8w","at":1794877902301,"leaseMs":300000,"spawner":"ses_req"}
+
+--- S31 spawned session collab_accept
+你已领取 b_9f9857bc8993f9fa（state=acked，kind=spawn，token=k_mwjzyl0d_0s8w）。
+完成后回执: [handoff] DONE b_9f9857bc8993f9fa <commit sha 或摘要>（用 collab_send 发给发起方 ses_req）。
+  ✓ S31 spawned session accept moves it to acked — {"state":"acked","by":"ses_spawn_3"}
+  ✓ S31 ackedAt is recorded — 1794877902302
+  ✓ S31 receipt template is DONE and never BLOCKED — 你已领取 b_9f9857bc8993f9fa（state=acked，kind=spawn，token=k_mwjzyl0d_0s8w）。 / 完成后回执: [handoff] DONE b_9f9857bc8993f9fa <commit sha 或摘要>（用 collab_send 发给发起方 ses_req）。
+  ✓ S31 requester was told about the ACCEPT — prompts→ses_req
+  ✓ S32 spawn lock exists before expiry — /tmp/collab-harness-ThqO6C/broadcast/b_e81e92c04b399f61.lock
+
+--- S32 member preview after spawn lease expiry
+未领取（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_e81e92c04b399f61 scope=peer state=open attempts=1
+提案: docs/issues/fix-nobody-home.md  标题: "nobody home"  期望: implement
+影响面(1): apps/pos/src/main.ts
+候选 top: ses_c_member score=14
+  ✓ S32 lapsed spawn reopens: attempts=1, holder skipped — {"state":"open","attempts":1,"skipped":["ses_spawn_1"]}
+  ✓ S32 lapsed spawn releases the lock — false
+  ✓ S32 the loser is no longer told 已被 … 领取 — 未领取（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+
+--- S32 member accept after lock release
+已领取 b_e81e92c04b399f61（winner，token=k_mwjzyl0g_bzop，state=acked，lease=300000ms）
+scope=peer workspace=/tmp/collab-harness-ThqO6C/ws/c 期望=implement
+提案: docs/issues/fix-nobody-home.md  标题: "nobody home"
+影响面(1): apps/pos/src/main.ts
+跨仓护栏：只允许改目标仓 docs/issues/**，git 只读，不 push；实施由目标仓 owner 复核提交。
+已通知发起方 ses_req（message=msg_17）。
+完成后回执: [handoff] DONE b_e81e92c04b399f61 <commit sha 或摘要>（用 collab_send 发给 ses_req）
+  ✓ S32 a member can claim once the lock is released — 已领取 b_e81e92c04b399f61（winner，token=k_mwjzyl0g_bzop，state=acked，lease=300000ms）
+
+--- S33 broadcast WS_F (two candidates ≥80)
+…
+
+--- S33 broadcast
+已广播 peer 交接：bid=b_ad494b136a09323b（写入 /tmp/collab-harness-ThqO6C/broadcast，其余成员 0 模型调用）
+bid=b_ad494b136a09323b  scope=peer  workspace=/tmp/collab-harness-ThqO6C/ws/f
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+匹配分（阈值 80）:
+   90  ses_f1  busy=0min  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, title:修复, task:11-17-worker-store, agent:build, recent:1m]
+   90  ses_f2  busy=0min  why=[file:packages/state/src/machine/worker/store.ts, title:worker, title:store, title:修复, task:11-17-worker-store, agent:build, recent:2m]
+top-1 ses_f1 → 未投递 prompt：它下一次模型请求会看到群组广播，用 collab_accept {bid:"b_ad494b136a09323b"} 领取。
+领取: collab_accept {bid:"b_ad494b136a09323b", confirm:true}（原子，只有一个 winner）；回执: [handoff] DONE|BLOCKED b_ad494b136a09323b <摘要>
+  ✓ S33 only the top-1 candidate is asked (serial) — {"state":"open","asked":{"sid":"ses_f1","at":1794877902305,"leaseMs":300000}}
+[collab] handoff b_ad494b136a09323b declined → open, asked ses_f2
+
+--- S33 record after DECLINE
+{"state":"open","attempts":1,"skipped":["ses_f1"],"asked":"ses_f2"}
+  ✓ S33 DECLINE skips the candidate and counts one attempt — {"attempts":1,"skipped":["ses_f1"]}
+  ✓ S33 DECLINE asks the next candidate (state stays open) — {"asked":"ses_f2","state":"open"}
+
+--- S33 ask injection to the next candidate
+[{"type":"text","text":"[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 接管请求 b_ad494b136a09323b：worker store 修复（11-17-worker-store）（提案 docs/issues/fix-worker-store.md，期望 implement，影响面 packages/state/src/machine/worker/store.ts） → 有余力请 collab_accept {bid:\"b_ad494b136a09323b\", confirm:true}（= ACCEPT）；没余力就回一条 \"DECLINE <理由>\" 让下一候选接手；5 分钟不答自动顺延。"}]
+  ✓ S33 the next candidate gets the takeover request — [{"type":"text","text":"[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 接管请求 b_ad494b136a09323b：worker store 修复（11-17-worker-store）（提案 docs/issues/fix-worker-store.md，期望 implement，影响面 packages/state/src/machine/
+  ✓ S33 the ask line explains ACCEPT / DECLINE / lease — [{"type":"text","text":"[collab-handoff] 交接链路提醒（每条只出现一次）:\n- 接管请求 b_ad494b136a09323b：worker store 修复（11-17-worker-store）（提案 docs/issues/fix-worker-store.md，期望 implement，影响面 packages/state/src/machine/worker/store.ts） → 有余力请 collab_accept {b
+
+--- S33 next candidate accepts
+已领取 b_ad494b136a09323b（winner，token=k_mwjzyl27_iol5，state=acked，lease=300000ms）
+scope=peer workspace=/tmp/collab-harness-ThqO6C/ws/f 期望=implement
+提案: docs/issues/fix-worker-store.md  标题: "worker store 修复（11-17-worker-store）"
+影响面(1): packages/state/src/machine/worker/store.ts
+跨仓护栏：只允许改目标仓 docs/issues/**，git 只读，不 push；实施由目标仓 owner 复核提交。
+已通知发起方 ses_req（message=msg_18）。
+完成后回执: [handoff] DONE b_ad494b136a09323b <commit sha 或摘要>（用 collab_send 发给 ses_req）
+  ✓ S33 the next candidate can claim it — ses_f2
+  ✓ S36 a bare basename does not close a hand-off — acked
+  ✓ S36 a non-claimant receipt does not close a hand-off — acked
+[collab] handoff b_ad494b136a09323b → done
+  ✓ S36 the exact issuePath from the claimant closes it — {"state":"done","from":"ses_f2"}
+
+--- S34 broadcast WS_G (ask timeout)
+…
+  ✓ S34 the top-1 candidate is asked — {"sid":"ses_g1","at":1794877902550,"leaseMs":300000}
+
+--- S34 preview after ask timeout (forged 5 min ago)
+未领取（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+bid=b_0bbc7ae8eff693e0 scope=peer state=open attempts=1
+提案: docs/issues/fix-ask-timeout.md  标题: "worker store 问询超时（11-17-worker-store）"  期望: implement
+影响面(1): packages/state/src/machine/worker/store.ts
+候选 top: ses_g1 score=86
+  ✓ S34 ask timeout skips the candidate and counts one attempt — {"attempts":1,"skipped":["ses_g1"]}
+  ✓ S34 ask timeout asks the next candidate — {"asked":"ses_g2","state":"open"}
+  ✓ S34 exhausted candidates → expired (no re-delivery) — 0ms / 广播 b_0bbc7ae8eff693e0 已 expired（attempts=2 > 3）：需人工接手，不再自动重投。
+  ✓ S34 state is expired after exhausting the candidates — {"state":"expired","attempts":2}
+  ✓ S34 an expired hand-off never spawns — 0 spawn(s)
+  ✓ S34 an expired hand-off is not re-delivered — 0 prompt(s)
+  ✓ S34 attempts > 3 → expired even with a candidate left — 1ms / 广播 b_0bbc7ae8eff693e0 已 expired（attempts=4 > 3）：需人工接手，不再自动重投。
+  ✓ S34 attempts > 3 is persisted as attempts=4 / expired — {"state":"expired","attempts":4}
+
+--- S35 first handoff
+已投递 → ses_a_target  agent=build  state=idle  title="11-17-collab-workspace machine cfg 修复"
+kind=request  thread=t_mwjzyl7d_t0jt  status=open
+mode=queue  message=msg_19  delivery=queue
+提示: 对方回执后可 collab_wait {threadID} 等结果；不要用 steer 打断对方的当前轮。
+bid=b_6d0cb7e159b3d3d5  thread=t_mwjzyl7d_t0jt（local scope，回执用 collab_reply {threadID}）
+等结果: collab_wait {threadID:"t_mwjzyl7d_t0jt", timeoutMs:…}
+  ✓ S35 first call delivers one prompt
+
+--- S35 repeated handoff
+已存在同一交接（bid 幂等，不重复投递）：state=acked，thread=t_mwjzyl7d_t0jt。等结果用 collab_wait {threadID:"t_mwjzyl7d_t0jt"}。
+bid=b_6d0cb7e159b3d3d5  thread=t_mwjzyl7d_t0jt  承接=ses_a_target
+目标: ses_a_target（local scope，回执用 collab_reply {threadID} 或 [handoff] DONE b_6d0cb7e159b3d3d5）
+  ✓ S35 a repeated handoff is a no-op (same bid, no second delivery) — 已存在同一交接（bid 幂等，不重复投递）：state=acked，thread=t_mwjzyl7d_t0jt。等结果用 collab_wait {threadID:"t_mwjzyl7d_t0jt"}。
+
+--- S35 handoff after the bid was closed
+已闭环（state=done）：sha-1。不重复投递、不改状态。
+bid=b_6d0cb7e159b3d3d5  thread=t_mwjzyl7d_t0jt  承接=ses_a_target
+目标: ses_a_target（local scope，回执用 collab_reply {threadID} 或 [handoff] DONE b_6d0cb7e159b3d3d5）
+  ✓ S35 a closed handoff is not resurrected and keeps its receipt — {"state":"done","note":"sha-1"}
+  ✓ S37 spawn without a verifiable landing is refused — 1ms / 拉新失败：会话落点不对（期望 /tmp/collab-harness-ThqO6C/ws/i，实际 (未知)），已回滚刚建的会话。
+  ✓ S37 the unknown-landing session is rolled back — {"removed":["ses_spawn_4"],"ghost":"ses_spawn_4"}
+  ✓ S37 a rolled-back spawn leaves no record behind
+  ✓ S38 a symlinked proposal is refused — 1ms / 拒绝广播：提案 docs/issues/fix-symlink.md 是软链（不允许软链绕过 docs/issues/ 写边界）。
+  ✓ S38 the cross-workspace guide is listed in the guide index — guides/index.md
+
+=== 124/124 checks passed

@@ -1,0 +1,37 @@
+{
+  "bid": "b_e0ca26687b6bd74c",
+  "scope": "peer",
+  "workspace": "/tmp/collab-sandbox/b",
+  "issuePath": "docs/issues/fix-sandbox-ack.md",
+  "title": "sandbox spawn ack 复跑（11-17-collab-sandbox）",
+  "expected": "implement",
+  "affectedFiles": [
+    "packages/state/src/machine/worker/store.ts"
+  ],
+  "candidates": [],
+  "state": "open",
+  "attempts": 1,
+  "skipped": [
+    "ses_e18f36b0fffel4K7UTmxUXlqaV"
+  ],
+  "seenBy": [],
+  "reminded": [],
+  "replies": [],
+  "from": {
+    "sid": "ses_e18fa4c2bffeYTuUquLBONwDPq",
+    "directory": "/data/project/muke-pos-app"
+  },
+  "createdAt": 1794877723920,
+  "askSeen": [],
+  "declines": [],
+  "updatedAt": 1794877749740,
+  "expiredClaim": {
+    "by": "ses_e18f36b0fffel4K7UTmxUXlqaV",
+    "kind": "spawn",
+    "token": "k_mwjzurcf_gayp",
+    "at": 1794877422887,
+    "leaseMs": 300000,
+    "spawner": "ses_e18fa4c2bffeYTuUquLBONwDPq",
+    "expiredAt": 1794877749739
+  }
+}

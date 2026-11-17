@@ -1,0 +1,31 @@
+{
+  "bid": "b_be2d57dd25792c04",
+  "scope": "local",
+  "workspace": "/data/project/muke-pos-app",
+  "threadID": "t_mwjz8ljm_shv5",
+  "title": "local 链路自测：复核 packages/machine/src/cfg/impl.ts 的 handoff 记录，完成后回执。",
+  "expected": "review",
+  "affectedFiles": [
+    "packages/machine/src/cfg/impl.ts"
+  ],
+  "candidates": [],
+  "state": "acked",
+  "claim": {
+    "by": "ses_e19033d51ffeNPRMU2hY8heliS",
+    "kind": "handoff",
+    "token": "h_be2d57dd",
+    "at": 1794876689952,
+    "leaseMs": 300000
+  },
+  "attempts": 0,
+  "skipped": [],
+  "seenBy": [],
+  "reminded": [],
+  "replies": [],
+  "from": {
+    "sid": "ses_e19134f21ffeqkDolblhkxF2CL",
+    "directory": "/data/project/muke-pos-app"
+  },
+  "createdAt": 1794876689952,
+  "updatedAt": 1794876689952
+}

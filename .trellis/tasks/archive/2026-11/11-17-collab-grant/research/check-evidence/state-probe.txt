@@ -1,0 +1,20 @@
+$ opencode api get "/api/session?limit=1000" | node -e '<filter permissions[].action startsWith collab_>'
+rows=1000
+collab-perm sessions=0
+temp-ish titles=2  → 都是复核会话本身（trellis-check），无测试残留会话
+
+$ opencode api get /api/session/ses_e1eb91cebffeTv1467ubJLKebk
+{"id":"ses_e1eb91cebffeTv1467ubJLKebk","agent":"build","title":"machine/state 出入参 schema 固化","perms":[]}
+
+$ opencode api get /api/session/ses_e23a4a23fffe4c4m7UQFR8dUL3
+{"id":"ses_e23a4a23fffe4c4m7UQFR8dUL3","agent":"build","title":"设计稿与工程代码对齐","perms":[]}
+
+$ ls ~/.config/opencode/collab-grants/
+(empty — only . and ..)
+
+$ grep -l permissionGrant ~/.config/opencode/collab-broadcast/*.json
+(none)
+
+$ cat ~/.config/opencode/collab-broadcast/b_e7da5991792df8f9.json | head
+workspace=/data/project/muke-interface, expected=review, from.sid=ses_e1eb91cebffeTv1467ubJLKebk
+→ 这是 audit-column 提案的既有广播记录（不是本任务产生：本任务全程只做 grant/promote，没有 broadcast spawn，记录里也没有 permissionGrant 字段）。

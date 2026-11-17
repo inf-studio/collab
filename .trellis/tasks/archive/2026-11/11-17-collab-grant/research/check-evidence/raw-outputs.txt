@@ -1,0 +1,39 @@
+$ node --check .opencode/plugins/collab.js
+exit=0
+
+$ node scripts/collab/handoff-harness.mjs | tail -3
+  ✓ S67 a refused switch is reported (not thrown), agent unchanged, no ledger — 未切换 agent（switch）: 切换 ses_agentfail 的 agent 失败：HTTP 403: agent switch refused (ses_agentfail)
+
+=== 274/274 checks passed
+exit=0
+
+$ pnpm test:collab
+exit=0
+
+=== 274/274 checks passed
+
+$ opencode api get /api/plugin (filtered)
+{"id":"collab-global","path":"/root/.config/opencode/plugins/collab-global.js","state":"active"}
+{"id":"collab","path":"/data/project/muke-pos-app/.opencode/plugins/collab.js","state":"active"}
+
+$ git diff --numstat <5 task files>
+765	8	.opencode/plugins/collab.js
+44	3	.trellis/spec/guides/cross-workspace-collab-guide.md
+33	10	docs/collab.md
+1	1	docs/development.md
+656	0	scripts/collab/handoff-harness.mjs
+
+$ git diff -U0 scripts/collab/handoff-harness.mjs | grep ^- (deletions)
+0
+
+$ ls -la ~/.config/opencode/collab-grants/
+总计 8
+drwxr-xr-x 2 root root 4096 11月17日 15:09 .
+drwxr-xr-x 6 root root 4096 11月17日 15:03 ..
+
+$ stat ~/.config/opencode/opencode.json
+2026-11-13 16:06:30.846743061 +0800 /root/.config/opencode/opencode.json
+
+$ grep -c collab_ ~/.config/opencode/opencode.json
+0
+0

@@ -1,0 +1,32 @@
+{
+  "bid": "b_52bfcec0096fc0f1",
+  "scope": "peer",
+  "workspace": "/tmp/collab-sandbox/c",
+  "issuePath": "docs/issues/fix-sandbox-spawn.md",
+  "title": "sandbox nobody home（11-17-collab-sandbox）",
+  "expected": "implement",
+  "affectedFiles": [
+    "apps/pos/src/main.ts"
+  ],
+  "candidates": [],
+  "state": "claimed",
+  "claim": {
+    "by": "ses_e1906b3e2ffehUuMUA8rErY4p5",
+    "kind": "spawn",
+    "token": "k_mwjz3o65_uiyu",
+    "at": 1794876460061,
+    "leaseMs": 300000,
+    "spawner": "ses_e19134f21ffeqkDolblhkxF2CL"
+  },
+  "attempts": 0,
+  "skipped": [],
+  "seenBy": [],
+  "reminded": [],
+  "replies": [],
+  "from": {
+    "sid": "ses_e19134f21ffeqkDolblhkxF2CL",
+    "directory": "/data/project/muke-pos-app"
+  },
+  "createdAt": 1794876460080,
+  "updatedAt": 1794876460080
+}
