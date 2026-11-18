@@ -1,5 +1,6 @@
 import { PROMOTE_AGENTS } from '../constants.ts';
 import { grantFile, readGrant } from '../core/grants.ts';
+import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { ToolDefinition } from '../types.ts';
 import { fmtTime, truncate } from '../util.ts';
@@ -51,7 +52,7 @@ export function promoteTool(kit: ToolKit): ToolDefinition {
       const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
       if (guard) {
         const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
-        throw new Error(
+        throw invalid(
           `拒绝切换 agent：目标 ${sessionID}${alias ? `（别名 ${alias}）` : ''} ${where}在 protect 名单内` +
             '（覆盖其任意层级子会话）。未修改任何会话。'
         );
@@ -63,7 +64,7 @@ export function promoteTool(kit: ToolKit): ToolDefinition {
       // Fail-closed input validation (the JSON schema enum does not protect a
       // direct caller, and a wrong agent id would come back as a 404 later).
       if (!revoke && !PROMOTE_AGENTS.includes(agent)) {
-        throw new Error(
+        throw invalid(
           `拒绝切换：agent="${agent}" 不在白名单（只允许 ${PROMOTE_AGENTS.join(' / ')}）。未修改任何会话。`
         );
       }

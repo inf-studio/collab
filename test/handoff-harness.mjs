@@ -123,12 +123,37 @@
  * never a protected claimant), and the blocked word list understands
  * 「回执被硬拒 / 无法投递 / 改回写提案 / 已自愈」.
  *
+ * S72–S76 (`11-18-collab-self-report`) cover defect self-reporting:
+ *   S72  a classified defect writes one `<sig>/<ts>.{json,md}` pair (behaviour
+ *        unchanged), the evidence is a redacted whitelist, the same signature is
+ *        rate-limited to 1/h, and validation / guard refusals never report
+ *        (taxonomy + signature + staleClass unit checks included)
+ *   S73  `report.to` receives exactly one `note` (queue); a protected target or
+ *        `report.enabled:false` keeps evidence only
+ *   S74  `collab_report` previews, writes once, is idempotent within 1h, and
+ *        works in the bare `{ confirm:true }` form the R8 hint advertises
+ *   S75  `collab_list` + `context` show `open-stale` / `claimed-lapsed` /
+ *        `acked-stale` once per (session, class, bid), read-only, shared de-dupe
+ *   S76  `scripts/collab-triage.mjs`: `--dry-run` writes nothing, one issue per
+ *        signature, rerun idempotent, `--since` filters, `--notify` posts one
+ *        note over HTTP and refuses a protected target
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-
 // The repo root (for the docs assertions of S38/S43). The published package
 // may live outside a Trellis checkout, in which case those two documentation
 // checks are skipped rather than failed.
@@ -146,6 +171,16 @@ process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 // session there; the harness must never touch the real one).
 const grantDir = join(dir, 'grants');
 process.env.COLLAB_GRANT_DIR = grantDir;
+
+// Defect evidence (S72+) and the config file (`report.to` is written mid-run)
+// also stay inside the temp dir: a harness run must never add a real report to
+// `~/.config/opencode/collab-reports/` nor read the operator's `collab.json`.
+const reportRoot = join(dir, 'reports');
+process.env.COLLAB_REPORT_DIR = reportRoot;
+const collabConfigPath = join(dir, 'collab.json');
+// Must be set before the plugin module is imported: the path is read once at
+// module load, exactly like `COLLAB_BROADCAST_DIR`.
+process.env.COLLAB_CONFIG = collabConfigPath;
 
 // ------------------------------------------------------------ fake workspaces
 const wsRoot = join(dir, 'ws');
@@ -599,6 +634,39 @@ const bcBids = () => {
   }
 };
 const bidOf = text => /bid=(b_[0-9a-f]+)/.exec(text)?.[1];
+// Defect-report helpers (S72+): same files the plugin writes and triage reads.
+const reportSigDirs = () => {
+  try {
+    return readdirSync(reportRoot)
+      .filter(name => name.startsWith('d_'))
+      .sort();
+  } catch {
+    return [];
+  }
+};
+const reportsOf = sig => {
+  try {
+    return readdirSync(join(reportRoot, sig))
+      .filter(name => name.endsWith('.json'))
+      .sort()
+      .map(name => ({
+        sig,
+        json: join(reportRoot, sig, name),
+        md: join(reportRoot, sig, name.replace(/\.json$/, '.md')),
+        data: JSON.parse(readFileSync(join(reportRoot, sig, name), 'utf8'))
+      }));
+  } catch {
+    return [];
+  }
+};
+const allReports = () => reportSigDirs().flatMap(sig => reportsOf(sig));
+const reportCount = () => allReports().length;
+const reportOf = sig => reportsOf(sig)[0];
+/** Write the plugin's `collab.json`; the config reader is mtime-cached. */
+const writeConfig = async config => {
+  writeFileSync(collabConfigPath, JSON.stringify(config, null, 2));
+  await settle(5);
+};
 /** `score` on the ranking line of `<sid>` (preview/confirmed broadcasts). */
 const scoreOf = (text, sid) => Number(new RegExp(`(\\d{1,3})\\s+${sid}\\b`).exec(text)?.[1] ?? -1);
 // Permission-grant ledger helpers (same files the plugin writes).
@@ -3950,6 +4018,685 @@ expect(
     !afterR8NoAt.receipt &&
     !afterR8NoAt.staleNoticedAt,
   `reads=${r8NoAtReads} state=${afterR8NoAt.state} staleNoticedAt=${afterR8NoAt.staleNoticedAt}`
+);
+
+
+// ================== S72 (R1/R2/R4/R7: a classified defect is reported once)
+// `11-18-collab-self-report`: a defect inside a tool must leave evidence without
+// changing the tool's behaviour. The delivery 5xx below is the easiest real
+// shape to inject: `ctx.session.prompt` throws, the caller still gets the error,
+// and one `<sig>/<ts>.json` + `.md` pair appears. The evidence is a field
+// whitelist — the message body and the token must not survive.
+const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '../package.json'), 'utf8'));
+const S72_SECRET = 'SECRET_TOKEN_9f8e7d6c5b4a17';
+const S72_BODY = `S72 正文样本 ${S72_SECRET} 这段正文绝不能进证据文件`;
+const s72SigsBefore = reportSigDirs();
+const s72RealPrompt = ctx.session.prompt;
+/** Make `session.prompt` throw for one target only, so report delivery still works. */
+const failPromptFor = (sid, error) => {
+  ctx.session.prompt = async input => {
+    if (input.sessionID === sid) throw error;
+    return s72RealPrompt(input);
+  };
+};
+failPromptFor('ses_bbb', new Error(`HTTP 500 upstream unavailable (token ${S72_SECRET})`));
+const s72Message = await expectFail(
+  'S72 a delivery 5xx still fails the call (behaviour unchanged)',
+  () => call('collab_send', { target: 'ses_bbb', text: S72_BODY, confirm: true }),
+  /HTTP 500/
+);
+ctx.session.prompt = s72RealPrompt;
+const s72NewSigs = reportSigDirs().filter(sig => !s72SigsBefore.includes(sig));
+const s72Report = s72NewSigs.length ? reportOf(s72NewSigs[0]) : undefined;
+out('S72 report evidence', s72Report ? JSON.stringify(s72Report.data, null, 2) : '(没有生成证据)');
+expect(
+  'S72 a classified defect writes exactly one evidence pair',
+  s72NewSigs.length === 1 && Boolean(s72Report) && existsSync(s72Report.md),
+  `sigs=${s72NewSigs.join(',')}`
+);
+expect(
+  'S72 … tagged as delivery-5xx with version/tool/at/stackTop (R2)',
+  s72Report?.data?.class === 'delivery-5xx' &&
+    s72Report?.data?.tool === 'collab_send' &&
+    s72Report?.data?.version === pkg.version &&
+    Number(s72Report?.data?.at) > 0 &&
+    Array.isArray(s72Report?.data?.error?.stackTop) &&
+    s72Report.data.error.stackTop.length <= 5 &&
+    s72Report.data.error.stackTop.length > 0,
+  JSON.stringify({ class: s72Report?.data?.class, version: s72Report?.data?.version })
+);
+expect(
+  'S72 … and the version matches package.json (single source of truth)',
+  internals.PLUGIN_VERSION === pkg.version,
+  `${internals.PLUGIN_VERSION} vs ${pkg.version}`
+);
+const s72Json = s72Report ? readFileSync(s72Report.json, 'utf8') : '';
+const s72Md = s72Report ? readFileSync(s72Report.md, 'utf8') : '';
+expect(
+  'S72 redaction: neither the body nor the token reaches the evidence (R7)',
+  s72Json.length > 0 && !s72Json.includes(S72_SECRET) && !s72Json.includes('S72 正文样本'),
+  `json ${s72Json.length}B`
+);
+expect(
+  'S72 … the JSON has no `text` / `note` / token field at all (whitelist)',
+  !/"text"\s*:/.test(s72Json) && !/"token"\s*:/.test(s72Json) && !/"note"\s*:/.test(s72Json),
+  s72Json.slice(0, 160)
+);
+expect(
+  'S72 … and the issue draft is also clean + readable (现象/证据)',
+  s72Md.length > 0 && !s72Md.includes(S72_SECRET) && s72Md.includes('## 现象') && s72Md.includes('## 证据'),
+  `${s72Md.length}B`
+);
+expect(
+  'S72 R8: the re-thrown error carries the report entry point',
+  s72Message.includes('collab_report') && s72Message.includes(reportRoot),
+  s72Message.split('\n').slice(-1)[0]
+);
+
+failPromptFor('ses_bbb', new Error(`HTTP 500 upstream unavailable (token ${S72_SECRET})`));
+const s72Repeat = await expectFail(
+  'S72 the same defect within 1h is rate-limited',
+  () => call('collab_send', { target: 'ses_bbb', text: S72_BODY, confirm: true }),
+  /HTTP 500/
+);
+ctx.session.prompt = s72RealPrompt;
+expect(
+  'S72 … no new evidence file (R4)',
+  reportCount() === s72SigsBefore.length + 1 && reportSigDirs().length === s72SigsBefore.length + 1,
+  `${reportCount()} report(s)`
+);
+expect('S72 … and the hint is still shown (the entry point never hides)', s72Repeat.includes('collab_report'), s72Repeat.slice(-120));
+
+// --- S72b: parameter-validation / business refusals are NEVER reported (R1).
+const s72bCount = reportCount();
+const s72bEmpty = await expectFail(
+  'S72 empty text is a validation error',
+  () => call('collab_send', { target: 'ses_bbb', text: '   ', confirm: true }),
+  /text 不能为空/
+);
+const s72bBid = await expectFail(
+  'S72 a malformed bid is a validation error',
+  () => call('collab_accept', { bid: 'b_zzz', confirm: true }),
+  /bid 格式不合法/
+);
+const s72bTarget = await expectFail(
+  'S72 an unknown target is a validation error',
+  () => call('collab_send', { target: 'nope', text: 'x', confirm: true }),
+  /未知目标/
+);
+const s72bGuard = await expectFail(
+  'S72 a protect refusal stays a normal business rejection',
+  () => call('collab_send', { target: 'ses_e1eb91cebffeTv1467ubJLKebk', text: 'x', confirm: true }),
+  /protect 名单/
+);
+expect(
+  'S72 … none of the four wrote a report (R1: 不触发)',
+  reportCount() === s72bCount,
+  `${reportCount()} vs ${s72bCount}`
+);
+expect(
+  'S72 … and none of them carries the report hint (R8 targets defects only)',
+  ![s72bEmpty, s72bBid, s72bTarget, s72bGuard].some(text => text.includes('collab_report')),
+  [s72bEmpty, s72bBid, s72bTarget, s72bGuard].map(text => text.split('\n').length).join(',')
+);
+
+// --- S72c: the taxonomy itself (pure, no host): only non-validation defects report.
+const {
+  classify,
+  ValidationError,
+  GuardConflictError,
+  InvariantError,
+  DeliveryError,
+  ExtractError,
+  signature,
+  staleClass
+} = internals;
+expect(
+  'S72 taxonomy: ValidationError is never reported (参数校验/业务拒绝)',
+  classify(new ValidationError('text 不能为空')) === undefined && classify(new Error('boom')) === 'uncaught',
+  String(classify(new ValidationError('x')))
+);
+expect(
+  'S72 taxonomy: guard-conflict / invariant / delivery-5xx / extract-error / uncaught',
+  classify(new GuardConflictError('x')) === 'guard-conflict' &&
+    classify(new InvariantError('x')) === 'invariant' &&
+    classify(new DeliveryError('x', 503)) === 'delivery-5xx' &&
+    classify(new DeliveryError('x', 403)) === 'uncaught' &&
+    classify(new ExtractError('x')) === 'extract-error' &&
+    classify('thrown string') === 'uncaught' &&
+    classify(undefined) === undefined,
+  [
+    classify(new GuardConflictError('x')),
+    classify(new InvariantError('x')),
+    classify(new DeliveryError('x', 503)),
+    classify(new DeliveryError('x', 403)),
+    classify(new ExtractError('x'))
+  ].join(',')
+);
+expect(
+  'S72 signature is stable across volatile ids (R4 normalization)',
+  signature('0.1.3', 'collab_send', 'Error', '失败 ses_aaa 与 ses_bbb 都一样的错') ===
+    signature('0.1.3', 'collab_send', 'Error', '失败 ses_xxx 与 ses_yyy 都一样的错') &&
+    signature('0.1.3', 'collab_send', 'Error', 'a') !== signature('0.1.3', 'collab_list', 'Error', 'a') &&
+    signature('0.1.3', 'collab_send', 'Error', 'a') !== signature('0.1.4', 'collab_send', 'Error', 'a'),
+  signature('0.1.3', 'collab_send', 'Error', 'a')
+);
+const s72cNow = Date.now();
+expect(
+  'S72 staleClass: the three classes and their boundaries (R6)',
+  staleClass({ bid: 'b_aaaa0000000000aa', state: 'open', createdAt: s72cNow - 3_600_001 })?.class === 'open-stale' &&
+    staleClass({ bid: 'b_aaaa0000000000aa', state: 'open', createdAt: s72cNow - 3_600_000 }) === undefined &&
+    staleClass({
+      bid: 'b_aaaa0000000000ab',
+      state: 'claimed',
+      claim: { at: s72cNow - 300_001 }
+    })?.class === 'claimed-lapsed' &&
+    staleClass({ bid: 'b_aaaa0000000000ac', state: 'acked', claim: { at: s72cNow - 2 * 3_600_000 - 1 } })?.class ===
+      'acked-stale' &&
+    staleClass({ bid: 'b_aaaa0000000000ad', state: 'acked' }) === undefined &&
+    staleClass({ bid: 'b_aaaa0000000000ae', state: 'done' }) === undefined,
+  'boundary checks'
+);
+
+// ============ S73 (R5: `report.to` gets one note; protected = evidence only)
+// The primary channel is the delivery, not the file: a maintainer session that
+// is idle must still be woken by the report.
+await writeConfig({ aliases: { maint: 'ses_aaa' }, report: { to: 'maint' } });
+const s73PromptsBefore = prompts.length;
+failPromptFor('ses_bbb', new Error('HTTP 503 gateway timeout (S73)'));
+const s73Message = await expectFail(
+  'S73 a defect with report.to configured still fails the call',
+  () => call('collab_send', { target: 'ses_bbb', text: 'S73 投递样本', confirm: true }),
+  /HTTP 503/
+);
+ctx.session.prompt = s72RealPrompt;
+const s73Notes = prompts.slice(s73PromptsBefore);
+out('S73 delivered report note', JSON.stringify(s73Notes, null, 2));
+expect(
+  'S73 report.to receives exactly one note (kind=note, queue)',
+  s73Notes.length === 1 &&
+    s73Notes[0].sessionID === 'ses_aaa' &&
+    s73Notes[0].delivery === 'queue' &&
+    /\[collab:collab-report\]\[note\] \[defect\] d_/.test(s73Notes[0].text),
+  JSON.stringify(s73Notes.map(note => note.sessionID))
+);
+expect(
+  'S73 … the note carries the signature and the evidence path (R5 一句话 + 路径)',
+  /d_[0-9a-f]{16}/.test(s73Notes[0].text) && s73Notes[0].text.includes(reportRoot),
+  s73Notes[0]?.text?.slice(0, 200)
+);
+expect(
+  'S73 … and the caller error is unchanged apart from the hint',
+  s73Message.startsWith('投递失败：HTTP 503 gateway timeout (S73)') && s73Message.includes('collab_report'),
+  s73Message.split('\n')[0]
+);
+
+// --- S73b: a protected maintainer target gets evidence only (fail-closed).
+await writeConfig({ aliases: { maint: 'ses_e1eb91cebffeTv1467ubJLKebk' }, report: { to: 'maint' } });
+const s73bPromptsBefore = prompts.length;
+const s73bSigsBefore = reportSigDirs();
+failPromptFor('ses_bbb', new Error('HTTP 502 bad gateway (S73b)'));
+await expectFail(
+  'S73b a defect still fails the call',
+  () => call('collab_send', { target: 'ses_bbb', text: 'S73b', confirm: true }),
+  /HTTP 502/
+);
+ctx.session.prompt = s72RealPrompt;
+expect(
+  'S73b a protected report.to is never written to (只落盘)',
+  prompts.length === s73bPromptsBefore,
+  `${prompts.length - s73bPromptsBefore} note(s)`
+);
+expect(
+  'S73b … but the evidence is still written',
+  reportSigDirs().length === s73bSigsBefore.length + 1,
+  `${reportSigDirs().length} sig dir(s)`
+);
+
+// --- S73c: `report.enabled:false` is the rollback switch (files, no note).
+await writeConfig({ aliases: { maint: 'ses_aaa' }, report: { to: 'maint', enabled: false } });
+const s73cPromptsBefore = prompts.length;
+failPromptFor('ses_bbb', new Error('HTTP 504 gateway timeout (S73c)'));
+await expectFail(
+  'S73c a defect still fails the call',
+  () => call('collab_send', { target: 'ses_bbb', text: 'S73c', confirm: true }),
+  /HTTP 504/
+);
+ctx.session.prompt = s72RealPrompt;
+expect(
+  'S73c report.enabled=false keeps evidence but sends nothing',
+  prompts.length === s73cPromptsBefore,
+  `${prompts.length - s73cPromptsBefore} note(s)`
+);
+
+// ================== S74 (R8③: `collab_report` — manual, preview + idempotent)
+await writeConfig({});
+const s74Count = reportCount();
+const s74Preview = await call('collab_report', { note: 'S74 预演：回执被拒', confirm: false }, { sessionID: 'ses_bbb' });
+expect(
+  'S74 preview writes nothing and shows the signature + directory',
+  s74Preview.includes('未上报') && s74Preview.includes('d_') && s74Preview.includes(reportRoot) && reportCount() === s74Count,
+  s74Preview.split('\n')[0]
+);
+const s74First = await call(
+  'collab_report',
+  { note: 'S74 手工上报：回执被 protect 拒绝，bid=b_aaaa0000000000f9', bid: 'b_aaaa0000000000f9', confirm: true },
+  { sessionID: 'ses_bbb', agent: 'build' }
+);
+out('S74 manual report result', s74First);
+expect(
+  'S74 confirm writes one evidence pair and names both paths',
+  /已上报 d_/.test(s74First) && s74First.includes('.json') && s74First.includes('.md') && reportCount() === s74Count + 1,
+  s74First.split('\n')[0]
+);
+const s74Sig = reportSigDirs().find(sig => /d_/.test(sig) && reportsOf(sig).some(entry => entry.data.tool === 'collab_report'));
+const s74Evidence = s74Sig ? reportOf(s74Sig).data : {};
+expect(
+  'S74 … class=manual, tool=collab_report, and the note is only a truncated summary',
+  s74Evidence.class === 'manual' && s74Evidence.tool === 'collab_report' && s74Evidence.error.message.includes('手工上报'),
+  JSON.stringify({ class: s74Evidence.class, tool: s74Evidence.tool })
+);
+expect(
+  'S74 … with no session history / file content in the evidence',
+  !JSON.stringify(s74Evidence).includes('msg_') && !JSON.stringify(s74Evidence).includes('content'),
+  JSON.stringify(Object.keys(s74Evidence))
+);
+const s74Again = await call(
+  'collab_report',
+  { note: 'S74 手工上报：回执被 protect 拒绝，bid=b_aaaa0000000000f9', bid: 'b_aaaa0000000000f9', confirm: true },
+  { sessionID: 'ses_bbb', agent: 'build' }
+);
+expect(
+  'S74 the same manual report within 1h adds no file (idempotent)',
+  s74Again.includes('未新增文件') && reportCount() === s74Count + 1,
+  s74Again.split('\n')[0]
+);
+const s74NoNote = await call('collab_report', { confirm: true }, { sessionID: 'ses_a_second' });
+expect(
+  'S74 the R8 hint form (`collab_report { confirm:true }`, no note) works',
+  /已上报 d_/.test(s74NoNote) && reportCount() === s74Count + 2,
+  s74NoNote.split('\n')[0]
+);
+
+// ================== S75 (R6: three hang-up classes, once per session+class+bid)
+// Read-only view: no refresh, no lock release, no auto-close. `collab_list` and
+// the `context` injection share one de-dupe store, so a class shown by one is
+// silent in the other.
+const s75Now = Date.now();
+// f1–f3: three classes for the requester `ses_req` (asserted via collab_list).
+// f4–f5: separate hand-offs for the claimant `ses_a_target` (asserted via the
+// context hook) — separate on purpose: any hook/refresh reopens a lapsed
+// `claimed` record, so one record cannot serve both views.
+writeRaw('b_aaaa0000000000f1', {
+  workspace: WS_A,
+  state: 'open',
+  title: 'S75 无人领取',
+  from: { sid: 'ses_req' },
+  createdAt: s75Now - 2 * 3_600_000,
+  updatedAt: s75Now - 2 * 3_600_000
+});
+writeRaw('b_aaaa0000000000f2', {
+  workspace: WS_A,
+  state: 'claimed',
+  title: 'S75 租约已过',
+  from: { sid: 'ses_req' },
+  claim: { by: 'ses_a_target', kind: 'accept', token: 'k_s75_claim', at: s75Now - 400_000, leaseMs: 300_000 }
+});
+writeRaw('b_aaaa0000000000f3', {
+  workspace: WS_A,
+  state: 'acked',
+  title: 'S75 回执静默',
+  from: { sid: 'ses_req' },
+  claim: { by: 'ses_a_target', kind: 'accept', token: 'k_s75_acked', at: s75Now - 3 * 3_600_000, leaseMs: 300_000 }
+});
+writeRaw('b_aaaa0000000000f4', {
+  workspace: WS_A,
+  state: 'claimed',
+  title: 'S75 承接方视角-租约已过',
+  from: { sid: 'ses_aaa' },
+  claim: { by: 'ses_a_target', kind: 'accept', token: 'k_s75_claim2', at: s75Now - 500_000, leaseMs: 300_000 }
+});
+writeRaw('b_aaaa0000000000f5', {
+  workspace: WS_A,
+  state: 'acked',
+  title: 'S75 承接方视角-回执静默',
+  from: { sid: 'ses_aaa' },
+  claim: { by: 'ses_a_target', kind: 'accept', token: 'k_s75_acked2', at: s75Now - 4 * 3_600_000, leaseMs: 300_000 }
+});
+const s75List = await call('collab_list', { directory: WS_A }, { sessionID: 'ses_req', agent: 'build' });
+out('S75 collab_list stale section', s75List.split('\n').filter(line => line.startsWith('- [')).join('\n'));
+expect(
+  'S75 collab_list shows all three hang-up classes',
+  ['[open-stale]', '[claimed-lapsed]', '[acked-stale]'].every(mark => s75List.includes(mark)),
+  s75List.split('\n').filter(line => line.startsWith('- [')).length
+);
+const s75StaleLines = s75List.split('\n').filter(line => line.startsWith('- [')).join('\n');
+expect(
+  'S75 … only for hand-offs this session is part of',
+  s75StaleLines.includes('b_aaaa0000000000f1') &&
+    s75StaleLines.includes('b_aaaa0000000000f2') &&
+    s75StaleLines.includes('b_aaaa0000000000f3') &&
+    !s75StaleLines.includes('b_aaaa0000000000f4'),
+  s75StaleLines
+);
+const s75State = bcRead('b_aaaa0000000000f2');
+expect(
+  'S75 … read-only: the claimed record is not refreshed and nothing is auto-closed',
+  s75State.state === 'claimed' && s75State.claim?.by === 'ses_a_target' && !lockExists('b_aaaa0000000000f2'),
+  JSON.stringify({ state: s75State.state, lock: lockExists('b_aaaa0000000000f2') })
+);
+const s75ListAgain = await call('collab_list', { directory: WS_A }, { sessionID: 'ses_req', agent: 'build' });
+expect(
+  'S75 each class is shown once per session (second listing is silent)',
+  !s75ListAgain.includes('挂起提醒'),
+  s75ListAgain.split('\n').filter(line => line.startsWith('- [')).length
+);
+const s75ClaimantEvent = contextEvent('ses_a_target');
+await hooks.context(s75ClaimantEvent);
+out('S75 claimant context injection', textOf(s75ClaimantEvent));
+expect(
+  'S75 the claimant sees its lapsed + silent items once',
+  textOf(s75ClaimantEvent).includes('[claimed-lapsed]') &&
+    textOf(s75ClaimantEvent).includes('b_aaaa0000000000f4') &&
+    textOf(s75ClaimantEvent).includes('[acked-stale]') &&
+    textOf(s75ClaimantEvent).includes('b_aaaa0000000000f5') &&
+    textOf(s75ClaimantEvent).includes('collab_report'),
+  textOf(s75ClaimantEvent).slice(0, 240)
+);
+const s75ClaimantAgain = contextEvent('ses_a_target');
+await hooks.context(s75ClaimantAgain);
+expect(
+  'S75 … and not again on the next request',
+  !textOf(s75ClaimantAgain).includes('挂起提醒'),
+  textOf(s75ClaimantAgain).slice(0, 120)
+);
+// The requester's hook shares the same de-dupe (its items were shown by
+// collab_list); it runs *after* the claimant's because any hook refreshes the
+// lapsed `claimed` records it reads.
+const s75Event = contextEvent('ses_req');
+await hooks.context(s75Event);
+expect(
+  'S75 the context hook shares the de-dupe with collab_list',
+  !textOf(s75Event).includes('挂起提醒'),
+  textOf(s75Event).slice(0, 160)
+);
+
+// ==================== S76 (R9: collab-triage consumes, idempotent + --dry-run)
+// The script is the cron half: scan → group by signature → one issue per
+// signature → write `triagedAt` back → rerun is a no-op.
+const triageScript = resolve(import.meta.dirname, '../scripts/collab-triage.mjs');
+const triageConfig = join(dir, 'triage-collab.json');
+writeFileSync(triageConfig, JSON.stringify({ aliases: { maint: 'ses_aaa' } }));
+const triageRepo = join(dir, 'triage-repo');
+mkdirSync(join(triageRepo, 'docs', 'issues'), { recursive: true });
+const triageEnv = { ...process.env, COLLAB_REPORT_DIR: reportRoot, COLLAB_CONFIG: triageConfig };
+const runTriage = (args, env = triageEnv) =>
+  spawnSync(process.execPath, [triageScript, '--repo', triageRepo, ...args], { encoding: 'utf8', env });
+/** Async variant: `--notify` talks to the fake HTTP server, which needs the loop. */
+const runTriageAsync = (args, env = triageEnv) =>
+  new Promise(resolveRun => {
+    const child = spawn(process.execPath, [triageScript, '--repo', triageRepo, ...args], { env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => (stdout += chunk));
+    child.stderr.on('data', chunk => (stderr += chunk));
+    child.on('close', status => resolveRun({ status, stdout, stderr }));
+  });
+const issueNames = root => {
+  try {
+    return readdirSync(join(root, 'docs', 'issues'));
+  } catch {
+    return [];
+  }
+};
+const s76SigCount = reportSigDirs().length;
+const s76Dry = runTriage(['--dry-run']);
+out('S76 --dry-run', `${s76Dry.stdout}${s76Dry.stderr}`);
+expect(
+  'S76 --dry-run reports the backlog and writes nothing',
+  s76Dry.status === 0 && /dry-run/.test(s76Dry.stdout) && issueNames(triageRepo).length === 0,
+  `status=${s76Dry.status} issues=${issueNames(triageRepo).length}`
+);
+const s76Real = runTriage([]);
+out('S76 first run', `${s76Real.stdout}${s76Real.stderr}`);
+expect(
+  'S76 one issue per signature is generated',
+  s76Real.status === 0 && issueNames(triageRepo).length === s76SigCount,
+  `${issueNames(triageRepo).length} vs ${s76SigCount}`
+);
+const s76IssuePath = join(triageRepo, 'docs', 'issues', `bugs-collab-${s72NewSigs[0]}.md`);
+const s76Issue = existsSync(s76IssuePath) ? readFileSync(s76IssuePath, 'utf8') : '';
+out('S76 generated issue', s76Issue);
+expect(
+  'S76 the issue carries 现象/证据/版本/首次与最近/bid 列表',
+  ['## 现象', '## 证据', '受影响版本', '首次上报', '最近上报', '涉及 bid'].every(mark => s76Issue.includes(mark)) &&
+    s76Issue.includes(s72NewSigs[0]),
+  `len=${s76Issue.length}`
+);
+expect(
+  'S76 … and the evidence references the report file, not the message body',
+  s76Issue.includes(join(reportRoot, s72NewSigs[0])) && !s76Issue.includes(S72_SECRET),
+  s76Issue.split('\n').slice(0, 3).join(' | ')
+);
+const s76Rerun = runTriage([]);
+expect(
+  'S76 rerun is idempotent: no new issue and identical content',
+  s76Rerun.status === 0 &&
+    issueNames(triageRepo).length === s76SigCount &&
+    readFileSync(s76IssuePath, 'utf8') === s76Issue &&
+    /没有待处理上报/.test(s76Rerun.stdout),
+  s76Rerun.stdout.trim().split('\n').slice(-1)[0]
+);
+const triageFutureRepo = join(dir, 'triage-future');
+mkdirSync(join(triageFutureRepo, 'docs', 'issues'), { recursive: true });
+const s76Since = spawnSync(
+  process.execPath,
+  [triageScript, '--repo', triageFutureRepo, '--since', new Date(Date.now() + 3_600_000).toISOString()],
+  { encoding: 'utf8', env: triageEnv }
+);
+expect(
+  'S76 --since filters every older report out',
+  s76Since.status === 0 && issueNames(triageFutureRepo).length === 0 && /没有待处理上报/.test(s76Since.stdout),
+  s76Since.stdout.trim()
+);
+
+// --- S76b: `--notify` re-delivers over HTTP; protected targets are refused.
+const s76Received = [];
+const s76Server = createServer((request, response) => {
+  let body = '';
+  request.on('data', chunk => (body += chunk));
+  request.on('end', () => {
+    s76Received.push({ url: request.url, body, authorization: request.headers.authorization });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{"id":"msg_notify"}');
+  });
+});
+await new Promise(resolveListen => s76Server.listen(0, '127.0.0.1', resolveListen));
+const s76Port = s76Server.address().port;
+// Force a backlog again: drop `triagedAt` (a fresh checkout / wiped index).
+rmSync(join(reportRoot, 'index.json'), { force: true });
+const s76Notified = await runTriageAsync(['--notify', 'maint'], {
+  ...triageEnv,
+  COLLAB_SERVER_URL: `http://127.0.0.1:${s76Port}`,
+  COLLAB_SERVER_TOKEN: 't0k_test'
+});
+out('S76 --notify', `${s76Notified.stdout}${s76Notified.stderr}`);
+expect(
+  'S76 --notify posts exactly one note to the maintainer session',
+  s76Notified.status === 0 &&
+    s76Received.length === 1 &&
+    s76Received[0].url === '/api/session/ses_aaa/prompt' &&
+    s76Received[0].authorization === 'Bearer t0k_test' &&
+    JSON.parse(s76Received[0].body).text.includes('[defect]'),
+  JSON.stringify(s76Received.map(hit => hit.url))
+);
+// `--notify` only fires when something is pending: create a backlog again.
+rmSync(join(reportRoot, 'index.json'), { force: true });
+const s76Protected = await runTriageAsync(['--notify', 'ses_e1eb91cebffeTv1467ubJLKebk'], {
+  ...triageEnv,
+  COLLAB_SERVER_URL: `http://127.0.0.1:${s76Port}`
+});
+expect(
+  'S76 --notify refuses a protected target (and still exits 0)',
+  s76Protected.status === 0 && s76Received.length === 1 && /protect/.test(s76Protected.stderr),
+  s76Protected.stderr.trim().slice(0, 160)
+);
+await new Promise(resolveClose => s76Server.close(resolveClose));
+
+// --- S76c: the maintainer session sees the untriaged backlog once (R9.2).
+writeConfig({ aliases: { maint: 'ses_aaa' }, report: { to: 'maint' } });
+rmSync(join(reportRoot, 'index.json'), { force: true }); // backlog again
+const s76NoticeEvent = contextEvent('ses_aaa');
+await hooks.context(s76NoticeEvent);
+out('S76 maintainer notice injection', textOf(s76NoticeEvent));
+expect(
+  'S76 the maintainer session is told about the untriaged backlog once',
+  /未处理缺陷上报 \d+ 条/.test(textOf(s76NoticeEvent)) && textOf(s76NoticeEvent).includes('collab-triage'),
+  textOf(s76NoticeEvent).slice(0, 200)
+);
+const s76NoticeAgain = contextEvent('ses_aaa');
+await hooks.context(s76NoticeAgain);
+expect(
+  'S76 … and not on the next request',
+  !/未处理缺陷上报/.test(textOf(s76NoticeAgain)),
+  textOf(s76NoticeAgain).slice(0, 120)
+);
+const s76ListNotice = await call('collab_list', {}, { sessionID: 'ses_b1', agent: 'build' });
+expect(
+  'S76 collab_list ends with the fixed report entry point (R8②)',
+  s76ListNotice.trim().split('\n').slice(-1)[0].includes('缺陷上报：collab_report { confirm:true }'),
+  s76ListNotice.trim().split('\n').slice(-1)[0]
+);
+
+
+// ============ S77 (review F1: collab_wait host failures are defects, timeouts not)
+// The idle wait used to wrap *every* failure into `invalid`, so a host 5xx while
+// waiting — the most likely "stuck" shape — was neither reported nor hinted.
+const s77RealWait = ctx.session.wait;
+const s77SigsBefore = reportSigDirs();
+ctx.session.wait = async () => {
+  throw new Error('HTTP 500 wait exploded (S77)');
+};
+const s77Message = await expectFail(
+  'S77 collab_wait host 5xx still fails with the readable wait text',
+  () => call('collab_wait', { target: 'ses_bbb', timeoutMs: 1000 }, { sessionID: 'ses_aaa', agent: 'build' }),
+  /collab_wait 失败：HTTP 500 wait exploded/
+);
+ctx.session.wait = s77RealWait;
+const s77New = reportSigDirs().filter(sig => !s77SigsBefore.includes(sig));
+const s77Report = s77New.length ? reportOf(s77New[0]) : undefined;
+out('S77 wait host 5xx report', s77Report ? JSON.stringify(s77Report.data) : '(没有生成证据)');
+expect(
+  'S77 … it is reported as a delivery/uncaught defect (R1: 投递 5xx)',
+  s77New.length === 1 &&
+    s77Report?.data?.tool === 'collab_wait' &&
+    ['delivery-5xx', 'uncaught'].includes(s77Report?.data?.class),
+  `class=${s77Report?.data?.class} sigs=${s77New.join(',')}`
+);
+expect(
+  'S77 … and the caller error keeps the entry point',
+  s77Message.includes('collab_report') && s77Message.includes(reportRoot),
+  s77Message.split('\n').slice(-1)[0]
+);
+// A timeout is a business outcome: raise timeoutMs / check the inbox — no report.
+const s77bCount = reportCount();
+ctx.session.wait = () => new Promise(() => {}); // never resolves: only the timeout fires
+const s77bMessage = await expectFail(
+  'S77 a wait timeout stays a business outcome',
+  () => call('collab_wait', { target: 'ses_bbb', timeoutMs: 1000 }, { sessionID: 'ses_aaa', agent: 'build' }),
+  /等待超时/
+);
+ctx.session.wait = s77RealWait;
+expect(
+  'S77 … the timeout writes no report and carries no entry point',
+  reportCount() === s77bCount && !s77bMessage.includes('collab_report'),
+  `${reportCount()} vs ${s77bCount}`
+);
+
+// ============ S78 (review F2: a failed ACCEPT/receipt delivery is reported)
+// `notifyRequester` used to swallow the host error into one line of text.
+const s78Bid = 'b_aaaa0000000000f6';
+writeRaw(s78Bid, {
+  workspace: WS_A,
+  state: 'open',
+  title: 'S78 回执投递失败',
+  from: { sid: 'ses_req' },
+  createdAt: Date.now()
+});
+const s78SigsBefore = reportSigDirs();
+const s78RealPrompt = ctx.session.prompt;
+ctx.session.prompt = async input => {
+  if (input.sessionID === 'ses_req') throw new Error('HTTP 502 bad gateway (S78)');
+  return s78RealPrompt(input);
+};
+const s78 = await call('collab_accept', { bid: s78Bid, confirm: true }, { sessionID: 'ses_a_target', agent: 'build' });
+ctx.session.prompt = s78RealPrompt;
+out('S78 accept with a failing receipt delivery', s78);
+expect(
+  'S78 the returned text is unchanged (旁路)',
+  s78.includes('已领取') && s78.includes('未通知发起方：HTTP 502 bad gateway (S78)'),
+  s78.split('\n').filter(line => line.includes('通知')).join(' | ')
+);
+const s78New = reportSigDirs().filter(sig => !s78SigsBefore.includes(sig));
+const s78Report = s78New.length ? reportOf(s78New[0]) : undefined;
+expect(
+  'S78 … and the failed receipt delivery is reported (tool/bid/hand-off context)',
+  s78New.length === 1 &&
+    s78Report?.data?.tool === 'collab_accept' &&
+    s78Report?.data?.class === 'delivery-5xx' &&
+    s78Report?.data?.context?.bid === s78Bid,
+  `class=${s78Report?.data?.class} bid=${s78Report?.data?.context?.bid}`
+);
+
+// ============ S79 (review F3: triage must create a missing report directory)
+// `open('wx')` on a missing directory is ENOENT, not a lock conflict; treating
+// it as "another triage is running" made a fresh install's cron spin forever.
+const s79Repo = join(dir, 'triage-nodir-repo');
+mkdirSync(join(s79Repo, 'docs', 'issues'), { recursive: true });
+const s79Dir = join(dir, 'triage-missing-dir');
+const s79 = spawnSync(process.execPath, [triageScript, '--dir', s79Dir, '--repo', s79Repo], {
+  encoding: 'utf8',
+  env: triageEnv
+});
+out('S79 triage over a missing report dir', `${s79.stdout}${s79.stderr}`);
+expect(
+  'S79 a missing report dir is not a lock conflict (creates it and runs)',
+  s79.status === 0 && !/另一个 triage/.test(s79.stderr) && /没有待处理上报/.test(s79.stdout) && existsSync(s79Dir),
+  `status=${s79.status} stderr=${s79.stderr.trim().slice(0, 120)}`
+);
+
+// --- S79b (review F7): the triage script copies `BUILTIN_PROTECT` (it must stay
+// zero-dependency and cannot import the TS build). Guard the copy so a future
+// change to the hard list cannot silently *under*-protect the --notify path.
+const s79bSource = readFileSync(triageScript, 'utf8');
+const s79bBlock = /const BUILTIN_PROTECT = \[([^\]]*)\]/.exec(s79bSource)?.[1] ?? '';
+// The literal is single-quoted JS, not JSON: read the ids out directly.
+const s79bProtect = [...s79bBlock.matchAll(/'(ses_[A-Za-z0-9]+)'/g)].map(match => match[1]);
+expect(
+  'S79b triage copies the same built-in protect list as the plugin (fail-closed parity)',
+  JSON.stringify(s79bProtect) === JSON.stringify(internals.BUILTIN_PROTECT),
+  `${s79bProtect.join(',')} vs ${internals.BUILTIN_PROTECT.join(',')}`
+);
+
+// ============ S80 (review F4: the report note carries a replyable reporter sid)
+// The evidence keeps short ids (R2), but `metadata.collab.fromSessionID` must be
+// the full `ses_…`, otherwise the maintainer cannot reply to the reporter.
+await writeConfig({ aliases: { maint: 'ses_aaa' }, report: { to: 'maint' } });
+const s80Before = prompts.length;
+failPromptFor('ses_bbb', new Error('HTTP 500 (S80)'));
+await expectFail(
+  'S80 a defect with report.to still fails the call',
+  () => call('collab_send', { target: 'ses_bbb', text: 'S80 样本', confirm: true }),
+  /HTTP 500/
+);
+ctx.session.prompt = s72RealPrompt;
+const s80Note = prompts[prompts.length - 1];
+expect(
+  'S80 the report note carries the full reporter sid (replyable), evidence stays short',
+  prompts.length === s80Before + 1 &&
+    s80Note?.metadata?.collab?.fromSessionID === 'ses_aaa' &&
+    !String(s80Note?.metadata?.collab?.fromSessionID ?? '').includes('…'),
+  JSON.stringify(s80Note?.metadata?.collab ?? null)
 );
 
 const failed = checks.filter(check => !check.ok);

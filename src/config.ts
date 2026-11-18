@@ -49,7 +49,30 @@ export function loadConfig(options: unknown): CollabConfig {
     ...(Array.isArray(file.readonlyAgents) ? file.readonlyAgents : [])
   ]);
 
-  return { aliases, autoDeliver, maxInject, allowWrite, protect, readonlyAgents };
+  // R5 (defect self-reporting): `report.to` is the maintainer session — an alias
+  // or a `ses_…` id. Absent = evidence files only, no delivery. `report.enabled:false`
+  // keeps writing evidence but turns the delivery off (rollback switch, design §6).
+  const reportFile = asObject(file.report);
+  const reportOptions = asObject(fromOptions.report);
+  const reportTo = String(reportFile.to ?? reportOptions.to ?? '').trim();
+  const reportEnabled =
+    typeof reportFile.enabled === 'boolean'
+      ? reportFile.enabled
+      : typeof reportOptions.enabled === 'boolean'
+        ? reportOptions.enabled
+        : undefined;
+
+  return {
+    aliases,
+    autoDeliver,
+    maxInject,
+    allowWrite,
+    protect,
+    readonlyAgents,
+    ...(reportTo || reportEnabled !== undefined
+      ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
+      : {})
+  };
 }
 
 export type ConfigReader = () => CollabConfig;

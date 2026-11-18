@@ -1,5 +1,6 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, EXPECTED } from '../constants.ts';
 import { persistRefresh, readBroadcast, writeBroadcast } from '../core/claim.ts';
+import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
 import { newThreadID } from '../ids.ts';
@@ -51,7 +52,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       const me = context?.sessionID;
       const workspace = ctx?.location?.directory;
       const body = String(input?.text ?? '').trim();
-      if (!body) throw new Error('text 不能为空');
+      if (!body) throw invalid('text 不能为空');
       const expected = normalizeExpected(input?.expected);
       const notes: string[] = [];
 
@@ -61,7 +62,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         target = await resolveTarget(input?.target);
       } else {
         if (!workspace) {
-          throw new Error('缺少工作区信息（ctx.location.directory），无法自动选人；请显式传 target');
+          throw invalid('缺少工作区信息（ctx.location.directory），无法自动选人；请显式传 target');
         }
         const proposal = summarizeProposal(body, `handoff-${hash16(body).slice(0, 8)}.md`);
         ranking = await chain.rankCandidates({
@@ -72,7 +73,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         });
         const candidates = ranking.candidates;
         if (!candidates.length) {
-          throw new Error(
+          throw invalid(
             `本工作区没有可用候选（已排除子会话、[protected*] 与当前会话）：请显式传 target，` +
               `或改用 collab_broadcast 拉新。`
           );
@@ -80,7 +81,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         const single = candidates.length === 1;
         const best = candidates[0];
         if (!single && best.score < BCAST_THRESHOLD) {
-          throw new Error(
+          throw invalid(
             `没有匹配分 ≥${BCAST_THRESHOLD} 的目标，未投递。候选：\n${candidates
               .slice(0, 5)
               .map(candidate => `  ${candidate.score}  ${candidate.sid} why=[${candidate.why.join(', ')}]`)

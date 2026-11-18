@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏，以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -31,6 +31,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
+| `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `confirm:true` 才真正执行；否则只预览。
@@ -105,22 +106,55 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 4. 跨工作区只写 `docs/issues/**`；对端 git 一律只读。
 5. 一次交接只发一条；超时只提醒一次，不重投。
 
-## 六点五、遇到异常怎么办（缺陷上报）
+## 六点五、遇到异常怎么办（缺陷上报 + 挂起监控）
 
-协作失败**不要静默重试或放弃**。按下面做，把现场留给维护方：
+协作失败**不要静默重试或放弃**：0.1.3 起插件自己会留证据，你只需要把入口用起来。
 
-1. **保留原文**：错误文案、`bid` / `threadID`、你调用的工具与参数（可脱敏正文）。
-2. **记录状态**：`collab_list` 的输出（含 `state/attempts/lease`）。
-3. **写到上报目录**（本机，随插件版本走）：
-   ```bash
-   mkdir -p ~/.config/opencode/collab-reports
-   # 把上面的信息贴进一个文件，文件名带时间与 bid
-   ```
-4. **通知维护方**（若已配置 `report.to` 别名）：
-   `collab_send { target:"<alias>", text:"[defect] <一句话> bid=<bid> 证据=<路径>", confirm:true }`
-5. 已知的「不是缺陷」：参数校验错误、对端不跑、目标在 protect 内（受保护回执见 pull 模式）。
+### 自动（你什么都不用做）
 
-> 0.1.3 起插件会自动收集证据并落盘；在此之前请按上面手工上报。
+工具抛出**非参数校验类**异常（未捕获异常 / 护栏与指令冲突 / 投递 5xx / 提取失败）时，插件会：
+
+1. 写 `~/.config/opencode/collab-reports/<signature>/<ts>.json` + 同名 `.md`（issue 草稿）；
+2. 若 `collab.json` 配了 `report: { to: "<alias|ses_…>" }`，再投一条 `note`（`queue`）给维护方；
+3. 在错误文案末尾追加一行入口提示（受保护目标只落盘，不投递）。
+
+同签名 **1 小时最多 1 条**；证据是字段白名单（版本/工具/分类/错误名与消息≤2KB/stack 前 5 帧/短 id/
+工作区/记录快照），**不含正文、文件内容、token**。
+
+### 手动（自动判定没覆盖到时）
+
+```text
+collab_report { note:"回执被 protect 拒绝，bid=b_…（复现步骤：…）", bid:"b_…", confirm:true }
+```
+
+- `confirm:false` 只预览签名与目录，不写盘；
+- 同一个 note 1 小时内重复调用不会重复写文件（返回「未新增文件」）；
+- 只写证据 + 一条 note，**不改变任何协作状态**（不领取、不闭环、不改记录）。
+
+### 挂起怎么看
+
+`collab_list` 与每次 `context` 注入各带一次「挂起提醒」（同 `(session, class, bid)` 只提示一次）：
+
+| 类 | 含义 | 你能做什么 |
+| --- | --- | --- |
+| `open-stale` | `open` 超 1h 没人领 | 重新广播 / 显式指定 target |
+| `claimed-lapsed` | 领取后超租约没确认 | 顺延下一候选 / 人工指定 |
+| `acked-stale` | `acked` 静默超 2h | 发起方只读提取承接方最后一条回答收口 |
+
+### 维护方（只有维护方会话需要做）
+
+```bash
+node scripts/collab-triage.mjs --dry-run                  # 看待处理签名
+node scripts/collab-triage.mjs                            # 生成 docs/issues/bugs-collab-<sig>.md
+node scripts/collab-triage.mjs --notify collab-maintainer  # 额外补投一条 note（需 COLLAB_SERVER_URL）
+```
+
+幂等、文件锁、`--since` 过滤；维护方会话还会在 `context` 注入/`collab_list` 看到「未处理缺陷上报 N 条」。
+
+### 不是缺陷（不用上报）
+
+参数校验错误（空 `text` / 非法 `bid` / 未知 target）、对端不跑、目标在 `protect` 内
+（受保护回执见 pull 模式，§三）。
 
 ## 七、安装与升级
 

@@ -1,3 +1,4 @@
+import { invalid } from '../core/errors.ts';
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
 import type { ToolDefinition } from '../types.ts';
 import { canReplyToProtected, jsonInput } from './shared.ts';
@@ -40,12 +41,12 @@ export function replyTool(kit: ToolKit): ToolDefinition {
     }),
     async execute(input, context) {
       const threadID = normalizeThreadID(input?.threadID);
-      if (!threadID) throw new Error('threadID 不能为空：回执必须带上原请求的 threadID');
-      if (!isValidThreadID(threadID)) throw new Error(`threadID 格式不合法："${threadID}"`);
+      if (!threadID) throw invalid('threadID 不能为空：回执必须带上原请求的 threadID');
+      if (!isValidThreadID(threadID)) throw invalid(`threadID 格式不合法："${threadID}"`);
 
       const thread = await threads.read(threadID);
       if (!thread) {
-        throw new Error(
+        throw invalid(
           `storage 里没有 thread ${threadID}：无法确定对端。请改用 collab_send ` +
             `{target, kind:"reply", threadID:"${threadID}", text, confirm:true} 显式指定目标。`
         );
@@ -55,7 +56,7 @@ export function replyTool(kit: ToolKit): ToolDefinition {
       const participants = [thread.fromSession, thread.toSession].filter(Boolean);
       const notes: string[] = [];
       if (me && !participants.includes(me)) {
-        throw new Error(
+        throw invalid(
           `拒绝回执：当前会话 ${me} 不是 thread ${threadID} 的参与方` +
             `（发起方 ${thread.fromSession ?? '?'}，对端 ${thread.toSession ?? '?'}）。未发送任何内容。`
         );
@@ -68,7 +69,7 @@ export function replyTool(kit: ToolKit): ToolDefinition {
           : thread.fromSession
         : (thread.fromSession ?? thread.toSession);
       if (!counterpart) {
-        throw new Error(`thread ${threadID} 没有记录对端会话 id，无法自动回复；请用 collab_send 显式指定 target`);
+        throw invalid(`thread ${threadID} 没有记录对端会话 id，无法自动回复；请用 collab_send 显式指定 target`);
       }
 
       const { mode, forced } = resolveMode('queue', context?.agent);

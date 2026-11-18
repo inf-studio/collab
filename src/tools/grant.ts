@@ -1,5 +1,6 @@
 import { COLLAB_RULE_RESOURCE, COLLAB_TOOL_ACTIONS } from '../constants.ts';
 import { collabPermissionRules, grantFile, grantHalfOf, missingRules, readGrant } from '../core/grants.ts';
+import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { PermissionRule, ToolDefinition } from '../types.ts';
 import { fmtTime, truncate } from '../util.ts';
@@ -46,7 +47,7 @@ export function grantTool(kit: ToolKit): ToolDefinition {
       const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
       if (guard) {
         const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
-        throw new Error(
+        throw invalid(
           `拒绝授权：目标 ${sessionID}${alias ? `（别名 ${alias}）` : ''} ${where}在 protect 名单内` +
             '（覆盖其任意层级子会话）。未修改任何 permissions。'
         );

@@ -154,3 +154,35 @@ export const SERVER_URL = String(process.env.COLLAB_SERVER_URL ?? '')
   .trim()
   .replace(/\/+$/, '');
 export const SERVER_TOKEN = String(process.env.COLLAB_SERVER_TOKEN ?? '').trim();
+
+// ------------------------------------------------------- defect self-reporting
+
+/**
+ * Where defect evidence lands (`~/.config/opencode/collab-reports/<sig>/`).
+ * The directory is **evidence and fallback only**: the primary channel is a
+ * `collab_send` note to `report.to` (see `core/report.ts`). `COLLAB_REPORT_DIR`
+ * overrides it (harness / sandbox runs).
+ */
+export const REPORT_DIR =
+  process.env.COLLAB_REPORT_DIR || join(homedir(), '.config', 'opencode', 'collab-reports');
+/** One report per signature per hour (R4). */
+export const REPORT_THROTTLE_MS = 60 * 60 * 1000;
+/** `error.message` is cut here before it is written to disk (R2). */
+export const REPORT_MESSAGE_LIMIT = 2048;
+/** Only the first N stack frames are kept — enough to locate the frame. */
+export const REPORT_STACK_FRAMES = 5;
+/** Index of `{ signature: { lastAt, triagedAt } }`, written `tmp + rename`. */
+export const REPORT_INDEX_FILE = 'index.json';
+
+// -------------------------------------------------------- hang-up monitoring
+
+/** `open` older than this with nobody asking = stuck (R6). */
+export const STALE_OPEN_MS = 60 * 60 * 1000;
+/** `acked` silent for this long = the receipt is lost; extract it (R6/R8). */
+export const STALE_ACKED_MS = ACKED_EXTRACT_MS;
+/** Per-session memory of already-shown `class:bid` reminders. */
+export const STALE_SEEN_LIMIT = 200;
+
+/** Keep in sync with `package.json` (`the harness asserts equality`). */
+export const PLUGIN_VERSION = '0.1.3';
+

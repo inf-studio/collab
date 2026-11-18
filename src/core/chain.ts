@@ -59,7 +59,7 @@ export interface HandoffChain extends Grants {
   notifyRequester(
     record: BroadcastRecord,
     input: { text: string; kind?: string; from?: string; threadID?: string }
-  ): Promise<{ delivered: boolean; message?: string; reason?: string }>;
+  ): Promise<{ delivered: boolean; message?: string; reason?: string; error?: unknown }>;
   injectionFor(sessionID: string | undefined, directory: string | undefined): Promise<string[]>;
   extractVerdict(
     sessionID: string | undefined,
@@ -390,7 +390,7 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
   async function notifyRequester(
     record: BroadcastRecord,
     { text, kind = 'note', from, threadID }: { text: string; kind?: string; from?: string; threadID?: string }
-  ): Promise<{ delivered: boolean; message?: string; reason?: string }> {
+  ): Promise<{ delivered: boolean; message?: string; reason?: string; error?: unknown }> {
     const target = record?.from?.sid;
     if (!target) return { delivered: false, reason: '记录里没有发起方会话 id' };
     const config = readConfig();
@@ -414,7 +414,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       });
       return { delivered: true, message: admitted?.id };
     } catch (error) {
-      return { delivered: false, reason: errText(error) };
+      // `error` (not just its text) is returned so the calling tool can file a
+      // defect report (R1: 投递 5xx) without making the chain depend on the
+      // reporter — a protected requester / missing sid stays a plain `reason`.
+      return { delivered: false, reason: errText(error), error };
     }
   }
 

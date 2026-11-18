@@ -2,14 +2,25 @@ import type { ConfigReader } from '../config.ts';
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
 import type { HandoffChain } from '../core/chain.ts';
 import { readBroadcast } from '../core/claim.ts';
+import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
+import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
 import { handoffActions } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import type { WakeSignal } from '../ids.ts';
 import { errText, log } from '../log.ts';
-import type { BroadcastRecord, CollabContext, JsonObject, SessionInfoLike, ToolContext, ToolResult } from '../types.ts';
+import type {
+  BroadcastRecord,
+  CollabContext,
+  JsonObject,
+  SessionInfoLike,
+  SessionPromptInput,
+  SessionPromptResult,
+  ToolContext,
+  ToolResult
+} from '../types.ts';
 import { asObject, fmtTime, sessionState, shortID, truncate, truncateRaw } from '../util.ts';
 
 /** `jsonInput` — the object schema every tool declares (extra keys refused). */
@@ -72,6 +83,8 @@ export interface ToolDeps {
   threads: ThreadStore;
   signal: WakeSignal;
   chain: HandoffChain;
+  /** Defect self-reporting (R1–R8): side path, never changes a tool result. */
+  reporter: Reporter;
 }
 
 export interface Target {
@@ -117,10 +130,23 @@ export interface ToolKit {
 export function createToolKit(deps: ToolDeps): ToolKit {
   const { ctx, readConfig, threads, signal } = deps;
 
+  /**
+   * One delivery. A refused/thrown `session.prompt` is tagged as a delivery
+   * defect (R1: 投递 5xx) instead of a generic `Error`, so `reporter.wrap` files it
+   * under `delivery-5xx` and the caller still receives the readable message.
+   */
+  async function deliverPrompt(input: SessionPromptInput): Promise<SessionPromptResult> {
+    try {
+      return await ctx.session.prompt(input);
+    } catch (error) {
+      throw deliveryFailure(error);
+    }
+  }
+
   /** Resolve `<alias>|ses_…` → existing session info, or throw a readable error. */
   async function resolveTarget(raw: unknown): Promise<Target> {
     const target = String(raw ?? '').trim();
-    if (!target) throw new Error('target 不能为空：请给 ses_… 会话 id 或 collab.json 里的别名');
+    if (!target) throw invalid('target 不能为空：请给 ses_… 会话 id 或 collab.json 里的别名');
 
     let sessionID = target;
     let alias: string | undefined;
@@ -129,7 +155,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       const table: Record<string, string> = { ...stored, ...readConfig().aliases };
       sessionID = table[target];
       if (!sessionID) {
-        throw new Error(
+        throw invalid(
           `未知目标 "${target}"：既不是 ses_ 会话 id，也不在别名表里` +
             `（${CONFIG_PATH} 的 aliases，或 ~/.config/opencode/collab-aliases.json）`
         );
@@ -141,7 +167,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     try {
       info = await ctx.session.get({ sessionID });
     } catch (error) {
-      throw new Error(`会话不存在或不可读：${sessionID}（${errText(error)}）`, { cause: error });
+      throw invalid(`会话不存在或不可读：${sessionID}（${errText(error)}）`, error);
     }
     return { sessionID, alias, info };
   }
@@ -189,7 +215,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
   }): Promise<ToolResult> {
     const config = readConfig();
     const body = String(input?.text ?? '').trim();
-    if (!body) throw new Error('text 不能为空');
+    if (!body) throw invalid('text 不能为空');
 
     const { sessionID, alias, info } = target;
     // Lineage guard: the target itself *or* any ancestor in the protect list.
@@ -199,8 +225,29 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     // `canReplyToProtected`; nothing else may bypass the guard.
     const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
     if (guard && !allowProtectedReply) {
+      // R1 (guard-conflict): the whitelist itself says this is the receipt of
+      // this very bid (live record, target = its requester, sender = its
+      // claimant) yet the caller passed `allowProtectedReply:false` — a call
+      // site forgot to consult `canReplyToProtected`, or the whitelist was
+      // bypassed. That is a plugin defect, not a caller error, so it is
+      // reported (and still refused) instead of being a plain validation error.
+      if (
+        canReplyToProtected({
+          kind,
+          target: sessionID,
+          sender: context?.sessionID,
+          bid: input?.bid,
+          text: input?.text
+        })
+      ) {
+        throw new GuardConflictError(
+          `护栏与指令冲突：本条是发往受保护发起方 ${sessionID} 的限界回执` +
+            `（kind=reply + 该 bid 的领取人本人），白名单本应放行却未生效。已按插件缺陷上报，未发送任何内容。`,
+          { bid: String(input?.bid ?? '') || undefined, target: sessionID }
+        );
+      }
       const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
-      throw new Error(
+      throw invalid(
         `拒绝投递：目标 ${sessionID}${alias ? `（别名 ${alias}）` : ''} ${where}在 protect 名单内` +
           `（${CONFIG_PATH} 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。${
             kind === 'reply'
@@ -210,7 +257,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       );
     }
     if (context?.sessionID && context.sessionID === sessionID) {
-      throw new Error('拒绝投递：target 就是当前会话本身（会导致自我排队）。未发送任何内容。');
+      throw invalid('拒绝投递：target 就是当前会话本身（会导致自我排队）。未发送任何内容。');
     }
 
     const from = senderLabel(context?.sessionID);
@@ -243,7 +290,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       };
     }
 
-    const admitted = await ctx.session.prompt({
+    const admitted = await deliverPrompt({
       sessionID,
       text,
       delivery,
@@ -307,13 +354,13 @@ export function createToolKit(deps: ToolDeps): ToolKit {
 
     const initial = await threads.read(threadID);
     if (!initial) {
-      throw new Error(
+      throw invalid(
         `没有 thread ${threadID}：threadID 可能拼错，或该 thread 由别的项目/目录（不同 location）创建。` +
           `请用 collab_inbox 核对 threadID；若请求刚发出，稍后重试。`
       );
     }
     if (me && me !== initial.fromSession && me !== initial.toSession) {
-      throw new Error(
+      throw invalid(
         `拒绝等待：当前会话 ${me} 不是 thread ${threadID} 的参与方` +
           `（发起方 ${initial.fromSession ?? '?'}，对端 ${initial.toSession ?? '?'}）。`
       );
@@ -345,7 +392,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       }
       const left = deadline - Date.now();
       if (left <= 0) {
-        throw new Error(
+        throw invalid(
           `等待回执超时：thread ${threadID} 在 ${timeoutMs}ms 内没有新的 kind=reply 消息` +
             `（只看最后一次 request 之后的回执；可加大 timeoutMs，或让对端 collab_reply {threadID}）`
         );
@@ -402,7 +449,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       .filter(Boolean)
       .join('\n');
     try {
-      await ctx.session.prompt({
+      await deliverPrompt({
         sessionID: target,
         text: envelope({ from, kind: 'request', threadID, body }),
         delivery: 'queue',
@@ -420,6 +467,15 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       return true;
     } catch (error) {
       log(`deliverAsk failed for ${target}: ${errText(error)}`);
+      // A takeover request that could not be delivered used to be a log line
+      // only — exactly the "silent hang" this task exists for. Reporting is a
+      // side path: the hand-off still follows its lease path.
+      await deps.reporter.reportNow({
+        tool: 'collab_handoff',
+        defect: classify(error) ?? 'delivery-5xx',
+        error,
+        input: { bid: String(record?.bid ?? ''), target }
+      });
       return false;
     }
   }

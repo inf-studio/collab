@@ -1,4 +1,7 @@
+import { allBroadcasts } from '../core/claim.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
+import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
+import { formatStale, markShown, staleFor } from '../core/stale.ts';
 import { normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
 import { log } from '../log.ts';
 import type { ToolDeps } from '../tools/shared.ts';
@@ -137,6 +140,45 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     ].join('\n');
   }
 
+  /**
+   * R6: the hang-up classes (`open-stale` / `claimed-lapsed` / `acked-stale`)
+   * for the hand-offs this session is part of, once per `(class, bid)`.
+   * Read-only: no refresh, no lock release, no auto-close.
+   */
+  async function injectStale(event: ContextHookEvent): Promise<string | undefined> {
+    const sessionID = event?.sessionID;
+    if (!sessionID) return undefined;
+    const items = await markShown(deps.ctx, sessionID, staleFor(allBroadcasts(), sessionID, Date.now()));
+    if (!items.length) return undefined;
+    return [
+      '[collab-handoff] 挂起提醒（每类每单只出现一次）:',
+      ...formatStale(items),
+      '缺陷上报：collab_report { confirm:true }'
+    ].join('\n');
+  }
+
+  /**
+   * R9.2 (passive): only the session configured as `report.to` is told about the
+   * untriaged backlog, once per session (and again only when the count grows).
+   */
+  async function injectReportNotice(event: ContextHookEvent): Promise<string | undefined> {
+    const sessionID = event?.sessionID;
+    if (!sessionID) return undefined;
+    const config = readConfig();
+    const to = String(config.report?.to ?? '').trim();
+    if (!to) return undefined;
+    const sid = to.startsWith('ses_') ? to : String(config.aliases?.[to] ?? '');
+    if (!sid || sid !== sessionID) return undefined;
+    const { count } = deps.reporter.pending();
+    if (!count) return undefined;
+    if (!(await takePendingNotice(deps.ctx, sessionID, count))) return undefined;
+    return [
+      `[collab] ${reportNoticeLine(count)}`,
+      `证据目录: ${reportDir()}`,
+      '缺陷上报：collab_report { confirm:true }（手工补一条现场）'
+    ].join('\n');
+  }
+
   /** Group broadcasts + unclosed hand-offs, each surfaced once per session. */
   async function injectChain(event: ContextHookEvent): Promise<string | undefined> {
     const lines = await chain.injectionFor(event?.sessionID, deps.ctx?.location?.directory);
@@ -150,8 +192,15 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       const blocks: string[] = [];
       const inboxText = await injectInbox(event);
       if (inboxText) blocks.push(inboxText);
+      // Stale classes are computed *before* the chain refresh: that refresh
+      // reopens a lapsed `claimed` record, which would hide exactly the state
+      // this reminder exists to report.
+      const staleText = await injectStale(event);
+      if (staleText) blocks.push(staleText);
       const chainText = await injectChain(event);
       if (chainText) blocks.push(chainText);
+      const noticeText = await injectReportNotice(event);
+      if (noticeText) blocks.push(noticeText);
       if (blocks.length) event.system.push({ type: 'text', text: blocks.join('\n\n') });
     } catch (error) {
       // Never break a model request because of collab bookkeeping.

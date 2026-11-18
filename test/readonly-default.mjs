@@ -32,6 +32,8 @@ process.env.COLLAB_GRANT_DIR = join(dir, 'grants');
 // Ignore the operator's real `collab.json`: this file tests the built-in
 // defaults, and a machine-local `allowWrite:true` would mask a regression.
 process.env.COLLAB_CONFIG = join(dir, 'collab.json');
+// Defect evidence must not land in the operator's real report directory.
+process.env.COLLAB_REPORT_DIR = join(dir, 'reports');
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const plugin = (await import(`file://${entry}`)).default;
@@ -139,7 +141,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the same ten collab_* tools',
+  'R8 the package registers the ten collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -151,7 +153,8 @@ expect(
       'collab_inbox',
       'collab_wait',
       'collab_grant',
-      'collab_promote'
+      'collab_promote',
+      'collab_report'
     ].join(','),
   readonlyHost.tools.map(definition => definition.name).join(',')
 );

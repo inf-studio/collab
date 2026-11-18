@@ -1,4 +1,5 @@
 import { KINDS } from '../constants.ts';
+import { invalid } from '../core/errors.ts';
 import { isValidThreadID, newThreadID, normalizeKind, normalizeThreadID } from '../ids.ts';
 import type { ToolDefinition } from '../types.ts';
 import { canReplyToProtected, jsonInput } from './shared.ts';
@@ -72,7 +73,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       let threadID = normalizeThreadID(input?.threadID);
 
       if (threadID && !isValidThreadID(threadID)) {
-        throw new Error(`threadID 格式不合法："${threadID}"（期望 t_<base36ts>_<rand>，或省略以自动生成）`);
+        throw invalid(`threadID 格式不合法："${threadID}"（期望 t_<base36ts>_<rand>，或省略以自动生成）`);
       }
       if (kind === 'reply' && !threadID) {
         kind = 'request';
@@ -90,7 +91,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         } else if (!me) {
           notes.push('无会话上下文（无 sessionID）：未校验 reply 的参与者与对端。');
         } else if (me !== thread.fromSession && me !== thread.toSession) {
-          throw new Error(
+          throw invalid(
             `拒绝回执：当前会话 ${me} 不是 thread ${threadID} 的参与方` +
               `（发起方 ${thread.fromSession ?? '?'}，对端 ${thread.toSession ?? '?'}）。未发送任何内容。`
           );
@@ -98,7 +99,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
           const counterpart = thread.fromSession === me ? thread.toSession : thread.fromSession;
           const resolved = await resolveTarget(input?.target);
           if (counterpart && resolved.sessionID !== counterpart) {
-            throw new Error(
+            throw invalid(
               `拒绝回执：thread ${threadID} 的对端是 ${counterpart}，与 target ${resolved.sessionID} 不一致。` +
                 `回执请用 collab_reply {threadID}（自动路由）。未发送任何内容。`
             );

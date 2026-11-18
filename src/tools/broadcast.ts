@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, BROADCAST_DIR, EXPECTED } from '../constants.ts';
+import { invalid } from '../core/errors.ts';
 import { claimLock, persistRefresh, readBroadcast, releaseLock, updateLock, writeBroadcast } from '../core/claim.ts';
 import { grantFile } from '../core/grants.ts';
 import { createLineage } from '../core/lineage.ts';
@@ -193,7 +194,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         }
         if (agent !== 'explore' && input?.agentConfirm !== true) {
           releaseLock(bid, claimer);
-          throw new Error(
+          throw invalid(
             `拒绝拉新：agent="${agent}" 需要每次显式确认（传 agentConfirm:true）。` +
               `默认 explore 是只读的，不需要该参数。未创建任何会话。`
           );

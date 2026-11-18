@@ -1,6 +1,7 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ConfigReader } from '../config.ts';
+import { invalid } from './errors.ts';
 import {
   COLLAB_RULE_RESOURCE,
   COLLAB_TOOL_ACTIONS,
@@ -79,18 +80,18 @@ export function missingRules(base: unknown, rules: unknown): PermissionRule[] {
  */
 export function assertCollabOnly(rules: PermissionRule[]): PermissionRule[] {
   if (!Array.isArray(rules) || rules.length === 0) {
-    throw new Error('拒绝授权：规则集为空（只允许 5 条 collab_* 动作）。');
+    throw invalid('拒绝授权：规则集为空（只允许 5 条 collab_* 动作）。');
   }
   for (const rule of rules) {
     const action = String(rule?.action ?? '');
     if (!COLLAB_TOOL_ACTIONS.includes(action)) {
-      throw new Error(
+      throw invalid(
         `拒绝授权：action="${action}" 不在白名单内（只允许 ${COLLAB_TOOL_ACTIONS.join(' / ')}，` +
           '不授予 edit/write/shell 等任何额外能力）。'
       );
     }
     if (rule?.effect !== 'allow') {
-      throw new Error(`拒绝授权：collab 动作只允许 effect="allow"（收到 "${String(rule?.effect)}"）。`);
+      throw invalid(`拒绝授权：collab 动作只允许 effect="allow"（收到 "${String(rule?.effect)}"）。`);
     }
   }
   return rules;
@@ -257,7 +258,7 @@ export function createGrants(ctx: CollabContext, readConfig: ConfigReader): Gran
       return { via: 'session.update' };
     }
     if (!SERVER_URL) {
-      throw new Error(
+      throw invalid(
         '宿主不支持 ctx.session.update（无法写会话级 permissions），且未配置 COLLAB_SERVER_URL 作 HTTP fallback'
       );
     }
@@ -388,7 +389,7 @@ export function createGrants(ctx: CollabContext, readConfig: ConfigReader): Gran
       return { via: 'session.switchAgent' };
     }
     if (!SERVER_URL) {
-      throw new Error(
+      throw invalid(
         '宿主不支持 ctx.session.switchAgent（无法切换会话 agent），且未配置 COLLAB_SERVER_URL 作 HTTP fallback'
       );
     }

@@ -4,8 +4,19 @@ import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
+import {
+  DeliveryError,
+  ExtractError,
+  GuardConflictError,
+  InvariantError,
+  ValidationError,
+  classify
+} from './core/errors.ts';
+import { createReporter, reportDir, signature } from './core/report.ts';
+import { staleClass } from './core/stale.ts';
 import { appendThreadMessage, createInboxStore, createThreadStore, extractInbound } from './core/storage.ts';
 import { createSignal } from './ids.ts';
+import { BUILTIN_PROTECT, PLUGIN_VERSION } from './constants.ts';
 import { log } from './log.ts';
 import { createToolKit, registerTools } from './tools/index.ts';
 import type { CollabContext } from './types.ts';
@@ -36,7 +47,9 @@ const plugin: Plugin.Plugin = {
     const threads = createThreadStore(ctx);
     const signal = createSignal();
     const chain = createHandoffChain(ctx, readConfig);
-    const kit = createToolKit({ ctx, readConfig, inbox, threads, signal, chain });
+    // Defect self-reporting (R1–R8): a side path shared by every tool.
+    const reporter = createReporter({ ctx, readConfig });
+    const kit = createToolKit({ ctx, readConfig, inbox, threads, signal, chain, reporter });
     const tools = registerTools(kit);
 
     // 1) Native tools (sync transform; no external data fetched inside it).
@@ -110,9 +123,19 @@ const plugin: Plugin.Plugin = {
 
     const initial = readConfig();
     log(
-      `setup ok: directory=${directory} tools=${tools.length} aliases=${Object.keys(initial.aliases).length} ` +
+      `setup ok: version=${PLUGIN_VERSION} directory=${directory} tools=${tools.length} ` +
+        `aliases=${Object.keys(initial.aliases).length} ` +
         `protect=${initial.protect.length} autoDeliver=${initial.autoDeliver} maxInject=${initial.maxInject} ` +
         `readonly=${initial.readonlyAgents.join(',')} allowWrite=${initial.allowWrite}`
+    );
+    // R8④: the report entry point is visible without reading any docs — one
+    // line in the plugin's own setup log (stderr), next to the other diagnostics.
+    log(
+      `reportDir=${reportDir()} report.to=${initial.report?.to ?? '(unset: 只落盘，不投递)'}` +
+        `${initial.report?.enabled === false ? ' report.enabled=false' : ''}` +
+        // R9.2: the maintainer's "SessionStart" view (this log line is the only
+        // startup surface a plugin has).
+        ` pendingReports=${reporter.pending().count}`
     );
 
     return async () => {
@@ -134,6 +157,17 @@ export default plugin;
  * No I/O, no `ctx` — the plugin's own entrypoint is `default` only.
  */
 export const __internals = {
+  PLUGIN_VERSION,
+  BUILTIN_PROTECT,
+  // Defect-reporting taxonomy (R1/R4/R6) — pure, unit-testable without a host.
+  classify,
+  signature,
+  staleClass,
+  ValidationError,
+  GuardConflictError,
+  InvariantError,
+  DeliveryError,
+  ExtractError,
   COLLAB_TOOL_ACTIONS,
   collabPermissionRules,
   normalizeRules,

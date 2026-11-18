@@ -1,5 +1,6 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_MAX_ATTEMPTS, BROADCAST_DIR, MAX_STORED } from '../constants.ts';
 import { claimLock, isValidBid, persistRefresh, readBroadcast, releaseLock, writeBroadcast } from '../core/claim.ts';
+import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { BroadcastRecord, JsonObject, ToolDefinition } from '../types.ts';
 import { shortID, truncate } from '../util.ts';
@@ -35,6 +36,28 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
   const { deps } = kit;
   const { ctx, readConfig, chain } = deps;
 
+  /**
+   * R1 (投递 5xx): the ACCEPT / receipt note back to the requester is a
+   * delivery. When it fails, the caller used to get one readable line
+   * ("未通知发起方：…") and nothing else — no evidence, no entry point. Report
+   * it as a side path (the returned text is unchanged). A protected requester or
+   * a missing requester sid carries no `error` and is an expected outcome.
+   */
+  async function reportUndelivered(
+    record: BroadcastRecord,
+    notified: { delivered: boolean; error?: unknown }
+  ): Promise<void> {
+    if (notified.delivered || !notified.error) return;
+    await deps.reporter.reportNow({
+      tool: 'collab_accept',
+      // This branch only runs when a delivery (`session.prompt` back to the
+      // requester) failed, so the class is `delivery-5xx` by construction.
+      defect: 'delivery-5xx',
+      error: notified.error,
+      input: { bid: record.bid }
+    });
+  }
+
   return {
     name: 'collab_accept',
     description:
@@ -63,16 +86,16 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
     async execute(input, context) {
       const bid = String(input?.bid ?? '').trim();
       if (!isValidBid(bid)) {
-        throw new Error(`bid 格式不合法："${bid}"（期望 b_<hex16>，从广播/注入行里取）`);
+        throw invalid(`bid 格式不合法："${bid}"（期望 b_<hex16>，从广播/注入行里取）`);
       }
       const existing = readBroadcast(bid);
       if (!existing) {
-        throw new Error(`没有广播 ${bid}：${BROADCAST_DIR} 下没有该文件（bid 拼错，或该交接还没被广播）`);
+        throw invalid(`没有广播 ${bid}：${BROADCAST_DIR} 下没有该文件（bid 拼错，或该交接还没被广播）`);
       }
       const now = Date.now();
       const me = context?.sessionID;
       if (!me) {
-        throw new Error('collab_accept 需要会话上下文（sessionID）：无法把领取记到某个会话上');
+        throw invalid('collab_accept 需要会话上下文（sessionID）：无法把领取记到某个会话上');
       }
 
       // R1-1: the protect list is a *lineage* guard, so a sub-agent of a
@@ -82,7 +105,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       // before `persistRefresh` so a refused call cannot touch the record.
       const guard = await createLineage(ctx).protectedAncestor(me, readConfig().protect);
       if (guard) {
-        throw new Error(
+        throw invalid(
           `拒绝领取：${me} 在 protect 名单内${
             guard.depth === 0 ? '（自身受保护）' : `（第 ${guard.depth} 级祖先 ${guard.sessionID} 受保护）`
           }，受保护会话及其子会话不参与广播领取。`
@@ -92,7 +115,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       let record = persistRefresh(existing, await chain.refresh(existing, now, { actor: me }));
 
       if (record.state === 'expired') {
-        throw new Error(
+        throw invalid(
           `广播 ${bid} 已 expired（attempts=${record.attempts} > ${BCAST_MAX_ATTEMPTS}）：需人工接手，不再自动重投。`
         );
       }
@@ -118,12 +141,13 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
             // The spawn lock belongs to the requester (`by`) but this session
             // is `claimBy`: release it now so nothing looks "already claimed".
             releaseLock(bid, [me, String(activeClaim.spawner ?? '')]);
-            await chain.notifyRequester(record, {
+            const spawnedNotice = await chain.notifyRequester(record, {
               text:
                 `ACCEPT ${record.issuePath ?? record.bid} —— ${shortID(me)} 已接手 ${record.bid}` +
                 `（${record.scope}，${record.expected}）。完成后回执 [handoff] DONE ${record.bid} <摘要>。`,
               from: shortID(me)
             });
+            await reportUndelivered(record, spawnedNotice);
           } else {
             releaseLock(bid, [me, String(activeClaim.spawner ?? '')]);
           }
@@ -146,7 +170,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       const directory = info?.location?.directory;
       const notes: string[] = [];
       if (record.workspace && directory && directory !== record.workspace) {
-        throw new Error(
+        throw invalid(
           `拒绝领取：广播 ${bid} 属于工作区 ${record.workspace}，当前会话在 ${directory}。` +
             `群组成员只能是该工作区的会话（跨仓只读，别代领）。`
         );
@@ -199,6 +223,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           `（${record.scope}，${record.expected}）。完成后回执 [handoff] DONE|BLOCKED ${record.bid} <摘要>。`,
         from: shortID(me)
       });
+      await reportUndelivered(record, notified);
 
       return {
         content: [

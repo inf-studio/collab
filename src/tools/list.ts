@@ -1,16 +1,24 @@
 import { isAbsolute, basename } from 'node:path';
 import { ACKED_EXTRACT_MS, BCAST_DONE_STATES, BOOTSTRAP_TITLE_RE } from '../constants.ts';
 import { allBroadcasts, leaseVerdict } from '../core/claim.ts';
+import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
+import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
+import { formatStale, markShown, staleFor } from '../core/stale.ts';
 import type { ToolDefinition } from '../types.ts';
 import { clamp, fmtTime, sessionState, shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
+/** R8②: the report entry point is a *fixed* last line of every listing. */
+function hintLine(): string {
+  return `缺陷上报：collab_report { confirm:true }（证据目录 ${reportDir()}）`;
+}
+
 /** `collab_list` — read-only session + open hand-off inventory. */
 export function listTool(kit: ToolKit): ToolDefinition {
   const { deps } = kit;
-  const { ctx, readConfig, chain } = deps;
+  const { ctx, readConfig, chain, reporter } = deps;
 
   return {
     name: 'collab_list',
@@ -37,11 +45,16 @@ export function listTool(kit: ToolKit): ToolDefinition {
       const limit = clamp(input?.limit ?? 20, 1, 100);
       const directory = String(input?.directory ?? '').trim() || undefined;
       if (directory && !isAbsolute(directory)) {
-        throw new Error(`directory 必须是绝对路径："${directory}"`);
+        throw invalid(`directory 必须是绝对路径："${directory}"`);
       }
       const sessions = (await chain.listSessions({ directory, limit })).slice(0, limit);
       if (!sessions.length) {
-        return { content: `${directory ? `工作区 ${directory} 下` : ''}没有可列出的会话。` };
+        return {
+          content: [
+            `${directory ? `工作区 ${directory} 下` : ''}没有可列出的会话。`,
+            hintLine()
+          ].join('\n')
+        };
       }
 
       const lineage = createLineage(ctx);
@@ -54,10 +67,9 @@ export function listTool(kit: ToolKit): ToolDefinition {
 
       // Sessions a broadcast created (`impl:<slug>`) — never deleted by us,
       // but worth marking so a human can tell them from hand-made sessions.
+      const records = allBroadcasts();
       const spawned = new Set(
-        allBroadcasts()
-          .filter(record => record.claim?.kind === 'spawn')
-          .map(record => String(record.claim?.by ?? ''))
+        records.filter(record => record.claim?.kind === 'spawn').map(record => String(record.claim?.by ?? ''))
       );
 
       const lines: string[] = [];
@@ -96,7 +108,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
       }
 
       const now = Date.now();
-      const broadcasts = allBroadcasts()
+      const broadcasts = records
         .filter(
           record =>
             (directory ? record.workspace === directory : true) && !BCAST_DONE_STATES.includes(String(record.state))
@@ -119,6 +131,13 @@ export function listTool(kit: ToolKit): ToolDefinition {
           );
         });
 
+      // R6: hang-up classes, once per (session, class, bid); R9.2: one passive
+      // "未处理上报 N 条" line when a backlog exists.
+      const me = context?.sessionID;
+      const stale = me ? await markShown(ctx, me, staleFor(records, me, now)) : [];
+      const pendingCount = reporter.pending().count;
+      const notice = await takePendingNotice(ctx, me, pendingCount);
+
       return {
         content: [
           `${sessions.length} 个会话（id / agent / state / loc / updated / title）:`,
@@ -131,7 +150,10 @@ export function listTool(kit: ToolKit): ToolDefinition {
                 'lease=expired 只表示「按快照看租约已过」——本命令不改状态、不删锁、不推进顺延；',
                 '真正的顺延发生在下一次 collab_accept / 广播 / context 注入时。'
               ]
-            : [])
+            : []),
+          ...(stale.length ? ['挂起提醒（每类每单只出现一次）:', ...formatStale(stale)] : []),
+          ...(notice ? [reportNoticeLine(pendingCount)] : []),
+          hintLine()
         ].join('\n')
       };
     }

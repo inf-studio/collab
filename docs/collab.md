@@ -248,7 +248,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 验证：`opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"` → 无 `failed`，且含 `collab`。
 
-### 11.2 五个工具（+ 协作链路五个）
+### 11.2 五个工具（+ 协作链路五个 + 缺陷上报一个）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -261,6 +261,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
+| `collab_report` | `{ note?, bid?, threadID?, confirm }` | **缺陷上报（旁路，不改任何协作状态）**：把现场写到 `~/.config/opencode/collab-reports/<signature>/<ts>.{json,md}`（版本/工具/分类/错误名与消息≤2KB/stackTop 5 帧/短 id/工作区/记录快照；**不含正文、文件内容、token**），配了 `report.to` 时额外 `collab_send`（`note`+`queue`）通知维护方；同签名 1 小时最多 1 条。任何非参数校验类错误都会在错误文案末尾提示这个入口（见 §11.8） |
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
@@ -283,13 +284,18 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 ```jsonc
 {
-  "aliases": { "schema": "ses_…", "parity": "ses_…" },
+  "aliases": { "schema": "ses_…", "parity": "ses_…", "collab-maintainer": "ses_…" },
   "autoDeliver": true,
   "maxInject": 3,
   "protect": ["ses_…"],
-  "readonlyAgents": ["explore", "plan"]
+  "readonlyAgents": ["explore", "plan"],
+  "report": { "to": "collab-maintainer" }
 }
 ```
+
+`report.to`（别名或 `ses_…`）是**缺陷上报的主通道**：插件把上报当作 `note`（`queue`）投给该会话，
+空闲也会被唤醒；文件只作证据与兜底。`report.enabled:false` 关闭投递但仍落盘（回滚开关）。
+目标命中 `protect`（含血缘）时**不投递**只落盘。详见 §11.8。
 
 `protect` 与 `readonlyAgents` 都是**累加**的：内置硬名单（schema 会话、本会话）与内置只读 agent 名单
 （`explore`/`plan`）永远生效，配置文件只能加、不能减。
@@ -420,6 +426,90 @@ collab/threads/<threadID> = {
 thread 读不到对端写入）——跨项目协作请改用 `collab_accept` 的广播链路（§12），或用
 `trellis channel` / `collab … --mirror` 留痕。
 `collab_wait` 对「thread 不存在」会快速报错并提示这一点，不会空等到 timeout。
+
+### 11.8 缺陷自上报 + 挂起监控（0.1.3）
+
+插件本身的缺陷（护栏冲突、状态机死角、投递不可达）曾让交接静默挂起数小时甚至一天：调用方只看到
+一句「被拒绝」，无法把现场传回维护方。0.1.3 起两条路一起补上。
+
+**触发（R1）**：工具执行中抛出**非参数校验类**异常时自动上报——未捕获异常、不变量失败、
+护栏与指令冲突、投递 5xx、提取/解析异常。**不触发**：参数校验（空 `text`、非法 `bid`、未知目标）
+与正常业务拒绝（`protect` 拦截、租约过期、等待超时）；这些走 `ValidationError` 标记，直接放行。
+
+**证据（R2/R7）**：字段白名单 + 脱敏，`<reportDir>/<signature>/<ts>.json` 与同名 `.md`
+（`.md` 可直接当 issue 草稿：现象/复现/证据/影响面）。
+
+```jsonc
+{
+  "signature": "d_<hash16>",        // hash(version + tool + errorName + 归一化 message)
+  "version": "0.1.3",
+  "tool": "collab_send",
+  "class": "delivery-5xx",          // uncaught | invariant | guard-conflict | delivery-5xx | extract-error | manual
+  "error": { "name": "DeliveryError", "message": "…（≤2KB）", "stackTop": ["at …"] }, // 前 5 帧
+  "context": { "bid": "b_…", "thread": "t_…", "from": "ses_xxxx…yyyy" },  // 短 id
+  "workspace": "/data/project/x",
+  "record": { "state": "acked", "attempts": 0, "receiptMode": "push" },
+  "at": 0
+}
+```
+
+**不含**：消息正文全文、文件内容、token、完整 session 列表（`text`/`note`/`token` 输入与长
+token 形状的串都会被替换为 `[redacted]`）。目录可用 `COLLAB_REPORT_DIR` 覆盖（沙箱/harness）。
+
+**去重与限流（R4）**：同 signature 每 1 小时最多 1 条；`index.json` 以 `tmp + rename` 写入
+（`{ signature: { lastAt, triagedAt } }`，`triagedAt` 由 triage 回写）。
+
+**投递（R5）**：`report.to` 存在且目标不在 `protect` → `collab_send`（`kind:note`、`queue`）一条
+`[defect] <sig> <一句话> → <证据路径>`；未配置 / `enabled:false` / 目标受保护 → 只落盘。
+上报失败（写盘/投递）只记日志，**绝不改变工具返回值或抛出**（R7）。
+
+**可发现性（R8）**——不需要读文档也能在报错当下看到入口：
+
+1. 非校验类错误文案末尾追加 `提示: 若怀疑是插件缺陷，运行 collab_report { confirm:true } 上报现场（或看 <reportDir>）`；
+2. `collab_list` 最后一行固定 `缺陷上报：collab_report { confirm:true }（证据目录 …）`；
+3. `collab_report { note?, bid?, threadID?, confirm }` 手工补一条（`confirm:false` 只预览签名与目录）；
+4. 插件 `setup` 日志（stderr）打印 `reportDir=<路径> report.to=<别名或 (unset)>`；
+5. 本文件 / README / `skills/collab/SKILL.md` 各有一节「遇到异常怎么办」；
+6. CHANGELOG 顶部写明支持缺陷上报。
+
+**挂起监控（R6）**：`collab_list` 与 `context` 注入各输出一次（按 `(session, class, bid)` 去重，
+跨命令/跨重启共享存储 `collab/stale-seen/<sid>`）：
+
+| 类 | 条件 | 提示 |
+| --- | --- | --- |
+| `open-stale` | `state=open` 且 `now-createdAt > 1h` | 无人领取：重新广播或人工指定 |
+| `claimed-lapsed` | `state=claimed` 且超租约 | 承接方未确认：顺延或人工指定 |
+| `acked-stale` | `state=acked` 且 `now-claim.at > 2h` | 回执静默：发起方可只读提取收口 |
+
+只读：不 refresh、不释放锁、不自动闭环。注入里挂起提醒排在链路提醒**之前**（链路 refresh 会把超时的
+`claimed` 重开，排后面就看不到那一类）。
+
+**维护方消费端（R9）**：`node scripts/collab-triage.mjs`
+
+```bash
+node scripts/collab-triage.mjs --dry-run                 # 只看：哪些签名待处理、会写哪个 issue
+node scripts/collab-triage.mjs                           # 生成/刷新 docs/issues/bugs-collab-<sig>.md
+node scripts/collab-triage.mjs --since 2026-11-18T00:00:00Z
+node scripts/collab-triage.mjs --notify collab-maintainer # 额外补投一条 note（需 COLLAB_SERVER_URL）
+```
+
+- 按 signature 归并，未处理（`triagedAt` 早于最新证据）才写；`triagedAt` 回写 `index.json`；
+- 幂等：重复运行不重复建 issue（内容重建但保留人工改过的 `> 状态：` 行）；
+- 并发安全：`<reportDir>/.triage.lock`（`open 'wx'`，10 分钟视为过期）；
+- `--notify` 走 `POST /api/session/{sid}/prompt`，需要 `COLLAB_SERVER_URL`（+ 可选 `COLLAB_SERVER_TOKEN`），
+  目标命中 `protect` 时拒绝；
+- 被动提示：维护方会话（`report.to` 指向它）的 `context` 注入与任何会话的 `collab_list` 会显示
+  「未处理缺陷上报 N 条」（每会话一次，数量增长才再提示）。
+
+cron 由 owner 决定是否安装（脚本本身不自动跑）：
+
+```cron
+# 每 15 分钟补投一次未确认上报（先确认 COLLAB_SERVER_URL / COLLAB_SERVER_TOKEN 已配置）
+*/15 * * * * cd /data/project/collab && node scripts/collab-triage.mjs --notify collab-maintainer >> /tmp/collab-triage.log 2>&1
+```
+
+**边界**：不上传网络（除 `report.to` 的单条 `note`）；不新增依赖；不改 `BUILTIN_PROTECT`；
+不自动关闭挂起单（只提示/上报）。回滚 = 删 `collab-reports/`、配置去掉 `report`、`git restore -- src/`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

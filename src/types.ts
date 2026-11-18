@@ -307,6 +307,13 @@ export interface ThreadRecord {
 }
 
 /** The lazily re-read config (`collab.json` + `ctx.options` + built-in defaults). */
+export interface ReportConfig {
+  /** `alias|ses_…` of the maintainer session; a `note` is queued there (R5). */
+  to?: string;
+  /** `false` disables the delivery (evidence is still written). Default `true`. */
+  enabled?: boolean;
+}
+
 export interface CollabConfig {
   aliases: Record<string, string>;
   autoDeliver: boolean;
@@ -314,6 +321,7 @@ export interface CollabConfig {
   allowWrite: boolean;
   protect: string[];
   readonlyAgents: string[];
+  report?: ReportConfig;
 }
 
 /** Event stream payload the inbox records (`session.inbox.enqueued`). */

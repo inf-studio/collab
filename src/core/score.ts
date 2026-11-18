@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BCAST_RECENT_MS, EXPECTED, SCORE_MESSAGE_LIMIT, SCORE_MESSAGE_WINDOW_MS } from '../constants.ts';
+import { invalid } from './errors.ts';
 import type { ProposalSummary, RankedCandidate, SessionInfoLike, SessionMessageLike } from '../types.ts';
 import { asObject, dedupe, hash16, truncate } from '../util.ts';
 
@@ -159,31 +160,31 @@ export function resolveBroadcastTargets(
   issuePathInput: unknown
 ): { workspace: string; issuePath: string; abs: string; mtimeMs: number } {
   const workspace = String(workspaceInput ?? '').trim();
-  if (!workspace) throw new Error('workspace 不能为空：请给目标工作区的绝对路径');
-  if (!isAbsolute(workspace)) throw new Error(`workspace 必须是绝对路径："${workspace}"`);
+  if (!workspace) throw invalid('workspace 不能为空：请给目标工作区的绝对路径');
+  if (!isAbsolute(workspace)) throw invalid(`workspace 必须是绝对路径："${workspace}"`);
   let stat;
   try {
     stat = statSync(workspace);
   } catch {
-    throw new Error(`workspace 不存在或不可读："${workspace}"`);
+    throw invalid(`workspace 不存在或不可读："${workspace}"`);
   }
-  if (!stat.isDirectory()) throw new Error(`workspace 不是目录："${workspace}"`);
+  if (!stat.isDirectory()) throw invalid(`workspace 不是目录："${workspace}"`);
   let realWorkspace: string;
   try {
     realWorkspace = realpathSync(workspace);
   } catch {
-    throw new Error(`workspace 无法解析真实路径："${workspace}"`);
+    throw invalid(`workspace 无法解析真实路径："${workspace}"`);
   }
 
   const issueRaw = String(issuePathInput ?? '').trim();
   if (!issueRaw) {
-    throw new Error('issuePath 不能为空：peer scope 必须指向目标仓 docs/issues/ 下的提案');
+    throw invalid('issuePath 不能为空：peer scope 必须指向目标仓 docs/issues/ 下的提案');
   }
   const issuePath = relative(workspace, resolve(workspace, issueRaw)).split(sep).join('/');
   const issuesRoot = join(realWorkspace, 'docs', 'issues') + sep;
   const abs = resolve(realWorkspace, issuePath);
   if (!abs.startsWith(issuesRoot)) {
-    throw new Error(
+    throw invalid(
       `拒绝广播：issuePath "${issueRaw}" 不在 ${workspace}/docs/issues/ 下` +
         `（peer scope 只允许目标仓 docs/issues/**，见跨仓写边界）。`
     );
@@ -192,22 +193,22 @@ export function resolveBroadcastTargets(
   try {
     fileStat = lstatSync(abs);
   } catch {
-    throw new Error(`提案文件不存在："${issuePath}"（先写提案，再广播）`);
+    throw invalid(`提案文件不存在："${issuePath}"（先写提案，再广播）`);
   }
   if (fileStat.isSymbolicLink()) {
-    throw new Error(`拒绝广播：提案 ${issuePath} 是软链（不允许软链绕过 docs/issues/ 写边界）。`);
+    throw invalid(`拒绝广播：提案 ${issuePath} 是软链（不允许软链绕过 docs/issues/ 写边界）。`);
   }
-  if (!fileStat.isFile()) throw new Error(`提案路径不是文件："${issuePath}"`);
+  if (!fileStat.isFile()) throw invalid(`提案路径不是文件："${issuePath}"`);
   let realAbs: string;
   try {
     realAbs = realpathSync(abs);
   } catch {
-    throw new Error(`提案文件不可读："${issuePath}"`);
+    throw invalid(`提案文件不可读："${issuePath}"`);
   }
   if (!realAbs.startsWith(issuesRoot)) {
-    throw new Error(`拒绝广播：提案 ${issuePath} 的真实路径 ${realAbs} 不在 ${workspace}/docs/issues/ 下。`);
+    throw invalid(`拒绝广播：提案 ${issuePath} 的真实路径 ${realAbs} 不在 ${workspace}/docs/issues/ 下。`);
   }
-  if (!/\.mdx?$/i.test(issuePath)) throw new Error(`提案必须是 .md：${issuePath}`);
+  if (!/\.mdx?$/i.test(issuePath)) throw invalid(`提案必须是 .md：${issuePath}`);
   return { workspace, issuePath, abs, mtimeMs: fileStat.mtimeMs };
 }
 
