@@ -10,6 +10,8 @@
   （不猜端口、不读 token）。宿主契约按用到的字段本地声明，入口用 `@opencode/plugin` 的
   `Plugin.Plugin` 做一次签名对齐（type-only，构建后即可移除）。
 - 构建产物：`dist/index.js`（ESM）+ `dist/index.d.ts`，可被 `opencode plugin add` 识别。
+- 另有一个**可选**的桌面壳：`dist/gui-experimental.cjs`（`./gui-experimental` 出口），
+  把同一份只读状态画进 OpenCode Desktop 的侧栏；server 部分完全不依赖它。
 
 ## 能力范围
 
@@ -37,6 +39,25 @@
 > **权限提示（务必读）**：本插件可以**读取该实例上的会话元信息与消息上下文**（用于打分与
 > 判断回执）、可以**向其它会话投递消息**（即以该实例的身份说话）、在 `allowWrite:true`
 > 时可以**修改某个会话的 permissions / agent**。默认 `allowWrite:false`，后两项写入能力关闭。
+
+## 侧边栏（仅 Desktop，experimental）
+
+`./gui-experimental` 是给 OpenCode Desktop 的**只读**视图：打开侧栏就能看到「谁持有资源 /
+谁在排队 / 哪些交接没闭环」，不用再 `ps` 或轮询 `collab_list`。API 属于 experimental
+（宿主侧标注），版本区间见下表。
+
+| 位置 | 内容 |
+| --- | --- |
+| 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age）。从侧栏 **+** 菜单的「打开协作面板」打开；关掉后同样用这个入口找回（首次需从 **+** 菜单打开；`fallback` 只在已有 tab 列表时参与选择） |
+| composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
+| 数据来源 | `collab.state.snapshot`（RPC）→ `stateOf()` + `allBroadcasts()`，与 `collab_locks` / `collab_list` 同一读取层；**没有第二份状态** |
+| 刷新 | 有会话挂载时每 2 s 拉一次（面板在屏幕上时），面板与 pill 共用一个轮询 |
+| 不可达 | server 停掉 / 插件被禁用时显示「server 不可达：…」，保留上一份快照，不空白也不崩 |
+
+- **只读**：面板没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
+  两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。
+- **可关闭**：Settings → Extensions → Plugins 里本插件的开关；关掉 GUI 不影响 server 部分的工具。
+- TUI / Web 没有侧栏，`collab_locks` / `collab_list` 的文本视图仍在。
 
 ## 安装
 
@@ -103,20 +124,25 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
+| `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
 | `0.1.x` | `2.3.x`  | `>=22.18` | 与单文件版行为等价；`@opencode/plugin` 由宿主提供 |
 
-宿主插件契约（`ctx.location / storage / session / tool / event`）只按用到的字段声明，
+宿主插件契约（`ctx.location / storage / session / tool / event / rpc`）只按用到的字段声明，
 老宿主缺 `session.update` / `switchAgent` 时对应能力报可读错误而不是崩（也可配
-`COLLAB_SERVER_URL` 走 HTTP fallback，默认不猜端口）。
+`COLLAB_SERVER_URL` 走 HTTP fallback，默认不猜端口）。构建需要 `pnpm-workspace.yaml` 的 `allowBuilds: esbuild`（pnpm 12 的构建脚本白名单）。`ctx.rpc` 缺失时只跳过侧栏注册
+（日志 `rpc skipped`），工具照常工作。
+
+> 侧栏用的是宿主 **experimental** GUI API（`@opencode/plugin/gui`）。`vite.gui.config.ts`
+> 与三个 GUI devDependencies 只在构建时需要；server 产物 `dist/index.js` 仍然零运行时依赖。
 
 ## 开发
 
 ```bash
-pnpm --filter=@inf-studio/collab build       # vp pack → dist/
+pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 vp build -c vite.gui.config.ts → dist/gui-experimental.cjs
 pnpm install
 pnpm typecheck
-pnpm test          # build + 498 项 harness + 12 项只读默认
+pnpm test          # build + 506 项 harness + 12 项只读默认 + 18 项侧栏快照
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -133,9 +159,14 @@ pnpm test          # build + 498 项 harness + 12 项只读默认
   TTL 夹取、`reason` 清洗、`[protected]` 可持有但不可抢占、加锁不投递任何消息。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
+- `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
+  过期租约在视图里是 `free` 且不落盘、无人的空记录不出现、已决交接不算「未闭环」、
+  `{ workspace }` 过滤、RPC 契约为 portable、`dist/gui-experimental.cjs` 只 require 宿主提供的模块。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约）、`src/tools`（十五个工具）、
-`src/hooks`（context 注入）、`src/config.ts`、`src/index.ts`（`Plugin.define` 等价装配）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/侧栏快照）、`src/tools`（十五个工具）、
+`src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
+`src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill，只在 `setup` 里跑）、
+`src/index.ts`（`Plugin.define` 等价装配 + `ctx.rpc.register`）、
 `scripts/collab-triage.mjs`（维护方 triage，零依赖）。
 
 ## Skill（给 agent 的操作手册）

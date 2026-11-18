@@ -3,7 +3,10 @@ import { createContextHook } from './hooks/context.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
-import { lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
+import { allBroadcasts } from './core/claim.ts';
+import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
+import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
+import { CollabState } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
 import {
   DeliveryError,
@@ -137,6 +140,27 @@ const plugin: Plugin.Plugin = {
     // 3) Injection hook (unread inbox + open hand-offs, once per session).
     const hookRegistration = await ctx.session.hook('context', createContextHook(kit.deps));
 
+    // 4) Read-only RPC for the desktop sidebar (C2, 0.3.0). Optional: an older
+    // host without `ctx.rpc` keeps the tools and loses only the panel. The
+    // snapshot reuses the same readers as `collab_locks` / `collab_list`.
+    const snapshotter = createSnapshotReader({
+      sessions: input => chain.listSessions(input),
+      locks: allLocks,
+      handoffs: allBroadcasts
+    });
+    const rpcDomain = (host as { rpc?: Plugin.Context['rpc'] }).rpc;
+    const rpcRegistration = rpcDomain
+      ? await rpcDomain
+          .register(CollabState, { snapshot: async input => snapshotter.snapshot(input) })
+          .catch(error => {
+            // A failed registration must not fail the whole plugin: the tools
+            // and the context hook are the product, the sidebar is a view.
+            log('rpc registration failed:', (error as Error)?.message ?? error);
+            return undefined;
+          })
+      : undefined;
+    log(rpcRegistration ? 'rpc ok: collab.state.snapshot' : 'rpc skipped: host has no ctx.rpc');
+
     const initial = readConfig();
     log(
       `setup ok: version=${PLUGIN_VERSION} directory=${directory} tools=${tools.length} ` +
@@ -158,6 +182,7 @@ const plugin: Plugin.Plugin = {
       controller.abort();
       await Promise.resolve(toolRegistration?.dispose?.()).catch(() => {});
       await Promise.resolve(hookRegistration?.dispose?.()).catch(() => {});
+      await Promise.resolve(rpcRegistration?.dispose?.()).catch(() => {});
       log('cleanup: unsubscribed');
     };
   }
@@ -195,5 +220,9 @@ export const __internals = {
   normalizeResource,
   normalizeTtl,
   sanitizeReason,
-  lockFile
+  lockFile,
+  // Sidebar contract (0.3.0) — the read-only snapshot assembly, unit-testable
+  // with injected readers (no host, no `~/.config` directory).
+  CollabState,
+  buildSnapshot
 };

@@ -3,6 +3,54 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.0] - 2026-11-18
+
+> 只读侧边栏：同工作区并行会话不再靠 `ps` 或反复 `collab_locks` 猜「窗口在谁手里」。
+> OpenCode Desktop 侧栏直接看到「谁持有资源 / 谁在排队 / 哪些交接没闭环」，
+> composer 上还有一枚本会话的「锁 N · 等待 M」。
+> **没有新增写入能力**：面板只显示，取锁/释放仍走 `collab_lock` / `collab_unlock`。
+
+### Added
+
+- **R1 出口 `./gui-experimental`**：`dist/gui-experimental.cjs`（单文件 CJS，13 KB）。
+  `vite.gui.config.ts` 用宿主 `@opencode/plugin/gui/vite` 的 `gui()` preset：编译 Solid JSX、
+  内联动态 `import()`、把宿主提供的模块（`effect` / `@opencode/plugin/gui` / `@opencode/plugin/rpc` /
+  `solid-js` / `solid-js/store` / `solid-js/web`）留作 external。`pnpm build` = `vp pack` + `vp build -c vite.gui.config.ts`。
+- **R1 RPC 契约** `src/rpc.ts`：`collab.state.snapshot({ workspace? })` → `{ at, reachable, sessions[], locks[], handoffs[] }`。
+  server 侧在 `setup` 里 `ctx.rpc.register(...)`；契约用 `satisfies Rpc.PortableDefinition` 的纯 JSON Schema
+  字面量声明（`import type` 即擦除），所以 `dist/index.js` 仍是**零运行时依赖**。
+- **R2 侧栏面板** `Panel { id:"collab", region:"side", width:"narrow" }`：按工作区分组列出会话
+  （title / agent / busy / 当前会话）、持有租约（模式 + 剩余 TTL + `[我]`）、FIFO 排队、未闭环交接
+  （`bid` / state / age / title）。租约是全局的，按「第一个已列会话的持有者/排队者」归组，否则落「全局」。
+  侧栏 **+** 菜单加了一条「打开协作面板」launcher，关掉后可以找回。
+- **R3 composer pill**：当前会话「锁 N · 等待 M」；`success` 只持有、`warning` 排第 1 位、
+  `danger` 排在更后面。展开是逐条租约（只显示，不带任何操作）。
+- **R4 实时性**：有会话挂载时每 2 s 拉一次快照（面板在屏幕上时），面板与 pill 共用一个 store / 一个轮询；
+  RPC reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」并**保留上一份快照**，
+  不空白、不崩。
+- **R5 只读**：`buildSnapshot` 只调 `stateOf()` / `allBroadcasts()`，不写文件、不回收租约、不叫醒排队者；
+  面板与 pill 没有任何加锁/释放入口。
+- **R6 兼容**：`ctx.rpc` 缺失（老宿主）只跳过侧栏注册（日志 `rpc skipped`），工具与 context hook 照常；
+  GUI 构建失败不影响 `dist/index.js`；Settings → Extensions → Plugins 可单独关闭 GUI。
+- 测试：`test/snapshot-shape.mjs`（18 项）——过期租约在视图里是 `free` 且不落盘、空记录不出现、
+  已决交接不算未闭环、`{ workspace }` 过滤、契约字段齐全、GUI 产物只 require 宿主模块。
+  `pnpm test` 现在 = 506 + 12 + 18。
+
+### Changed
+
+- devDependencies 增 `vite`（指向 `@voidzero-dev/vite-plus-core`，与 `vite-plus` 的别名对齐）、
+  `vite-plugin-solid`、`solid-js`；新增 `vite.gui.config.ts`。
+- `tsconfig.json` 增 `jsx: preserve` / `jsxImportSource: solid-js`，`include` 收 `src/**/*.tsx` 与
+  `vite.gui.config.ts`（`pnpm typecheck` 现在也检查 GUI）。
+- 新增 `pnpm-workspace.yaml`（`allowBuilds: esbuild: true`）：pnpm 12 把构建脚本白名单放到这里，
+  否则 `pnpm install` 以 `ERR_PNPM_IGNORED_BUILDS` 退出。只是安装期声明，不影响产物。
+
+### Notes
+
+- GUI API 在宿主侧标注 **experimental**：`@opencode/plugin` 的 `./gui` / `./gui/vite` 形状可能变，
+  本包按 `2.3.x` 实现（README 有版本区间表）。
+- 面板只在 Desktop 出现；TUI / Web 用 `collab_locks` / `collab_list` 文本视图。
+
 ## [0.2.0] - 2026-11-18
 
 > 复核修复：等待队列满（50）不再驱逐队首，改为拒绝新申请；`expiresAt` 缺失/≤0 的损坏记录会被回收（`reason:"invalid"`）。

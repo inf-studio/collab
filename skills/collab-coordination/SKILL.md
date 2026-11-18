@@ -30,6 +30,11 @@ collab_locks { }                             # 全部资源
 `collab_list` 末尾也会追加**本会话**的「持有 / 排队中（第 N 位）」。
 输出里 `free` 表示没人持有；`held` 时看 `holders=` 与 `剩余=`。
 
+**要一眼看全局**（谁持有、谁在排队、哪些交接没闭环）就打开 OpenCode Desktop 的侧栏
+`collab` 面板（0.3.0 起，只读；composer 上的 pill 显示本会话「锁 N · 等待 M」）——
+它读的是同一份 `stateOf()`，不会和 `collab_locks` 不一致；但**面板不能加锁/释放**，
+写操作仍然只有下面两步的工具。
+
 ### 2. 申请
 
 ```text

@@ -1,7 +1,7 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.2.0",
-  "description": "Cross-session collaboration for OpenCode: fifteen native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend and a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt).",
+  "version": "0.3.0",
+  "description": "Cross-session collaboration for OpenCode: fifteen native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend, a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt), and a read-only desktop sidebar (experimental).",
   "keywords": [
     "collab",
     "handoff",
@@ -31,23 +31,27 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./gui-experimental": "./dist/gui-experimental.cjs"
   },
   "publishConfig": {
     "access": "public",
     "registry": "https://npm.pkg.github.com"
   },
   "scripts": {
-    "build": "vp pack",
+    "build": "vp pack && vp build -c vite.gui.config.ts",
     "prepublishOnly": "pnpm run build",
-    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs",
+    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/snapshot-shape.mjs",
     "typecheck": "tsc --noEmit",
     "check:skill": "node scripts/check-skill.mjs"
   },
   "devDependencies": {
     "@opencode/plugin": "^2.3.0",
     "@types/node": "^26.6.6",
+    "solid-js": "^1.9.19",
     "typescript": "6.0.3",
+    "vite": "npm:@voidzero-dev/vite-plus-core@^1.6.0",
+    "vite-plugin-solid": "^2.11.16",
     "vite-plus": "^1.6.0"
   },
   "engines": {

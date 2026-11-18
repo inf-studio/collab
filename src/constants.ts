@@ -239,5 +239,5 @@ export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
 export const MAX_RESENDS = 1;
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.2.0';
+export const PLUGIN_VERSION = '0.3.0';
 

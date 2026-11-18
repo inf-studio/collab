@@ -37,6 +37,10 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `confirm:true` 才真正执行；否则只预览。
 
+> 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）的规程在同工作区 skill
+> `collab-coordination`；需要看**全局**（谁持有/谁排队/哪些交接未闭环）时打开 OpenCode Desktop
+> 侧栏的 `collab` 面板（0.3.0 起，只读，与 `collab_locks` 同一数据源）。
+
 ## 一点五、送达与闭环后追加（0.1.6）
 
 **两级 ack**：`admitted` = 宿主收下（`prompt` 返回 `message.id`，或接管请求写进记录）；`seen` = 收方插件把它

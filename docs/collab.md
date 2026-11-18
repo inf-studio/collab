@@ -696,6 +696,62 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
+### 11.11 桌面侧栏（0.3.0，仅 Desktop，experimental）
+
+> 只在 **OpenCode Desktop** 里出现。TUI / Web 没有侧栏，文本视图（`collab_locks` / `collab_list`）不变。
+> 宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
+
+侧栏回答的是「现在全局在发生什么」：谁持有资源、谁在排队、哪些交接还没闭环。
+数据来自插件 **server 部分**自己，不经过第三方端口：
+
+```text
+src/index.ts (server part)  ── ctx.rpc.register(CollabState, { snapshot }) ──▶  HTTP RPC
+        │                            collab.state.snapshot({ workspace? })
+        │                                        │
+        └── stateOf(allLocks) + allBroadcasts ───┘        （与 collab_locks / collab_list 同一读取层）
+                                                     │
+src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({}) ──┘
+```
+
+**契约**（`src/rpc.ts`，一个只读方法、无事件）：
+
+```ts
+{
+  at: number,                              // 快照时间
+  reachable: true,                         // server 真的回答了
+  sessions: [{ sid, title, agent, busy, workspace, parent? }],
+  locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, reason? }],
+  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title }]
+}
+```
+
+- `waiters` 是队列长度，`waiting` 是排队会话 id（FIFO 顺序）——只有长度无法判断「**我**是否在排队」，
+  而 composer pill 需要这一点。
+- **不新造状态**：`locks` 由 `stateOf()` 渲染（过期的在视图里就是 `free`，不落盘、不回收）；
+  `handoffs` 只取未决的（`done` / `blocked` / `expired` 不算「未闭环」）。
+- 空记录（无人持有、无人排队）不出现；归档会话不列。
+
+**UI**：
+
+| 位置 | 内容 |
+| --- | --- |
+| 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
+| composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
+| 刷新 | 有会话挂载时每 2 s 一次（面板在屏幕上时；窗口隐藏仍会轮询，开销很小）；面板与 pill **共用一个轮询**与一份 store |
+| 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
+
+**只读**：面板上没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
+（以及 `skills/collab-coordination` 的规程）。
+
+**构建**：`dist/gui-experimental.cjs`（单文件 CJS，`exports["./gui-experimental"]`）。
+`vite.gui.config.ts` 用宿主的 `gui()` preset：编译 Solid JSX、内联所有动态 `import()`、
+把宿主提供的模块（`effect` / `@opencode/plugin/gui` / `@opencode/plugin/rpc` / `solid-js` …）
+留作 external——所以产物只有 13 KB，不含第二份 Solid。`pnpm build` 先跑 `vp pack`（server）
+再跑 `vp build -c vite.gui.config.ts`（GUI）；**GUI 构建失败不会影响 server 产物**。
+
+**关闭**：Settings → Extensions → Plugins 里关掉本插件的 GUI 开关；`opencode.json(c)` 里移除插件
+则连 server 一起停。
+
 ## 12. 协作链路（handoff chain：local + peer）
 
 把「发现需求 → 找到人 → 交出去 → 收结果」串成一条链路；协议细节与打分口径的唯一真源是
