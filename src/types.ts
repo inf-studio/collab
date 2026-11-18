@@ -318,6 +318,82 @@ export interface BroadcastRecord {
   [key: string]: any;
 }
 
+// ------------------------------------------------------------ resource leases
+
+/** `exclusive` (default) locks out everything; `shared` coexists with `shared`. */
+export type LockMode = 'exclusive' | 'shared';
+
+/** How a resource name was recognised — display / grouping only. */
+export type LockKind = 'named' | 'file' | 'build';
+
+export type LockEvent = 'acquire' | 'release' | 'expire' | 'wait' | 'leave';
+
+/** One queued request (`wait:true` on a held resource). */
+export interface LockWaiter {
+  sid: string;
+  at: number;
+  mode: LockMode;
+  reason?: string;
+}
+
+/** One audit line. Structure only — no free text beyond the sanitised event. */
+export interface LockHistoryEntry {
+  sid: string;
+  at: number;
+  event: LockEvent;
+  /**
+   * Why the lease ended without a release: `invalid` = the record was corrupt
+   * (`holders` non-empty, `expiresAt` ≤ 0 / not a number) and had to be reaped
+   * instead of holding the resource forever (review R-7).
+   */
+  reason?: string;
+}
+
+/**
+ * One lease (`~/.config/opencode/collab-locks/<hash>__<slug>.json`).
+ *
+ * `holders` is the truth: one session for `exclusive`, one-or-more for
+ * `shared`. `holder` / `acquiredAt` / `ttlMs` / `expiresAt` describe the lease
+ * as a whole (a shared group's expiry is the latest holder's).
+ */
+export interface LockRecord {
+  resource: string;
+  kind: LockKind;
+  mode: LockMode;
+  holder?: string;
+  holders: string[];
+  /** Why the lease was taken (sanitised, ≤200 chars) — kept for the holder. */
+  reason?: string;
+  acquiredAt: number;
+  ttlMs: number;
+  expiresAt: number;
+  waiters: LockWaiter[];
+  history: LockHistoryEntry[];
+  updatedAt?: number;
+  [key: string]: any;
+}
+
+/** Read-only view shared by `collab_locks` / `collab_list` (and the sidebar). */
+export interface LockState {
+  resource: string;
+  kind: LockKind;
+  mode: LockMode;
+  /** `true` = nobody holds it (waiters do not count as holders). */
+  free: boolean;
+  holders: string[];
+  holder?: string;
+  /** Why the lease was taken (sanitised) — `undefined` when not given. */
+  reason?: string;
+  /** The lease length granted (0 when free). */
+  ttlMs: number;
+  expiresAt: number;
+  /** `<= 0` when free; capped remaining milliseconds otherwise. */
+  expiresIn: number;
+  waiters: Array<LockWaiter & { position: number }>;
+  /** The caller's own lease / queue position, when it is involved. */
+  mine?: { held: boolean; waiting: boolean; position: number };
+}
+
 /** One inbox entry (`collab/inbox/<sid>`). */
 export interface InboxMessage {
   id: string;

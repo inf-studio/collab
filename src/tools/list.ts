@@ -4,6 +4,7 @@ import { deliveryLine, deliveryOf, deliveryVisible, unackedDue } from '../core/a
 import { allBroadcasts, leaseVerdict } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
+import { fmtTtl, locksFor } from '../core/locks.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
 import type { ToolDefinition } from '../types.ts';
@@ -144,6 +145,21 @@ export function listTool(kit: ToolKit): ToolDefinition {
       // R6: hang-up classes, once per (session, class, bid); R9.2: one passive
       // "未处理上报 N 条" line when a backlog exists.
       const me = context?.sessionID;
+      // R5 (0.2.0): this session's own leases and queue position — the one
+      // coordination fact a session must not have to ask another session for.
+      const leases = locksFor(me, now);
+      const leaseLines = [
+        ...leases.held.map(
+          state =>
+            `- ${state.resource}  held  mode=${state.mode}  剩余=${fmtTtl(state.expiresIn)}  ` +
+            `ttl=${fmtTtl(state.ttlMs)}  waiters=${state.waiters.length}`
+        ),
+        ...leases.waiting.map(
+          state =>
+            `- ${state.resource}  排队中 第 ${state.mine?.position ?? '?'} 位  ` +
+            `持有者=${state.holders.join(',') || '-'}  剩余=${state.free ? '-' : fmtTtl(state.expiresIn)}`
+        )
+      ];
       const stale = me ? await markShown(ctx, me, staleFor(records, me, now)) : [];
       const pendingCount = reporter.pending().count;
       const notice = await takePendingNotice(ctx, me, pendingCount);
@@ -166,6 +182,13 @@ export function listTool(kit: ToolKit): ToolDefinition {
                 '未确认送达（admitted 了但没收到 seen，已用满重发预算）:',
                 ...unacked,
                 'ack 只表示「收方插件把它送到了模型面前」；busy 目标不会被重发（等即可），受保护发起方 ack 不可用。'
+              ]
+            : []),
+          ...(leaseLines.length
+            ? [
+                '我的资源租约（锁只用于自愿协调，不投递消息；到期自动回收）:',
+                ...leaseLines,
+                '释放: collab_unlock { resource:"<资源名>", confirm:true }；全部租约: collab_locks'
               ]
             : []),
           ...(stale.length ? ['挂起提醒（每类每单只出现一次）:', ...formatStale(stale)] : []),

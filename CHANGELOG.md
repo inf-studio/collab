@@ -3,6 +3,55 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-11-18
+
+> 复核修复：等待队列满（50）不再驱逐队首，改为拒绝新申请；`expiresAt` 缺失/≤0 的损坏记录会被回收（`reason:"invalid"`）。
+
+> 数据驱动：同工作区并行会话为**共享资源**（pytest 窗口 / 同一文件 / 全量构建）反复协商——
+> 排钟专题占窗口 10+ 分钟，加载未实施 issues 的会话两次请求未获释放，最后只能 `ps` 猜。
+> 0.2.0 把这件事变成可判定的**资源租约**：机器判互斥、TTL 自动回收、FIFO 排队，且不投递、不打断。
+
+### Added
+
+- **R1 两种模式**：`exclusive`（默认）与任何模式互斥；`shared` 之间可共存（只读共享）。
+- **R2 原子申请**：全局目录 `~/.config/opencode/collab-locks/<sha256(resource)[0..16]>__<slug>.json`
+  （`COLLAB_LOCK_DIR` 可覆盖）+ `open(<file>.lock, "wx")` 短锁（2s 超时、崩溃遗留清理）包住
+  「读 → 判定 → `tmp+rename` 写」；并发申请同一 exclusive 资源只有一个 winner，其余立即拿到
+  「持有者 + 剩余 TTL」。
+- **R3 租约与排队**：`ttlMs` 默认 15min、夹在 `[10s, 2h]`；`expiresAt` 过期在下次访问时回收并写
+  `history: expire`；同一会话重复申请**幂等**（返回既有租约，不重复计数、不延长 TTL）；
+  `wait:true` 按 FIFO 入队并返回排位，重复 `wait` 保留原申请时间。
+- **R4 状态机**：`free → held → queued → expired`，与 handoff（`open/claimed/acked/done/blocked/expired`）
+  **完全分离**，只共享只读视图 `stateOf()`（`{resource, kind, mode, holders, ttlMs, expiresIn, waiters, mine}`）。
+- **R5 可见性**：新工具 `collab_locks { resource? }`（只读，不改状态/不回收/不叫醒排队者）；
+  `collab_list` 追加本会话「持有 / 排队中（第 N 位）」。
+- **R6 资源规范化**：`test-window` / `窗口` / `测试窗口` / `窗口:测试` → `named:test-window`；
+  `build` / `全量构建` → `named:build`；`file:` 与裸相对路径归并为 `file:<相对路径>`。
+  `file:` 拒绝绝对路径、`..`/`.`、软链，`realpath` 必须仍在 workspace 内；尚未创建的文件允许
+  （最近存在祖先须在 workspace 内）。
+- 新工具 `collab_lock { resource, mode?, ttlMs?, reason?, wait?, confirm }` 与
+  `collab_unlock { resource, confirm }`；两者 `confirm:true` 才写，否则只预览当前持有与将写入字段。
+
+### Security
+
+- `[protected*]` 会话**可持有**租约，冲突输出标 `[protected]` 且注明「不可抢占」；
+  `collab_unlock` 只有持有者能调，**不提供 force**——抢占是人工决定。
+- `reason` 去控制字符、单行、≤200 字；`mode` 只接受 `exclusive|shared`；资源名 ≤300 字。
+- 锁是纯本地状态：**不投递任何消息**、不打断会话、不替代 git 操作；它只服务自愿协调。
+
+### Changed
+
+- 工具面 12 → 15（`registerTools` 末尾追加 `collab_lock` / `collab_unlock` / `collab_locks`）；
+  `PLUGIN_VERSION` / `package.json` → `0.2.0`。
+- `skills/collab-coordination` 的「消息协商」升级为 `collab_lock` 机器判定（保留 `collab_send` 降级路径）。
+- `docs/collab.md` 新增 §11.10「资源租约」；README 工具表/测试计数同步。
+
+### Tests
+
+- harness 456 → 498（S86 并发/模式矩阵/幂等；S87 TTL 回收、只读列表、FIFO 排队、`collab_list` 可见性；
+  S88 别名归并、`file:` 边界、TTL 夹取、`reason` 清洗、protected 持有不可抢占、零投递）。
+- `test/readonly-default.mjs` 12 项，工具面断言更新为 14 个 `collab_*` + `collab_report`。
+
 ## [0.1.7] - 2026-11-18
 
 ### Added

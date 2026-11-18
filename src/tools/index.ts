@@ -6,6 +6,7 @@ import { grantTool } from './grant.ts';
 import { handoffTool } from './handoff.ts';
 import { inboxTool } from './inbox.ts';
 import { listTool } from './list.ts';
+import { lockTool, locksTool, unlockTool } from './locks.ts';
 import { promoteTool } from './promote.ts';
 import { replyTool } from './reply.ts';
 import { reportTool } from './report.ts';
@@ -39,7 +40,10 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     waitTool(kit),
     grantTool(kit),
     promoteTool(kit),
-    reportTool(kit)
+    reportTool(kit),
+    lockTool(kit),
+    unlockTool(kit),
+    locksTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

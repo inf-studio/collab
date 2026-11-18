@@ -149,6 +149,26 @@
  * an explicit `kind:note|request` never moves a record (`kind` absent or `reply`
  * only), with `receipt.source` recording which of the two it was.
  *
+ * S86–S88 (`11-18-collab-lease`, R1–R7) cover resource leases (`collab_lock` /
+ * `collab_unlock` / `collab_locks`, 0.2.0):
+ *   S86  five concurrent exclusive acquires → one winner, the rest get
+ *        `holder + remaining TTL`; shared coexists with shared; exclusive meets
+ *        both modes; same session re-applying is idempotent (no double count, no
+ *        TTL extension); preview writes nothing
+ *   S87  TTL expiry is reclaimed on the next acquire (`history: expire`);
+ *        `collab_locks` is read-only (shows free, rewrites nothing); `wait:true`
+ *        queues FIFO, release keeps the queue, a newcomer cannot jump it, the
+ *        head waiter gets the free resource; `collab_list` shows my lease and my
+ *        queue position; a non-holder cannot release (no force); a full queue
+ *        (50) refuses the newcomer and keeps the head at position 1; a corrupt
+ *        lease (`expiresAt=0`) is reclaimed as `expire` with `reason:"invalid"`
+ *   S88  normalisation: `窗口`/`测试窗口`/`窗口:测试`/`test-window` are one
+ *        resource and `build`/`全量构建` are one; `file:` and a bare workspace
+ *        path are one file; absolute / `..` / `.` / symlink refused (missing file
+ *        allowed); ttl clamped to [10s, 2h]; reason one line ≤200; a protected
+ *        holder is marked [protected] and cannot be displaced; locking delivers
+ *        no message at all
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -182,6 +202,12 @@ process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 // session there; the harness must never touch the real one).
 const grantDir = join(dir, 'grants');
 process.env.COLLAB_GRANT_DIR = grantDir;
+
+// Resource leases are global too (`~/.config/opencode/collab-locks`): the
+// harness points them at its temp dir, and S86–S88 read the very files the
+// plugin writes.
+const lockDir = join(dir, 'locks');
+process.env.COLLAB_LOCK_DIR = lockDir;
 
 // Defect evidence (S72+) and the config file (`report.to` is written mid-run)
 // also stay inside the temp dir: a harness run must never add a real report to
@@ -684,6 +710,21 @@ const scoreOf = (text, sid) => Number(new RegExp(`(\\d{1,3})\\s+${sid}\\b`).exec
 const grantFileOf = sid => join(grantDir, `${sid}.json`);
 const grantRead = sid => JSON.parse(readFileSync(grantFileOf(sid), 'utf8'));
 const grantExists = sid => existsSync(grantFileOf(sid));
+// Resource-lease helpers (0.2.0): the canonical file name comes from the same
+// normaliser the plugin uses, so a test cannot disagree with the code.
+const lockFileOf = resource => internals.lockFile(resource);
+const lockRead = resource => JSON.parse(readFileSync(lockFileOf(resource), 'utf8'));
+const lockWriteRaw = (resource, patch) => {
+  const current = lockRead(resource);
+  writeFileSync(lockFileOf(resource), JSON.stringify({ ...current, ...patch }, null, 2));
+};
+const lockFiles = () => {
+  try {
+    return readdirSync(lockDir).filter(name => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+};
 const COLLAB_ACTIONS = internals.COLLAB_TOOL_ACTIONS;
 /** The five `*=allow` collab actions currently on a session (sorted). */
 const collabAllows = rules =>
@@ -5686,6 +5727,443 @@ expect(
   textOf(s85LastEvent).split('\n').filter(line => /已闭环，提案 .+ 有追加结论/.test(line)).length <= 1,
   textOf(s85LastEvent).split('\n').filter(line => line.includes('有追加结论')).join(' | ') || '(无)'
 );
+
+
+// ================== S86 (R1/R2/R7: concurrency, exclusive vs shared, idempotency)
+// The lease is a real file + `open(…,"wx")` guard, so "two sessions at once"
+// is testable without a host: five concurrent acquires, one winner.
+sessions.ses_lk1 = { id: 'ses_lk1', agent: 'build', title: 'S86 lk1', time: { updated: now, busy: 0 }, location: { directory: WS_A } };
+sessions.ses_lk2 = { id: 'ses_lk2', agent: 'build', title: 'S86 lk2', time: { updated: now, busy: 0 }, location: { directory: WS_A } };
+sessions.ses_lk3 = { id: 'ses_lk3', agent: 'build', title: 'S86 lk3', time: { updated: now, busy: 0 }, location: { directory: WS_A } };
+sessions.ses_lk4 = { id: 'ses_lk4', agent: 'build', title: 'S86 lk4', time: { updated: now, busy: 0 }, location: { directory: WS_A } };
+sessions.ses_lk5 = { id: 'ses_lk5', agent: 'build', title: 'S86 lk5', time: { updated: now, busy: 0 }, location: { directory: WS_A } };
+const as = sid => ({ sessionID: sid, agent: 'build' });
+const lockCall = (input, sid = 'ses_lk1') => call('collab_lock', { confirm: true, ...input }, as(sid));
+const unlockCall = (resource, sid = 'ses_lk1') => call('collab_unlock', { resource, confirm: true }, as(sid));
+const lockList = (sid = 'ses_lk1') => call('collab_locks', {}, as(sid));
+const promptsBeforeLocks = prompts.length;
+
+// --- S86a: preview writes nothing at all.
+const s86Preview = await call('collab_lock', { resource: 'race-window', confirm: false }, as('ses_lk1'));
+out('S86 lock preview', s86Preview);
+expect(
+  'S86 the preview shows the normalised resource and writes no record',
+  s86Preview.includes('仅预览') && s86Preview.includes('named:race-window') && !existsSync(lockFileOf('named:race-window')),
+  s86Preview.split('\n')[0]
+);
+
+// --- S86b: five concurrent exclusive acquires → exactly one winner.
+const s86Sids = ['ses_lk1', 'ses_lk2', 'ses_lk3', 'ses_lk4', 'ses_lk5'];
+const s86Results = await Promise.all(
+  s86Sids.map(sid => lockCall({ resource: 'race-window', ttlMs: 900_000, reason: 'S86 并发' }, sid))
+);
+const s86Held = s86Sids.filter((sid, index) => s86Results[index].startsWith('已获得资源租约'));
+const s86Busy = s86Sids.filter((sid, index) => s86Results[index].startsWith('未获得资源租约'));
+out('S86 concurrent acquire', `held=${s86Held.join(',')}\n` + s86Results.map((r, i) => `${s86Sids[i]}: ${r.split('\n')[0]}`).join('\n'));
+expect('S86 five concurrent exclusive acquires have exactly one winner', s86Held.length === 1, String(s86Held.length));
+expect('S86 … and the other four get a conflict (no exception, no retry)', s86Busy.length === 4, String(s86Busy.length));
+expect(
+  'S86 every loser is told the holder and the remaining TTL',
+  s86Busy.every(sid => {
+    const text = s86Results[s86Sids.indexOf(sid)];
+    return text.includes(s86Held[0]) && /剩余=\d+/.test(text);
+  }),
+  s86Results[s86Sids.indexOf(s86Busy[0] ?? 'ses_lk1')].split('\n').slice(0, 4).join(' | ')
+);
+const s86Record = lockRead('named:race-window');
+expect(
+  'S86 the record has one holder and one acquire history line',
+  s86Record.holders.length === 1 &&
+    s86Record.holders[0] === s86Held[0] &&
+    s86Record.history.filter(entry => entry.event === 'acquire').length === 1,
+  JSON.stringify({ holders: s86Record.holders, history: s86Record.history })
+);
+
+// --- S86c: idempotent re-application (same sid → same lease, no double count).
+const s86Winner = s86Held[0] ?? 'ses_lk1';
+const s86Expires = s86Record.expiresAt;
+const s86Again = await lockCall({ resource: 'race-window', reason: '重复申请' }, s86Winner);
+out('S86 idempotent', s86Again);
+const s86After = lockRead('named:race-window');
+expect(
+  'S86 re-applying returns the existing lease (幂等) and does not duplicate the holder',
+  s86Again.includes('幂等') && s86After.holders.length === 1 && s86After.holders[0] === s86Winner,
+  s86Again.split('\n')[0]
+);
+expect(
+  'S86 … the TTL is not extended either (same expiresAt)',
+  s86After.expiresAt === s86Expires,
+  `${s86After.expiresAt} vs ${s86Expires}`
+);
+
+// --- S86d: shared coexists with shared; exclusive meets both.
+const s86SharedA = await lockCall({ resource: 'shared-read', mode: 'shared', reason: 'S86 读' }, 'ses_lk1');
+const s86SharedB = await lockCall({ resource: 'shared-read', mode: 'shared' }, 'ses_lk2');
+out('S86 shared', `${s86SharedA.split('\n')[0]}\n${s86SharedB.split('\n')[0]}`);
+const s86SharedRecord = lockRead('named:shared-read');
+expect(
+  'S86 two shared leases coexist',
+  s86SharedRecord.mode === 'shared' &&
+    s86SharedRecord.holders.length === 2 &&
+    s86SharedRecord.holders.includes('ses_lk1') &&
+    s86SharedRecord.holders.includes('ses_lk2'),
+  JSON.stringify(s86SharedRecord.holders)
+);
+const s86ExclVsShared = await lockCall({ resource: 'shared-read', mode: 'exclusive' }, 'ses_lk3');
+expect(
+  'S86 an exclusive acquire is refused while a shared group holds it',
+  s86ExclVsShared.startsWith('未获得资源租约') &&
+    s86ExclVsShared.includes('ses_lk1') &&
+    lockRead('named:shared-read').holders.length === 2,
+  s86ExclVsShared.split('\n')[0]
+);
+const s86Excl = await lockCall({ resource: 'exclusive-window', mode: 'exclusive' }, 'ses_lk4');
+const s86SharedVsExcl = await lockCall({ resource: 'exclusive-window', mode: 'shared' }, 'ses_lk5');
+out('S86 shared vs exclusive', `${s86Excl.split('\n')[0]}\n${s86SharedVsExcl.split('\n')[0]}`);
+expect(
+  'S86 a shared acquire is refused while an exclusive lease holds it',
+  s86SharedVsExcl.startsWith('未获得资源租约') &&
+    s86SharedVsExcl.includes('ses_lk4') &&
+    lockRead('named:exclusive-window').holders.length === 1,
+  s86SharedVsExcl.split('\n')[0]
+);
+// A shared member leaves alone: the group survives.
+await unlockCall('shared-read', 'ses_lk2');
+expect(
+  'S86 one shared holder releasing keeps the other one',
+  lockRead('named:shared-read').holders.join(',') === 'ses_lk1',
+  lockRead('named:shared-read').holders.join(',')
+);
+
+// ================== S87 (R3/R4/R5: TTL expiry, FIFO queue, visibility)
+// Time is simulated the way the other sections do it: write the lease file the
+// plugin itself reads, with `expiresAt` in the past.
+const s87Resource = 'named:fifo-window';
+await lockCall({ resource: 'fifo-window', ttlMs: 60_000, reason: 'S87 先占' }, 'ses_lk1');
+lockWriteRaw('named:fifo-window', { expiresAt: Date.now() - 1_000 });
+
+// --- S87a: collab_locks is read-only — it shows free without rewriting.
+const s87Before = readFileSync(lockFileOf(s87Resource), 'utf8');
+const s87ReadOnly = await lockList('ses_lk1');
+const s87AfterRead = readFileSync(lockFileOf(s87Resource), 'utf8');
+out('S87 read-only listing of an expired lease', s87ReadOnly);
+expect(
+  'S87 collab_locks shows an expired lease as free',
+  s87ReadOnly.includes('named:fifo-window') && /named:fifo-window\s+free/.test(s87ReadOnly),
+  s87ReadOnly.split('\n').find(line => line.includes('fifo-window')) ?? '(缺失)'
+);
+expect('S87 … without rewriting the record (read-only)', s87Before === s87AfterRead, 'record changed');
+
+// --- S87b: the next acquire reclaims the expired lease, and says so.
+const s87Reclaim = await lockCall({ resource: 'fifo-window', ttlMs: 60_000 }, 'ses_lk2');
+out('S87 reclaim', s87Reclaim);
+const s87Record = lockRead(s87Resource);
+expect(
+  'S87 an expired lease is reclaimed by the next acquire (no manual cleanup)',
+  s87Reclaim.startsWith('已获得资源租约') &&
+    s87Record.holders.join(',') === 'ses_lk2' &&
+    s87Record.history.some(entry => entry.event === 'expire' && entry.sid === 'ses_lk1'),
+  JSON.stringify({ holders: s87Record.holders, history: s87Record.history })
+);
+
+// --- S87c: waiters are a FIFO queue with positions.
+const s87WaitB = await lockCall({ resource: 'fifo-window', wait: true, reason: 'S87 等窗口' }, 'ses_lk3');
+const s87WaitC = await lockCall({ resource: 'fifo-window', wait: true }, 'ses_lk4');
+out('S87 queue', `${s87WaitB.split('\n')[0]}\n${s87WaitC.split('\n')[0]}`);
+expect(
+  'S87 wait:true queues in application order (1 then 2)',
+  s87WaitB.includes('排第 1 位') && s87WaitC.includes('排第 2 位'),
+  `${s87WaitB.split('\n')[0]} / ${s87WaitC.split('\n')[0]}`
+);
+expect(
+  'S87 the queue is visible in collab_locks',
+  (await lockList('ses_lk3')).includes('waiters=ses_lk3#1:exclusive,ses_lk4#2:exclusive'),
+  (await lockList('ses_lk3')).split('\n').find(line => line.includes('fifo-window')) ?? '(缺失)'
+);
+
+// --- S87d: release frees the resource but keeps the queue; FIFO is not skipped.
+await unlockCall('fifo-window', 'ses_lk2');
+const s87Jump = await lockCall({ resource: 'fifo-window' }, 'ses_lk5');
+out('S87 no queue jumping', s87Jump);
+expect(
+  'S87 a newcomer cannot jump a queue on a free resource',
+  s87Jump.startsWith('未获得资源租约') && s87Jump.includes('排队') && lockRead(s87Resource).holders.length === 0,
+  s87Jump.split('\n')[0]
+);
+const s87Head = await lockCall({ resource: 'fifo-window' }, 'ses_lk3');
+out('S87 head waiter', s87Head);
+expect(
+  'S87 the head waiter gets the freed resource',
+  s87Head.startsWith('已获得资源租约') && lockRead(s87Resource).holders.join(',') === 'ses_lk3',
+  s87Head.split('\n')[0]
+);
+expect(
+  'S87 … and the rest of the queue stays in order',
+  lockRead(s87Resource).waiters.map(waiter => waiter.sid).join(',') === 'ses_lk4',
+  lockRead(s87Resource).waiters.map(waiter => waiter.sid).join(',')
+);
+
+// --- S87e: collab_list carries my own lease / queue position.
+const s87ListHeld = await call('collab_list', { directory: WS_A, limit: 100 }, as('ses_lk3'));
+const s87ListWaiting = await call('collab_list', { directory: WS_A, limit: 100 }, as('ses_lk4'));
+out('S87 collab_list leases', s87ListHeld.split('\n').filter(line => line.includes('fifo-window')).join('\n'));
+expect(
+  'S87 collab_list shows the lease this session holds',
+  s87ListHeld.includes('我的资源租约') && /named:fifo-window\s+held/.test(s87ListHeld),
+  s87ListHeld.split('\n').find(line => line.includes('fifo-window')) ?? '(缺失)'
+);
+expect(
+  'S87 collab_list shows the queue position this session waits at',
+  s87ListWaiting.includes('排队中 第 1 位') && s87ListWaiting.includes('named:fifo-window'),
+  s87ListWaiting.split('\n').find(line => line.includes('fifo-window')) ?? '(缺失)'
+);
+
+// --- S87f: only the holder releases; there is no force.
+const s87Steal = await unlockCall('fifo-window', 'ses_lk4');
+out('S87 non-holder release', s87Steal);
+expect(
+  'S87 a non-holder cannot release (no force / no preemption)',
+  s87Steal.startsWith('未释放') && lockRead(s87Resource).holders.join(',') === 'ses_lk3',
+  s87Steal.split('\n')[0]
+);
+await unlockCall('fifo-window', 'ses_lk3');
+const s87Free = lockRead(s87Resource);
+expect(
+  'S87 the holder releases and the record goes back to free',
+  s87Free.holders.length === 0 && s87Free.expiresAt === 0 && s87Free.ttlMs === 0,
+  JSON.stringify({ holders: s87Free.holders, expiresAt: s87Free.expiresAt, ttlMs: s87Free.ttlMs })
+);
+expect(
+  'S87 … while the remaining waiter is kept',
+  s87Free.waiters.map(waiter => waiter.sid).join(',') === 'ses_lk4',
+  s87Free.waiters.map(waiter => waiter.sid).join(',')
+);
+// A second release reports "free" instead of throwing.
+const s87Double = await unlockCall('fifo-window', 'ses_lk3');
+expect('S87 releasing a free resource is a readable no-op', s87Double.includes('无需释放'), s87Double.split('\n')[0]);
+
+
+// --- S87g (R-1): a full queue refuses the newcomer, never drops the head.
+const s87QueueResource = 'named:queue-full';
+await lockCall({ resource: 'queue-full', ttlMs: 60_000 }, 'ses_lk1');
+const s87QueueSids = Array.from({ length: 50 }, (_, index) => `ses_q${index}`);
+const s87QueueFilled = [];
+for (const sid of s87QueueSids) {
+  s87QueueFilled.push(await lockCall({ resource: 'queue-full', wait: true }, sid));
+}
+const s87QueueRecord = lockRead(s87QueueResource);
+out(
+  'S87 queue capacity',
+  `${s87QueueRecord.waiters.length} waiters, head=${s87QueueRecord.waiters[0]?.sid}, tail=${s87QueueRecord.waiters.at(-1)?.sid}`
+);
+expect(
+  'S87 50 waiters fit in the queue (head ses_q0, tail ses_q49)',
+  s87QueueRecord.waiters.length === 50 &&
+    s87QueueRecord.waiters[0].sid === 'ses_q0' &&
+    s87QueueRecord.waiters[49].sid === 'ses_q49' &&
+    s87QueueFilled[0].includes('排第 1 位') &&
+    s87QueueFilled[49].includes('排第 50 位'),
+  `${s87QueueFilled[0].split('\n')[0]} / ${s87QueueFilled[49].split('\n')[0]}`
+);
+// The 51st applicant is refused readably — no eviction, no silent place loss.
+const s87QueueOverflow = await lockCall({ resource: 'queue-full', wait: true }, 'ses_q50');
+out('S87 queue full', s87QueueOverflow);
+const s87QueueAfter = lockRead(s87QueueResource);
+expect(
+  'S87 a 51st waiter is refused with a readable full-queue answer',
+  s87QueueOverflow.startsWith('未进入排队') &&
+    /队列已满/.test(s87QueueOverflow) &&
+    s87QueueOverflow.includes('队首 ses_q0'),
+  s87QueueOverflow.split('\n')[0]
+);
+expect(
+  'S87 … and the existing head keeps position 1 (nothing was evicted)',
+  s87QueueAfter.waiters.length === 50 &&
+    s87QueueAfter.waiters[0].sid === 'ses_q0' &&
+    !s87QueueAfter.waiters.some(waiter => waiter.sid === 'ses_q50') &&
+    (await lockList('ses_q0')).includes('waiters=ses_q0#1:exclusive'),
+  `head=${s87QueueAfter.waiters[0]?.sid} len=${s87QueueAfter.waiters.length}`
+);
+// Re-reading is not a truncation path either: the head survives a normalise.
+expect(
+  'S87 re-reading the record keeps the queue head (no tail-window truncation)',
+  lockRead(s87QueueResource).waiters[0].sid === 'ses_q0' &&
+    JSON.parse(readFileSync(lockFileOf(s87QueueResource), 'utf8')).waiters[0].sid === 'ses_q0',
+  lockRead(s87QueueResource).waiters[0].sid
+);
+// A session already queued may still refresh its entry when the queue is full.
+const s87QueueRefresh = await lockCall({ resource: 'queue-full', wait: true, reason: '仍在等' }, 'ses_q49');
+expect(
+  'S87 an already-queued session can refresh its entry on a full queue',
+  s87QueueRefresh.includes('排第 50 位') && lockRead(s87QueueResource).waiters[49].sid === 'ses_q49',
+  s87QueueRefresh.split('\n')[0]
+);
+// Cleanup: free the lease so the 50 waiters do not leak into later sections.
+await unlockCall('queue-full', 'ses_lk1');
+
+// --- S87h (R-7): a corrupt lease (holders but expiresAt=0) is reclaimed.
+const s87CorruptResource = 'named:corrupt-lease';
+await lockCall({ resource: 'corrupt-lease', ttlMs: 60_000 }, 'ses_lk1');
+lockWriteRaw(s87CorruptResource, { expiresAt: 0 });
+const s87CorruptBefore = readFileSync(lockFileOf(s87CorruptResource), 'utf8');
+const s87CorruptList = await lockList('ses_lk2');
+out('S87 corrupt lease (expiresAt=0)', s87CorruptList);
+expect(
+  'S87 a lease with expiresAt=0 is shown as free instead of held forever',
+  lockRead(s87CorruptResource).holders.join(',') === 'ses_lk1' &&
+    /named:corrupt-lease\s+free/.test(s87CorruptList),
+  s87CorruptList.split('\n').find(line => line.includes('corrupt-lease')) ?? '(缺失)'
+);
+expect(
+  'S87 … the read-only listing still rewrote nothing',
+  readFileSync(lockFileOf(s87CorruptResource), 'utf8') === s87CorruptBefore,
+  'record changed'
+);
+const s87CorruptTake = await lockCall({ resource: 'corrupt-lease' }, 'ses_lk2');
+const s87CorruptRecord = lockRead(s87CorruptResource);
+const s87Invalid = s87CorruptRecord.history.find(entry => entry.reason === 'invalid');
+out('S87 corrupt reclaim', `${s87CorruptTake.split('\n')[0]}\n${JSON.stringify(s87Invalid)}`);
+expect(
+  'S87 the next acquire reclaims it and stamps history: expire (reason=invalid)',
+  s87CorruptTake.startsWith('已获得资源租约') &&
+    s87CorruptRecord.holders.join(',') === 'ses_lk2' &&
+    s87Invalid?.sid === 'ses_lk1' &&
+    s87Invalid?.event === 'expire',
+  JSON.stringify({ holders: s87CorruptRecord.holders, invalid: s87Invalid })
+);
+await unlockCall('corrupt-lease', 'ses_lk2');
+
+// ================== S88 (R6/R7: normalisation, file boundaries, safety)
+// --- S88a: one resource, many spellings.
+const s88Spellings = ['test-window', '窗口', '测试窗口', '窗口:测试'];
+const s88Held = await lockCall({ resource: s88Spellings[0], ttlMs: 60_000 }, 'ses_lk1');
+const s88Others = await Promise.all(s88Spellings.slice(1).map(spelling => lockCall({ resource: spelling }, 'ses_lk2')));
+out('S88 alias merge', `${s88Held.split('\n')[0]}\n${s88Others.map(text => text.split('\n')[0]).join('\n')}`);
+expect(
+  'S88 the Chinese aliases and test-window are one resource',
+  s88Others.every(text => text.startsWith('未获得资源租约') && text.includes('named:test-window')),
+  s88Others.map(text => text.split('\n')[0]).join(' | ')
+);
+expect(
+  'S88 … and only one file was written for all four spellings',
+  lockFiles().filter(name => name.includes('test-window')).length === 1,
+  lockFiles().join(',')
+);
+const s88Build = await lockCall({ resource: 'build' }, 'ses_lk3');
+const s88BuildAlias = await lockCall({ resource: '全量构建' }, 'ses_lk4');
+expect(
+  'S88 build / 全量构建 are one resource (named:build)',
+  s88Build.includes('named:build') && s88BuildAlias.startsWith('未获得资源租约') && s88BuildAlias.includes('named:build'),
+  `${s88Build.split('\n')[0]} / ${s88BuildAlias.split('\n')[0]}`
+);
+
+// --- S88b: file resources — one spelling, inside the workspace, no symlinks.
+mkdirSync(join(WS_A, 'packages', 'state', 'src'), { recursive: true });
+const S88_FILE = join(WS_A, 'packages', 'state', 'src', 'store.ts');
+writeFileSync(S88_FILE, 'export const store = 1;\n');
+symlinkSync(S88_FILE, join(WS_A, 'packages', 'state', 'src', 'store-link.ts'));
+const s88FileHeld = await lockCall({ resource: 'file:packages/state/src/store.ts' }, 'ses_lk1');
+const s88FileSame = await lockCall({ resource: 'packages/state/src/store.ts' }, 'ses_lk2');
+out('S88 file normalisation', `${s88FileHeld.split('\n')[0]}\n${s88FileSame.split('\n')[0]}`);
+expect(
+  'S88 file:… and a bare workspace path name the same file',
+  s88FileHeld.includes('file:packages/state/src/store.ts') &&
+    s88FileSame.startsWith('未获得资源租约') &&
+    s88FileSame.includes('file:packages/state/src/store.ts'),
+  `${s88FileHeld.split('\n')[0]} / ${s88FileSame.split('\n')[0]}`
+);
+expect(
+  'S88 … a missing file is allowed (the module may not exist yet)',
+  (await lockCall({ resource: 'file:packages/state/src/not-yet.ts' }, 'ses_lk3')).includes(
+    'file:packages/state/src/not-yet.ts'
+  ),
+  'missing file refused'
+);
+for (const [title, bad, matcher] of [
+  ['.. traversal', 'file:packages/../../etc/passwd', /不能包含 \.\./],
+  ['. segments', 'file:packages/./state/src/store.ts', /不能包含 \.\./],
+  ['absolute path', S88_FILE, /绝对路径/],
+  ['symlink', 'file:packages/state/src/store-link.ts', /软链/]
+]) {
+  await expectFail(`S88 a ${title} file resource is refused`, () => lockCall({ resource: bad }, 'ses_lk5'), matcher);
+}
+expect(
+  'S88 no refused file resource wrote a record',
+  !lockFiles().some(name => name.includes('etc') || name.includes('store-link')),
+  lockFiles().join(',')
+);
+
+// --- S88c: ttl and reason are bounded (design §6).
+const s88TtlLow = await lockCall({ resource: 'ttl-low', ttlMs: 1_000 }, 'ses_lk1');
+const s88TtlHigh = await lockCall({ resource: 'ttl-high', ttlMs: 999 * 60 * 60 * 1000 }, 'ses_lk2');
+out('S88 ttl clamp', `${s88TtlLow.split('\n')[1]}\n${s88TtlHigh.split('\n')[1]}`);
+expect(
+  'S88 ttlMs is clamped to [10s, 2h]',
+  lockRead('named:ttl-low').ttlMs === 10_000 &&
+    lockRead('named:ttl-high').ttlMs === 7_200_000 &&
+    s88TtlLow.includes('下限') &&
+    s88TtlHigh.includes('上限'),
+  `${lockRead('named:ttl-low').ttlMs} / ${lockRead('named:ttl-high').ttlMs}`
+);
+const s88Reason = await lockCall(
+  { resource: 'reason-check', reason: `行1\n行2\u0007 ${'长'.repeat(300)}` },
+  'ses_lk3'
+);
+const s88ReasonRecord = lockRead('named:reason-check');
+expect(
+  'S88 reason is one line and ≤200 chars',
+  typeof s88ReasonRecord.reason === 'string' &&
+    s88ReasonRecord.reason.length <= 200 &&
+    !/[\u0000-\u001f\u007f]/.test(s88ReasonRecord.reason),
+  JSON.stringify(s88ReasonRecord.reason)
+);
+expect(
+  'S88 … the rendered preview cannot carry control characters either',
+  !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(
+    await call('collab_lock', { resource: 'reason-check', reason: 'a\u0000b\nc', confirm: false }, as('ses_lk4'))
+  ),
+  'control character leaked'
+);
+
+// --- S88d: a protected session may hold, but nothing may preempt it (R6).
+const s88Protected = await lockCall({ resource: 'protected-window', reason: 'S88 受保护线' }, PROTECTED_REQ);
+const s88AgainstProtected = await lockCall({ resource: 'protected-window' }, 'ses_lk5');
+out('S88 protected holder', `${s88Protected.split('\n')[0]}\n${s88AgainstProtected}`);
+expect(
+  'S88 a protected session can take a lease',
+  s88Protected.startsWith('已获得资源租约') && lockRead('named:protected-window').holders[0] === PROTECTED_REQ,
+  s88Protected.split('\n')[0]
+);
+expect(
+  'S88 … a conflict with it is marked [protected] and 不可抢占',
+  s88AgainstProtected.includes('[protected]') && s88AgainstProtected.includes('不可抢占'),
+  s88AgainstProtected.split('\n').slice(0, 3).join(' | ')
+);
+const s88Preempt = await unlockCall('protected-window', 'ses_lk5');
+expect(
+  'S88 … and another session can never release it',
+  s88Preempt.startsWith('未释放') && lockRead('named:protected-window').holders[0] === PROTECTED_REQ,
+  s88Preempt.split('\n')[0]
+);
+
+// --- S88e: leases never deliver messages.
+expect(
+  'S88 locking / queueing / releasing delivered no message at all',
+  prompts.length === promptsBeforeLocks,
+  `+${prompts.length - promptsBeforeLocks}`
+);
+// Cleanup so the closing sections see a quiet lock directory (not required, but
+// keeps the summary line honest if someone reruns the file in one process).
+await unlockCall('protected-window', PROTECTED_REQ);
+await unlockCall('test-window', 'ses_lk1');
+await unlockCall('build', 'ses_lk3');
+await unlockCall('exclusive-window', 'ses_lk4');
+await unlockCall('race-window', s86Winner);
+await unlockCall('shared-read', 'ses_lk1');
+await unlockCall('ttl-low', 'ses_lk1');
+await unlockCall('ttl-high', 'ses_lk2');
+await unlockCall('reason-check', 'ses_lk3');
+await unlockCall('fifo-window', 'ses_lk4');
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

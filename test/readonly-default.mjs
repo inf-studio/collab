@@ -34,6 +34,8 @@ process.env.COLLAB_GRANT_DIR = join(dir, 'grants');
 process.env.COLLAB_CONFIG = join(dir, 'collab.json');
 // Defect evidence must not land in the operator's real report directory.
 process.env.COLLAB_REPORT_DIR = join(dir, 'reports');
+// Resource leases are global as well; keep them in the temp dir.
+process.env.COLLAB_LOCK_DIR = join(dir, 'locks');
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const plugin = (await import(`file://${entry}`)).default;
@@ -141,7 +143,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the eleven collab_* tools + collab_report',
+  'R8 the package registers the fourteen collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -155,7 +157,10 @@ expect(
       'collab_wait',
       'collab_grant',
       'collab_promote',
-      'collab_report'
+      'collab_report',
+      'collab_lock',
+      'collab_unlock',
+      'collab_locks'
     ].join(','),
   readonlyHost.tools.map(definition => definition.name).join(',')
 );

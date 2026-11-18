@@ -1,7 +1,7 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：十二个原生 `collab_*` 工具（含缺陷上报与闭环后追加）+ thread/inbox 协议 + 一条
-「广播 → 打分 → 原子领取 → 回执」的交接链路。
+多会话（含跨工作区）协作插件：十五个原生 `collab_*` 工具（含缺陷上报、闭环后追加与资源租约）+ thread/inbox 协议 +
+一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
 `bid` 算法与单文件版逐字一致，差别只有「可选类型 + 模块边界 + 默认只读」三点。
@@ -27,6 +27,9 @@
 | `collab_promote`   | 把一个会话的 agent 切到 `build`/`plan`（`revert` 还原）                    | **写会话 agent**  |
 | `collab_report`    | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方，不改协作状态）              | 写本地证据        |
 | `collab_followup`  | 闭环后追加指针（**仅本单领取人**；只写 `{bid,issuePath,at,by}`，提案文件由调用方自己写） | 写追加记录        |
+| `collab_lock`      | 取资源租约（测试窗口/同一文件/构建；exclusive 或 shared，TTL 10s–2h，被占可 `wait` 排队） | 写本地租约        |
+| `collab_unlock`    | 释放**自己**持有的租约（`shared` 组只移除自己；无 force 抢占）             | 写本地租约        |
+| `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
@@ -100,6 +103,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
+| `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
 | `0.1.x` | `2.3.x`  | `>=22.18` | 与单文件版行为等价；`@opencode/plugin` 由宿主提供 |
 
 宿主插件契约（`ctx.location / storage / session / tool / event`）只按用到的字段声明，
@@ -112,7 +116,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/
 pnpm install
 pnpm typecheck
-pnpm test          # build + 456 项 harness + 12 项只读默认
+pnpm test          # build + 498 项 harness + 12 项只读默认
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -123,10 +127,14 @@ pnpm test          # build + 456 项 harness + 12 项只读默认
   `collab_wait` 宿主 5xx 上报（超时不报）与缺目录 triage（复核 F1–F4）。
   0.1.6 追加 S83–S85：两级 ack（`admitted`/`seen`）、受限重发（busy 永不重发、同 cid 幂等、
   `unacked` 可见）、闭环后追加（结构指针 + 受保护发起方一行只读提示 + 路径校验）。
+  0.2.0 追加 S86–S88：资源租约——五路并发申请只有一个 winner、exclusive/shared 互斥矩阵、
+  同会话幂等（不重复计数/不延长 TTL）、TTL 过期回收（读命令只读不改）、FIFO 排队与不插队、
+  `collab_list` 显示本人持有/排队、`file:` 越界/绝对/软链拒绝、中文别名与路径写法归并、
+  TTL 夹取、`reason` 清洗、`[protected]` 可持有但不可抢占、加锁不投递任何消息。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起）、`src/tools`（十二个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约）、`src/tools`（十五个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/index.ts`（`Plugin.define` 等价装配）、
 `scripts/collab-triage.mjs`（维护方 triage，零依赖）。
 

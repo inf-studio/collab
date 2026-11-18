@@ -257,11 +257,11 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十二个工具（协作链路五个 + 权限/上报/追加各一个）
+### 11.2 十五个工具（协作链路五个 + 权限/上报/追加/租约各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
-| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）。`directory` 只看一个工作区（省略 = 旧行为） |
+| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）；本会话持有 / 排队中的资源租约（§11.10）。`directory` 只看一个工作区（省略 = 旧行为） |
 | `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**） |
 | `collab_reply` | `{ threadID, text, bid?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定） |
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须 realpath 落在该记录 workspace 的 `docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
@@ -272,6 +272,9 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
 | `collab_report` | `{ note?, bid?, threadID?, confirm }` | **缺陷上报（旁路，不改任何协作状态）**：把现场写到 `~/.config/opencode/collab-reports/<signature>/<ts>.{json,md}`（版本/工具/分类/错误名与消息≤2KB/stackTop 5 帧/短 id/工作区/记录快照；**不含正文、文件内容、token**），配了 `report.to` 时额外 `collab_send`（`note`+`queue`）通知维护方；同签名 1 小时最多 1 条。任何非参数校验类错误都会在错误文案末尾提示这个入口（见 §11.8） |
+| `collab_lock` | `{ resource, mode?, ttlMs?, reason?, wait?, confirm }` | **资源租约（0.2.0）**：同工作区共享资源（测试窗口 / 同一文件 / 全量构建）的可判定互斥。`exclusive`（默认）与任何模式互斥，`shared` 之间可共存；`ttlMs` 默认 15 分钟、夹在 `[10s, 2h]`；过期在下次访问时回收（写 `history: expire`），无需人工清理。同一会话重复申请**幂等**（返回既有租约，不重复计数、不延长 TTL）。被占时：不传 `wait` → 返回「持有者 + 剩余 TTL」；`wait:true` → 按 FIFO 入队并返回排位。**不投递消息、不打断会话、不提供抢占**。`confirm:true` 才写，否则只预览。见 §11.10 |
+| `collab_unlock` | `{ resource, confirm }` | 释放**自己**持有的租约；`shared` 组只移除自己、其他 holder 保留。free / 非持有者会得到可读拒绝——**没有 `force`**（抢占需人工；`[protected*]` 持有者永不被工具顶掉）。`confirm:true` 才写 |
+| `collab_locks` | `{ resource? }` | **只读**列出租约：`resource / free 或 held / mode / holders / 剩余 / ttl / waiters / 我的位置`。不改状态、不回收、不叫醒排队者；过期租约直接显示 `free`。`collab_list` 会额外追加本会话「持有 / 排队中」 |
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
@@ -595,6 +598,103 @@ delivery.cid 存在 && !seenAt && resends < 1
 - **protect 的窄化白名单**：受保护会话的 `injectionFor` 仍然**只**返回这一类只读提示行
   （条件：`record.from.sid === 自己` 且存在未提示的 followUps）；不是「放开注入」，而是单独的
   一个函数产出、单独的返回分支，其它任何提醒都不进受保护线。
+
+### 11.10 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`，0.2.0）
+
+**为什么需要**：同工作区的并行会话常抢**同一件东西**——pytest 窗口、同一个
+`store.ts`、全量构建。0.1.x 只能靠 `collab_send` 自然语言协商：排钟会话占了窗口 10+ 分钟，
+issues 会话两次请求都没等到释放，最后只能 `ps` 猜。租约把这件事变成**可判定**的状态。
+
+```jsonc
+// ~/.config/opencode/collab-locks/<sha256(resource)[0..16]>__<slug>.json
+{
+  "resource": "named:test-window",
+  "kind": "named|file|build",
+  "mode": "exclusive|shared",
+  "holder": "ses_…",
+  "holders": ["ses_…"],
+  "reason": "全量 pytest",              // 可选，≤200 字，去控制字符
+  "acquiredAt": 0, "ttlMs": 900000, "expiresAt": 0,
+  "waiters": [{ "sid": "ses_…", "at": 0, "mode": "exclusive", "reason": "…" }],
+  "history": [{ "sid": "…", "at": 0, "event": "acquire|release|expire|wait|leave" }]
+}
+```
+
+**状态机**（与 handoff 的 `open/claimed/acked/done/blocked/expired` **完全分离**，
+只共享读取层）：
+
+```text
+free ──acquire──▶ held ──release──▶ free
+                   │
+                   ├──expire──▶ free            （下次访问时判定并写 history）
+                   └──shared join──▶ held(holders+1)
+
+被占用时的申请：held ──request(wait:true)──▶ waiters[]（FIFO）
+waiters 不会被主动叫醒（避免打断）；按顺序在下次 collab_locks / collab_lock 时获知
+```
+
+#### 11.10.1 资源名规范化
+
+| 输入 | 归一化 |
+| --- | --- |
+| `test-window` / `窗口` / `测试窗口` / `窗口:测试` | `named:test-window`（小写、去空白、中文别名表） |
+| `build` / `全量构建` | `named:build` |
+| `file:packages/state/src/store.ts` / `packages/state/src/store.ts` | `file:packages/state/src/store.ts` |
+
+- `file:` 必须是 **workspace 相对路径**：绝对路径、`..`、`.` 段一律拒绝；
+  已存在的文件 `realpath` 必须仍在 workspace 内、且**不是软链**；
+  尚未创建的文件允许（`file:packages/x/not-yet.ts`），但最近的存在祖先仍要落在 workspace 内。
+- 一个资源 = 一个文件（`<hash>__<slug>.json`）；四种写法归并后只会有一个文件、一个 winner。
+
+#### 11.10.2 原子性与幂等
+
+- 申请 = `open(<file>.lock, "wx")` 抢**短锁** → 读记录 → 判定 → `tmp+rename` 写记录 → 释放短锁；
+  短锁 2s 超时，超过 2s 的遗留短锁视为崩溃残留并清理（最坏情况是无保护推进，记录写仍是原子替换）。
+- 并发 N 个 `exclusive` 申请同一资源 → **只有一个 winner**，其余立即拿到「持有者 + 剩余 TTL」。
+- 同一会话重复申请同一资源 → **幂等**：返回既有租约，`holders` 不重复、TTL 不延长、历史不新增。
+- TTL：默认 900000ms（15min），夹在 `[10000, 7200000]`；`collab_locks` 里过期即显示 `free`，
+  下一次 `collab_lock` 回收并写 `history: expire`。
+
+#### 11.10.3 排队（FIFO，不插队）
+
+- `wait:true` 且资源被占 → 入队并返回排位；重复 `wait` 只刷新 mode/reason，保留原 `at`（顺序不变）。
+- 持有者释放后资源变 `free`，**队列保留**；新人（没排过队）在 `wait:false` 时会被拒绝
+  （「资源空闲，但有人在排队」），`wait:true` 则排到队尾。
+- 队首再次 `collab_lock` 即获得（出队）；不会有人主动叫醒你——这是刻意的：
+  锁不得打断任何会话，也不得投递消息。
+
+#### 11.10.4 安全边界
+
+- `[protected*]` 会话**可以持有**租约；冲突输出会标 `[protected]` 并注明「不可抢占」。
+  `collab_unlock` 只有持有者能调，**没有 force**：抢占是人工决定。
+- `reason` / 资源名都会剔除控制字符并截断；`collab_lock` 的 `mode` 只接受 `exclusive|shared`。
+- 锁是**纯本地状态**：不加锁不会阻塞消息投递，锁也不替代 git 操作；它只服务**自愿**协调。
+
+#### 11.10.5 典型用法
+
+```text
+# 1) 先看窗口在谁手里（只读）
+collab_locks { resource: "test-window" }
+
+# 2) 申请 10 分钟（confirm:true 才写；否则只预览当前持有与将写入字段）
+collab_lock { resource:"窗口", mode:"exclusive", ttlMs:600000, reason:"全量 pytest", confirm:true }
+#    → 已获得资源租约: named:test-window ...
+#    → 未获得资源租约: … holders=ses_x 剩余=8m 后到期（可选 wait:true 排队）
+
+# 3) 被占又必须等 → 排队（FIFO，无叫醒）
+collab_lock { resource:"test-window", wait:true, confirm:true }
+collab_locks { resource:"test-window" }        # 轮到你时 free；再次 collab_lock 获得
+
+# 4) 跑完立刻释放（异常退出也要补）
+collab_unlock { resource:"test-window", confirm:true }
+```
+
+`collab_list` 会为当前会话追加一段「我的资源租约 / 排队中（第 N 位）」，
+不必再问对端或 `ps`。
+
+**等待队列上限**：每个资源最多 **50** 个等待者；满员时**拒绝新申请**（返回可读错误，不驱逐已排队者，
+队首排位不变）。
+**损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

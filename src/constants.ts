@@ -183,6 +183,40 @@ export const STALE_ACKED_MS = ACKED_EXTRACT_MS;
 /** Per-session memory of already-shown `class:bid` reminders. */
 export const STALE_SEEN_LIMIT = 200;
 
+// ------------------------------------------------------- resource leases (0.2.0)
+
+/**
+ * Leases live in a **global** directory for exactly the same reason the
+ * hand-off chain does: `ctx.storage` is namespaced per `location`, so a lock
+ * taken in workspace A would be invisible to a session in workspace B — and two
+ * sessions fighting over the same test window are usually in different
+ * workspaces. One file per resource, `open(…, "wx")` as the short guard, and
+ * `COLLAB_LOCK_DIR` overrides the directory (harness / sandbox runs).
+ */
+export const LOCK_DIR =
+  process.env.COLLAB_LOCK_DIR || join(homedir(), '.config', 'opencode', 'collab-locks');
+/** Default lease: long enough for a full test run, short enough to self-heal. */
+export const LOCK_TTL_DEFAULT_MS = 15 * 60 * 1000;
+/** Floor: below this a lease could expire mid-run and cause a second winner. */
+export const LOCK_TTL_MIN_MS = 10_000;
+/** Ceiling (design §6): nobody holds a resource for a whole afternoon. */
+export const LOCK_TTL_MAX_MS = 2 * 60 * 60 * 1000;
+/** How long an applicant waits for the short `open(…, "wx")` guard. */
+export const LOCK_GUARD_TIMEOUT_MS = 2000;
+/** A guard file older than this was left by a crash and may be removed. */
+export const LOCK_GUARD_STALE_MS = 2000;
+/** Audit lines kept per lease (oldest dropped first). */
+export const LOCK_HISTORY_LIMIT = 50;
+/**
+ * Maximum FIFO waiters per resource. This is a **hard cap, not a truncation
+ * window**: a full queue refuses a *new* waiter (readable error) instead of
+ * dropping the oldest one — losing the head would silently steal a session's
+ * place, which is exactly the coordination bug the lease exists to remove.
+ */
+export const LOCK_QUEUE_LIMIT = 50;
+/** `reason` is one line, ≤200 chars, control characters stripped. */
+export const LOCK_REASON_LIMIT = 200;
+
 // ------------------------------------------------------- delivery / ack (0.1.6)
 
 /**
@@ -205,5 +239,5 @@ export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
 export const MAX_RESENDS = 1;
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.1.7';
+export const PLUGIN_VERSION = '0.2.0';
 

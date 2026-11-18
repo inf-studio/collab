@@ -3,6 +3,7 @@ import { createContextHook } from './hooks/context.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
+import { lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
 import {
   DeliveryError,
@@ -25,7 +26,7 @@ import type { CollabContext } from './types.ts';
  * `@inf-studio/collab` — the zero-dependency port of
  * `.opencode/plugins/collab.js`: cross-session collaboration (threads / inbox)
  * plus the cross-workspace hand-off chain (broadcast → score → atomic claim →
- * receipt), exposed as the twelve native `collab_*` tools and one `context` hook.
+ * receipt), exposed as the fifteen native `collab_*` tools and one `context` hook.
  *
  * The host contract is the plugin `ctx` (in-process capability), never an HTTP
  * client: a plugin that reached the server through a port/token would break as
@@ -188,5 +189,11 @@ export const __internals = {
   normalizeRules,
   mergeRules,
   missingRules,
-  assertCollabOnly
+  assertCollabOnly,
+  // Resource leases (0.2.0) — the normaliser is the one rule that decides which
+  // two spellings are "the same resource", so it is unit-tested without a host.
+  normalizeResource,
+  normalizeTtl,
+  sanitizeReason,
+  lockFile
 };
