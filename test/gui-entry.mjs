@@ -31,6 +31,11 @@
  *      with one, panel on click with a session, "loaded" toast without one;
  *   8. 0.5.2 (R7): a reload asked for while a request is in flight is re-run for
  *      the new session instead of being dropped until the next 2 s tick.
+ *   9. 0.5.3 (R1/R2/R3): the snapshot is read through the routed session's
+ *      **server** (`ctx.sessions.current().server.client`), falling back to
+ *      `ctx.client`; a cross-server switch reloads at once; a slow reply from the
+ *      previous server is dropped instead of being written into the new server's
+ *      state; the probe toast names the source server and the version.
  */
 import Module from 'node:module';
 import { createRequire } from 'node:module';
@@ -134,13 +139,52 @@ function translator(locale) {
  *
  * `delayMs` makes the snapshot answer slowly, so a test can switch sessions
  * *while* a request is in flight (R-7).
+ *
+ * 0.5.3: `client` (the window's own, i.e. `ctx.client`) and every
+ * `session.server.client` are **separate** doubles, each with its own `calls`
+ * array — that is the only way to tell "read from the routed session's server"
+ * apart from "read from this computer".
  */
+function fakeClient({ snapshot, delayMs = 0 } = {}) {
+  const calls = [];
+  return {
+    calls,
+    rpc: () => ({
+      snapshot: async input => {
+        calls.push(input);
+        if (delayMs > 0) await new Promise(done => setTimeout(done, delayMs));
+        return typeof snapshot === 'function' ? snapshot(input) : snapshot;
+      }
+    })
+  };
+}
+
+/** A mounted session that belongs to a named server (`ServerRef`-shaped). */
+function serverSession(id, server, client, { local = false } = {}) {
+  return {
+    id,
+    key: `${server}\n${id}`,
+    directory: '/data/project/collab',
+    server: {
+      id: server,
+      name: server,
+      url: `http://${server}`,
+      client,
+      local,
+      builtin: local,
+      compatible: true,
+      connected: true
+    }
+  };
+}
+
 function harness({ locale = 'zh', session = SESSION, snapshot, reactiveSession = false, delayMs = 0 } = {}) {
   const registered = [];
   const opened = [];
   const toasts = [];
-  const calls = [];
   const [currentSession, setCurrentSession] = createSignal(session);
+  const client = fakeClient({ snapshot, delayMs });
+  const calls = client.calls;
   const target = {
     id: 'collab',
     options: {},
@@ -163,18 +207,11 @@ function harness({ locale = 'zh', session = SESSION, snapshot, reactiveSession =
         return { dismiss() {} };
       }
     },
-    // Empty list: no session is mounted, so the poller never starts (this test
-    // is about registration, not about the 2 s timer — tui-render.mjs covers it).
+    // Empty list: no session is mounted, so the poller never starts until a test
+    // sets `sessions.list` (this test is about registration and the store, not
+    // the 2 s timer as such).
     sessions: { list: () => [], current: () => (reactiveSession ? currentSession() : session) },
-    client: {
-      rpc: () => ({
-        snapshot: async input => {
-          calls.push(input);
-          if (delayMs > 0) await new Promise(done => setTimeout(done, delayMs));
-          return snapshot;
-        }
-      })
-    }
+    client
   };
   const context = new Proxy(target, {
     get(object, key) {
@@ -183,7 +220,7 @@ function harness({ locale = 'zh', session = SESSION, snapshot, reactiveSession =
       return object[key];
     }
   });
-  return { context, target, registered, opened, toasts, calls, setCurrentSession };
+  return { context, target, registered, opened, toasts, calls, client, setCurrentSession };
 }
 
 const find = (registered, id) => registered.find(entry => entry.registry === id);
@@ -279,7 +316,8 @@ const keys = [
   'header.unreachable',
   'titlebar.title',
   'probe.title',
-  'probe.description'
+  'probe.description',
+  'panel.source'
 ];
 for (const locale of ['en', 'zh']) {
   const missing = keys.filter(key => typeof plugin.i18n?.[locale]?.[key] !== 'string');
@@ -389,12 +427,13 @@ expect(
   JSON.stringify({ opened: idle.opened.length, title: probeToast?.title })
 );
 expect(
-  'R2 the probe toast names the plugin, version, panel key and app/platform',
+  'R2 the probe toast names the plugin, version, panel key, app/platform and source server',
   probeToast?.variant === 'success' &&
-    /v0\.5\.2/.test(probeToast.description) &&
+    /v0\.5\.3/.test(probeToast.description) &&
     /id=collab/.test(probeToast.description) &&
     /panel=collab:main/.test(probeToast.description) &&
-    /app=2\.5\.0\(desktop\)/.test(probeToast.description),
+    /app=2\.5\.0\(desktop\)/.test(probeToast.description) &&
+    /server=this computer/.test(probeToast.description),
   probeToast?.description
 );
 
@@ -578,6 +617,124 @@ expect(
   (docStub.listeners.get('visibilitychange') ?? new Set()).size === listenersBefore - 1,
   `${listenersBefore} → ${(docStub.listeners.get('visibilitychange') ?? new Set()).size}`
 );
+
+/* ------------- 10. 0.5.3: the routed session's server decides where data comes from */
+
+const sleep = ms => new Promise(done => setTimeout(done, ms));
+/** A snapshot with `locks` leases, i.e. the pill reads `collab N`. */
+const snap = locks => ({
+  at: 1,
+  reachable: true,
+  sessions: [],
+  locks: Array.from({ length: locks }, () => ({})),
+  handoffs: [],
+  queue: []
+});
+
+// R1: a session routed from another server is read through *that* server's
+// client — `ctx.client` is this computer's sidecar and would answer with an
+// empty list (the remote plugin's leases live on the remote server).
+{
+  const remote = fakeClient({ snapshot: snap(4) });
+  const REMOTE = serverSession('ses_remote', 'srv-remote', remote);
+  const remoteH = harness({ session: REMOTE });
+  remoteH.target.sessions.list = () => [REMOTE];
+  plugin.setup(remoteH.context);
+  await sleep(150);
+  const remotePill = rerun(find(remoteH.registered, 'titlebar-item'));
+  expect(
+    'R1 a remote session is read through its own server\'s client, naming the remote session id',
+    remote.calls.length === 1 && remote.calls[0].session === 'ses_remote' && remoteH.calls.length === 0,
+    JSON.stringify({ remote: remote.calls, local: remoteH.calls })
+  );
+  expect(
+    'R1 … and the numbers on screen are that server\'s (pill counts the remote rows)',
+    remotePill.label === 'collab 4',
+    remotePill.label
+  );
+}
+
+// R1 fallback: no `server` on the routed session keeps the old client.
+{
+  const localH = harness({ session: SESSION, snapshot: snap(2) });
+  localH.target.sessions.list = () => [SESSION];
+  plugin.setup(localH.context);
+  await sleep(150);
+  expect(
+    'R1 a session with no server field falls back to ctx.client',
+    localH.calls.length === 1 && localH.calls[0].session === 'ses_probe',
+    JSON.stringify(localH.calls)
+  );
+}
+
+// R2: switching to a session of another server re-requests through that server
+// at once — and the pill counts the new server's rows, not the old ones. B is
+// slow on purpose, so the test can look *between* the switch and B's answer: the
+// previous server's numbers must be gone (cleared on adopt), not left on screen.
+{
+  const clientA = fakeClient({ snapshot: snap(2) });
+  const clientB = fakeClient({ snapshot: snap(5), delayMs: 300 });
+  const A = serverSession('ses_a', 'srv-a', clientA);
+  const B = serverSession('ses_b', 'srv-b', clientB);
+  const hop = harness({ session: A, reactiveSession: true });
+  hop.target.sessions.list = () => [A, B];
+  plugin.setup(hop.context);
+  await sleep(150);
+  const before = rerun(find(hop.registered, 'titlebar-item')).label;
+  hop.setCurrentSession(B);
+  await sleep(80); // B is still out; A's rows must already be dropped
+  const between = rerun(find(hop.registered, 'titlebar-item')).label;
+  await sleep(400); // B's answer is in
+  const after = rerun(find(hop.registered, 'titlebar-item')).label;
+  expect(
+    'R2 switching to another server reloads at once through the new server\'s client',
+    clientA.calls.length === 1 &&
+      clientA.calls[0].session === 'ses_a' &&
+      clientB.calls.length === 1 &&
+      clientB.calls[0].session === 'ses_b' &&
+      hop.calls.length === 0,
+    JSON.stringify({ a: clientA.calls, b: clientB.calls, local: hop.calls })
+  );
+  expect(
+    'R2 … and the previous server\'s rows are dropped at once (no stale numbers while B loads)',
+    before === 'collab 2' && between === 'collab',
+    `${before} → ${between} → ${after}`
+  );
+  expect(
+    'R2 … and the pill then counts the new server\'s rows (no cross-server carry-over)',
+    after === 'collab 5',
+    `${before} → ${between} → ${after}`
+  );
+}
+
+// R2 late reply: A answers slowly, the window switches to B while A's request is
+// out. A's reply must be **dropped** — not written into B's state — and B's rows
+// must be what the pill shows once they land.
+{
+  const slowA = fakeClient({ snapshot: snap(9), delayMs: 300 });
+  const slowB = fakeClient({ snapshot: snap(1), delayMs: 400 });
+  const A = serverSession('ses_a2', 'srv-a', slowA);
+  const B = serverSession('ses_b2', 'srv-b', slowB);
+  const late = harness({ session: A, reactiveSession: true });
+  late.target.sessions.list = () => [A, B];
+  plugin.setup(late.context);
+  await sleep(100); // A's request is in flight
+  late.setCurrentSession(B); // adopt(): the A rows are dropped at once
+  await sleep(380); // t≈480: A's reply landed (t≈300) and was discarded; B still out (t≈700)
+  const mid = rerun(find(late.registered, 'titlebar-item')).label;
+  await sleep(600); // t≈1080: B's reply is in
+  const end = rerun(find(late.registered, 'titlebar-item')).label;
+  expect(
+    'R2 a slow reply from the previous server never reaches the new server\'s state',
+    mid === 'collab' && end === 'collab 1',
+    `${mid} → ${end}`
+  );
+  expect(
+    'R2 … and it does not trigger a second request to either server',
+    slowA.calls.length === 1 && slowB.calls.length === 1,
+    `${slowA.calls.length} / ${slowB.calls.length} calls`
+  );
+}
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

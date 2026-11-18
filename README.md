@@ -54,7 +54,8 @@
 
 两个**只读**视图，问的是同一件事：「谁持有资源 / 谁在排队 / 哪些交接没闭环 / 我给受保护会话排了哪些请求」。
 数据都来自插件 server 部分的 `collab.state.snapshot`（RPC），与 `collab_locks` / `collab_list`
-**同一读取层**，没有第二份状态。
+**同一读取层**，没有第二份状态。Desktop 的 GUI 走**当前会话所属服务器**的 client（0.5.3；远端会话读远端），
+TUI 走宿主给它的 `ctx.client`。
 
 | 客户端 | 入口 | 说明 |
 | --- | --- | --- |
@@ -67,7 +68,8 @@
 | GUI 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age） |
 | GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
 | GUI 会话头计数条 | `锁 N · 交接 M · 队列 K`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点 |
-| GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本与 platform）——这是「窗口到底加载了 GUI 没有」的自证 |
+| GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本、platform 与数据源 `server=`）——这是「窗口到底加载了 GUI 没有」的自证 |
+| GUI 数据源（0.5.3） | **跟随会话所属服务器**：请求走 `ctx.sessions.current()?.server?.client`（远端会话 → 远端 server；没有 `server` 字段 → 回退 `ctx.client`）。跨服务器切换立即用新 server 的 client 重请求，上一台服务器的迟到回包**丢弃**；面板顶部在远端时显示 `@<server.id>`（本机不显示） |
 | TUI `collab.status` 面板 | 三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
 | TUI 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`（`▸` 折叠 / `▾` 展开）；RPC 不可达时 `collab: n/a`。展开最多 4 行明细（锁 → 交接 → 队列）+ `+N`，明细行点击开面板 |
 | 刷新 | GUI：有会话挂载时每 2 s 一次（面板、pill、计数条共用**同一个**轮询与 store）。TUI：面板打开时每 2 s 一次，**关闭即停**；侧栏展开/折叠只渲染已有快照，**不新增轮询** |
@@ -82,11 +84,44 @@
 - TUI 部件依赖宿主的 `@opentui/core` / `@opentui/solid` / `solid-js`（`peerDependencies`，optional）；
   老宿主不加载 `./tui` 时 server 与 GUI 都不受影响。
 
+### Desktop 如何让它出现（0.5.3：必须装在本机）
+
+**结论**：桌面端（2.3.x）的 GUI 宿主**只跟踪本机 sidecar**——`out/main/host-*.js` 里的
+`subscribe-credentials` 只对 `id === 'sidecar'` 返回凭据，`plugin.list()` → `plugin.gui({id})`
+取的都是本机 URL。所以**装在远端服务器上的插件，其 GUI 部分永远不会被窗口加载**（设置页只有名字、
+没有 GUI 开关，标题栏也没有 pill）。这不是本插件的缺陷，也不是权限问题。
+
+可行路径是：**插件装到本机**（窗口才会加载 GUI），GUI 再按「当前会话所属服务器」的 client 读远端数据
+（0.5.3 起；见上表「GUI 数据源」）。
+
+```bash
+# 1) @inf-studio scope 指向 GitHub Packages（已有可跳过）
+npm config set @inf-studio:registry https://npm.pkg.github.com
+# 2) 读包凭据（已有可跳过；用你自己的 gh token）
+echo "//npm.pkg.github.com/:_authToken=$(gh auth token)" >> ~/.npmrc
+
+# 3) 装到本机（Desktop 所在机器）
+opencode plugin add @inf-studio/collab@0.5.3
+
+# 4) 重启 Desktop（GUI 宿主在 app 启动时读插件清单）
+```
+
+验证顺序：
+
+```text
+1) 标题栏出现 `collab` pill（或在命令面板搜到 collab.open）= 本机 GUI 已加载
+2) 打开一个**远端**会话 → 面板顶部出现 `@<server.id>`，计数条/面板出数
+3) 数值应与该远端服务器上的 collab_locks / collab_list 一致（不是本机的）
+4) 没有会话时点 pill → toast 里 `server=` 说明当前数据源（无会话时为 `this computer`）
+```
+
+远端服务器上**仍要装**本插件（工具与 `collab.state.snapshot` RPC 在那边跑），它只是不需要承载 GUI。
+
 ### Desktop 看不到 collab？四步排查
 
-结论先行：**远端服务器是否加载 GUI 目前尚未确认**。「插件行没有 GUI 开关 / 界面里没有 collab」可能是
-远端窗口没加载 GUI bundle，也可能是平台侧的显示差异——下面四步只负责把「加载了没有」问清楚，
-不是平台缺陷的结论。
+结论先行：**远端服务器上的 GUI 永远不会被窗口加载**（0.5.3 用桌面端源码确认：宿主只跟踪本机
+sidecar）。所以「远端窗口里没有 collab」是平台行为，不是加载失败；正确做法是把插件装到本机，
+见上一节。下面四步用于确认**本机**到底加载了没有。
 
 ```text
 1) 插件行有没有 GUI 开关？   Settings → Extensions → Plugins → collab
@@ -94,8 +129,8 @@
 2) 命令面板搜「collab」      → 有 collab.open「打开协作面板」说明命令已注册
 3) 标题栏有没有 `collab` pill？（0.5.2 新增，常驻；无数据时就是 `collab`，不显示 0）
 4) 点 pill（或 /collab、mod+shift+l）而当前没有打开会话
-   → 弹「Collab GUI 已加载」toast = GUI 确实加载了（问题只是「没有会话可开面板」）
-   → 什么都不弹 = 这个窗口没加载本插件的 GUI
+   → 弹「Collab GUI 已加载」toast（含 `server=`）= GUI 确实加载了（问题只是「没有会话可开面板」）
+   → 什么都不弹 = 这个窗口没加载本插件的 GUI（本机装了？重启过 app？）
 ```
 
 先确认 server 侧没问题的命令：
@@ -104,11 +139,11 @@
 opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"   # 列表里应有 collab，且没有 failed
 ```
 
-远端部署（Desktop 连 Linux server）时 GUI bundle 由 server 提供：`GET /api/plugin/gui?id=collab`
-返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 = 0.4.1 及更早的**入口判定死锁**
-（`undefined !== 'closed'` 被当成「已打开」，于是既无标签也无 + 菜单入口），0.4.2 已修；
-请求本身 404/500 = 插件没加载或产物缺失，先修 server 侧。它 200 且第 4 步的 toast 也弹了 = 本插件的
-GUI 端到端可用，剩下的差异在窗口/客户端侧，需要另行确认（见 `docs/collab.md` §11.11.4）。
+远端部署（Desktop 连 Linux server）时，GUI bundle 由**远端** server 提供：`GET /api/plugin/gui?id=collab`
+返回 `dist/gui-experimental.cjs`。但桌面端宿主只为本机 sidecar 建 GUI 宿主，**不会**为远端窗口加载它
+（0.5.3 已用桌面端源码确认）——所以「200 但窗口里没标签」对远端是**预期行为**，解决方式是装到本机
+（上一节）。本机安装后 `GET` 走本机 sidecar；请求 404/500 才说明插件没加载或产物缺失，先修 server 侧。
+本机 pill 与第 4 步 toast 都正常 = GUI 端到端可用，剩下的差异在窗口/客户端侧（见 `docs/collab.md` §11.11.4）。
 
 ## 安装
 
@@ -179,7 +214,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
+| `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.3** 快照改为按「会话所属服务器」取 client（远端会话读远端 `server.client`，跨服务器切换不串台、迟到回包丢弃）+ 探针/面板标出数据源服务器 + 文档写明 Desktop 必须装在本机；**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
 | `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
@@ -202,7 +237,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照/产物 + 29 项 TUI 渲染 + 39 项 GUI 入口
+pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照/产物 + 29 项 TUI 渲染 + 47 项 GUI 入口 + 5 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -255,6 +290,12 @@ pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照
   `layout.open` 0 次）、命令与 pill 共用**同一条** toast 文案、三处版本号一致（`package.json` /
   `PLUGIN_VERSION` / toast），以及 R-7 的慢 RPC（250 ms）三例：请求在飞时切会话→旧包落库后**立即**
   补一次且 `session` 为新会话；未切换仍每 tick 1 次；`document.hidden` 期间不补排。
+  0.5.3 追加 8 条：`ctx.client` 与每个 `session.server.client` 是**各自记录调用**的假 client——
+  远端会话打到 `server.client` 且 `session` 为远端 id（`ctx.client` 零调用）、无 `server` 回退、
+  A→B 跨服务器切换立即用 B 的 client 且旧服务器的数字在 B 的请求在飞时就已消失（不串台）、
+  A 的慢回包在切到 B 之后被丢弃（中途「无数据」而非 A 的数字）、toast 含 `server=this computer` 与版本。
+  变异验证：`server?.client` 改回 `ctx.client` → 7 条失败；去掉回包前的 key 比对 → 迟到回包那条失败；
+  去掉 `adopt()` 的清屏 → 「切走即清」那条失败。
 
 源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（十七个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、

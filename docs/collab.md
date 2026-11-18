@@ -723,7 +723,7 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
-### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2，experimental）
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2 / 0.5.3，experimental）
 
 > GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
 > `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
@@ -740,8 +740,9 @@ src/index.ts (server part)  ── ctx.rpc.register(CollabState, { snapshot }) �
         ┌────────────────────────────────────────┴───────────────────────┐
         │                                                                │
 src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
-ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabState).snapshot({ session })
-桌面窗口里画侧栏 + composer pill                         TUI 里画 collab.status 面板 + 侧栏一行摘要
+(ctx.sessions.current().server?.client ?? ctx.client)    ctx.client.rpc(CollabState).snapshot({ session })
+  .rpc(CollabState).snapshot({ session? })               TUI 里画 collab.status 面板 + 侧栏一行摘要
+桌面窗口里画侧栏 + composer pill
 ```
 
 **契约**（`src/rpc.ts`，一个只读方法、无事件）：
@@ -771,10 +772,11 @@ ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabSta
 | --- | --- |
 | 命令 `collab.open`（0.5.1） | 命令面板与 **Settings → Shortcuts** 可见；默认键 `mod+shift+l`（与 TUI 的 `ctrl+shift+l` 同义），`/collab` 也可触发；`enabled` 跟随当前路由到的会话，仅在会话里可用；执行 = `ctx.layout.open("collab:main", session)`。**只有打开面板这一个动作** |
 | 会话头计数条（0.5.1，`session.header` 槽位） | `锁 N · 交接 M · 队列 K`（与面板**同一个 store / 同一次 2 s 轮询**），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。0.5.1 起这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空、`队列` 会是个结构性的假 0 |
-| 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本与 platform）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
+| 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本、platform 与数据源 `server=`）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
+| 数据源（0.5.3） | 快照请求走**当前路由会话所属服务器**：`ctx.sessions.current()?.server?.client`，缺失（老宿主 / 无 `server`）时回退 `ctx.client`。远端会话 → 远端服务器的 `collab.state.snapshot`（`session` 参数仍是该远端会话 id）；本机会话 → 本机 sidecar。跨服务器/跨会话切换**立即**以新 client 重请求，上一台服务器的迟到回包**丢弃**（见 §11.11.5）；面板顶部在远端时显示 `@<server.id>`，本机不显示（避免噪音） |
 | 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
-| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时停止**、恢复可见后立即以当前会话继续（监听 `visibilitychange`，0.5.2 起；以前读 `document.hidden` 不是响应式的，隐藏不真停、隐藏时挂载的窗口也永不启动）；面板、pill、计数条、标题栏 pill 共用一个轮询与一份 store。0.5.2（R-7）：本轮请求发出后会记住目标会话，回包时若路由会话已经变了（且未隐藏 / 未 dispose）就**补排一次**——切换瞬间恰好有请求在飞也不会把新会话的 `queue` 压到下一个 tick；`inFlight` 仍然防并发，未切换不补排 |
+| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时停止**、恢复可见后立即以当前会话继续（监听 `visibilitychange`，0.5.2 起；以前读 `document.hidden` 不是响应式的，隐藏不真停、隐藏时挂载的窗口也永不启动）；面板、pill、计数条、标题栏 pill 共用一个轮询与一份 store。0.5.2（R-7）：本轮请求发出后会记住目标会话，回包时若路由会话已经变了（且未隐藏 / 未 dispose）就**补排一次**——切换瞬间恰好有请求在飞也不会把新会话的 `queue` 压到下一个 tick；`inFlight` 仍然防并发，未切换不补排。0.5.3：轮询 key 改为 `${server.id}\n${session.id}`，切换服务器即重建；请求前后比对 key，不一致的回包丢弃 |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
 
 **TUI UI**（0.4.2 / 0.5.1）：
@@ -839,13 +841,15 @@ list: input => (input.open.includes(PANEL_TAB) ? [tab] : [])                    
 3) 入口在哪？
    Desktop：命令面板搜「collab」/ mod+shift+l / 会话头计数条 / 标题栏 collab pill / 会话右侧栏的「+」菜单
    TUI    ：/collab（或 ctrl+shift+l），或点侧栏摘要行展开；再不行用 collab_locks / collab_list 的文本视图
-4) Desktop 远端窗口：插件行没有 GUI 开关时，用标题栏 pill 自证是否加载（0.5.2）——见 §11.11.4
+4) Desktop 远端窗口：插件行没有 GUI 开关是预期行为（宿主只加载本机 sidecar，0.5.3 已确认）——
+   把插件装到本机，再用标题栏 pill 自证是否加载（0.5.2）——见 §11.11.4
 ```
 
-远端部署（Desktop 连 Linux server）时，GUI bundle 由 server 提供：
-`GET /api/plugin/gui?id=collab` 返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 → 是 §11.11.1
-的入口判定问题；这条请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。裸调这个端点得到 **401**
-不说明任何事（它只接受 app 主进程的凭据）；「远端窗口到底有没有加载 GUI」用 §11.11.4 的 pill 自证。
+远端部署（Desktop 连 Linux server）时，GUI bundle 由 **远端** server 提供：
+`GET /api/plugin/gui?id=collab` 返回 `dist/gui-experimental.cjs`——但宿主**不会**为远端窗口加载它
+（§11.11.4）。本机安装后这条请求走本机 sidecar；本机请求 200 但窗口里没标签 → 是 §11.11.1
+的入口判定问题（0.4.1 及更早）；请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。裸调这个
+端点得到 **401** 不说明任何事（它只接受 app 主进程的凭据）。
 
 #### 11.11.3 入口（0.5.1）：命令、会话头计数条、侧栏折叠
 
@@ -873,45 +877,72 @@ TUI 的 `sidebar.content` 只是一行静态 `<text>`，没有点击/展开。0.
 都从已有 store / 已有快照派生。
 
 
-#### 11.11.4 Desktop 排查（0.5.2）：插件行没有 GUI 开关 / 界面里没有 collab
+#### 11.11.4 Desktop 排查（0.5.2 / 0.5.3）：插件行没有 GUI 开关 / 界面里没有 collab
 
-**现象**：Desktop 连的是远端服务器（`vhost-remote`）。Settings → Extensions → Plugins 里 `collab` 一行
-**没有 GUI 开关**（按宿主文档，带 `./gui-experimental` 出口的插件应有这个开关），窗口里也没有 collab 的
-任何部件。
+**结论（0.5.3 已用桌面端源码验证）**：桌面端（2.3.x）的 GUI 宿主**只跟踪本机 sidecar**。`out/main/host-*.js`
+里解析服务器 URL 的函数（`D = () => pe()`）返回的是本机地址，`subscribe-credentials` 用它；按 serverId
+取凭据的 `ie(serverId)` 只有 `id === 'sidecar'` 分支会返回凭据。宿主对 `plugin.list()` 过滤
+`features.gui && active && 非 builtin`（`rt()`）后调 `plugin.gui({ id })` 取 bundle——**请求永远打向本机**。
 
-**已确认的**：
+因此：
 
-- 包里有 `dist/gui-experimental.cjs`（`exports["./gui-experimental"]`），发布内容包含它；
-- server 侧插件列表里 `features.gui=true`，没有 `failed`；
-- 裸调 `GET /api/plugin/gui?id=collab` 返回 **401**——这个端点只接受 app 主进程持有的凭据，拿它当
-  「远端有没有加载 GUI」的探针是不成立的（401 是鉴权，不是 404）。
+- **装在远端服务器上的插件，其 GUI 部分永远不会被窗口加载**：设置页只有名字、没有 GUI 开关，
+  标题栏也没有 pill。这是平台行为，不是本插件的缺陷，也不是权限/产物问题。
+- **可行路径是「装到本机」**（见 README「Desktop 如何让它出现」）：本机 sidecar 有插件 → 窗口加载 GUI；
+  用户打开远端会话时，GUI 用**该会话所属服务器**的 `ServerRef.client` 去读远端数据（§11.11.5）。
+- **本机没装插件时，远端窗口仍然「无 GUI」**——0.5.3 不改变这一点（不伪造左侧栏、不改桌面端）。
 
-**尚未确认的**：**远端服务器是否加载 GUI，目前尚未确认。** 官方文档说 GUI 从「桌面应用自己的后台
-服务器」加载；远端窗口这条链路是否真的去取本插件的 bundle，没有被证实。因此本节**不下平台缺陷的结论**，
-只提供四步自证。
+排查步骤（针对**本机**是否加载）：
 
 | 步骤 | 看什么 | 说明 |
 | --- | --- | --- |
-| ① | Settings → Extensions → Plugins → **collab** 一行有没有 GUI 开关 | 有：关掉只影响视图，工具仍在；**没有**：不代表没加载，先做 ②–④ |
+| ① | Settings → Extensions → Plugins → **collab** 一行有没有 GUI 开关 | 有：关掉只影响视图，工具仍在；**没有**（且本机确实装了插件）：先做 ②–④ |
 | ② | 命令面板搜「collab」 | 能看到 `collab.open`「打开协作面板」= `Command` 已注册（0.5.1 起） |
-| ③ | 标题栏有没有 **`collab` pill** | 0.5.2 新增、常驻，不需要先打开任何面板；无数据时就是 `collab`（不显示 `0`），有数据时 `collab N` |
-| ④ | **没有打开会话**时点 pill（或 `/collab` / `mod+shift+l`） | 弹「Collab GUI 已加载」toast = **GUI 确实加载了**，问题只是「当前没有会话可开面板」；什么都不弹 = 这个窗口没加载本插件的 GUI |
+| ③ | 标题栏有没有 **`collab` pill** | 0.5.2 新增、常驻；无数据时就是 `collab`（不显示 `0`），有数据时 `collab N` |
+| ④ | **没有打开会话**时点 pill（或 `/collab` / `mod+shift+l`） | 弹「Collab GUI 已加载」toast = **GUI 确实加载了**；什么都不弹 = 这个窗口没加载本插件的 GUI |
 
 判定：
 
-- **①、②、③ 都不成立** → 这个窗口的插件列表里没有本插件的 GUI 部件，先查 server 侧是否加载插件
-  （`opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"`，列表里应有 `collab` 且没有 `failed`），
-  再查桌面端到服务器的这条链路（这属于「尚未确认」的部分，本节不下结论）。
+- **本机装了插件但 ①②③ 都不成立** → 先确认安装目标是本机（`opencode plugin add` 在 Desktop 所在机器执行），
+  再确认装完**重启过** Desktop（GUI 宿主在 app 启动时读插件清单）；最后查
+  `opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"`（本机列表里应有 `collab` 且没有 `failed`）。
+- **远端窗口没有 collab** → 预期行为（见上）。用 `@<server.id>` 与 toast 里的 `server=` 确认数据源，
+  而不是找 GUI 开关。
 - **能看到 ③ 的 pill，但点它没反应、也没有 toast** → 注册成功但点击路径没被派发，记录 app 版本与
   platform（toast 里本来就有），作为上游问题另提。
-- **④ 弹了 toast** → 本插件 GUI 端到端可用；面板打不开只可能是「当前没有路由会话」。此时进入任意会话，
-  pill 的点击就会变成 `layout.open("collab:main", session)`。
+- **④ 弹了 toast** → 本插件 GUI 端到端可用；进入任意会话，pill 的点击就会变成
+  `layout.open("collab:main", session)`。
 
 toast 的文案是 `ctx.t('probe.title')` + `ctx.t('probe.description')`，`variant:'success'`，例如
-`插件 v0.5.2 · id=collab · panel=collab:main · app=2.5.0(desktop)`——插件版本、面板 key、app 版本与
-platform 都在里面，排查时直接抄这一行即可（`test/gui-entry.mjs` 断言这三处版本号一致）。
+`插件 v0.5.3 · id=collab · panel=collab:main · app=2.5.0(desktop) · server=this computer`——插件版本、
+面板 key、app 版本、platform 与**数据源服务器**都在里面（无路由会话时数据源就是本机 sidecar，所以是
+`this computer`；面板顶部的 `@<server.id>` 显示远端）。排查时直接抄这一行即可
+（`test/gui-entry.mjs` 断言版本号与 `server=`）。
 
-上游 issue 与本版解耦：本版只提供探针，不改桌面客户端，也不做远端 GUI 兼容层。
+#### 11.11.5 数据源跟随会话服务器（0.5.3）
+
+**背景**：`ctx.client` 是「运行本插件的那台服务器」的 client——把插件装到本机后，它就是**本机 sidecar**。
+远端会话的租约/队列在远端服务器的插件里，用 `ctx.client` 读到的是空数据（看起来像「远端没有协作活动」）。
+
+**做法**：每次请求前解析数据源，而不是在 store 构造时固定 client。
+
+| 项 | 规则 |
+| --- | --- |
+| 数据源 | `ctx.sessions.current()?.server?.client ?? ctx.client`。`ServerRef.client` 由 app 鉴权（当前窗口就在该 server 的页签/会话上），**不自建 token**；`server` 缺失（老宿主、测试宿主）时回退 `ctx.client` |
+| 轮询 key | `${server.id}\n${session.id}`（无 server 时 `local\n<sid>`，无会话时 `local\n`）。切换服务器或会话 → key 变 → 停旧 timer、立即以新源请求一次 |
+| 迟到回包 | 请求前记下 `source.key`，回包时再算一次；**不一致就丢弃**（不落库、不写 error）。`finally` 里若 key 已变则补排一次（与 0.5.2 的 R-7 同思路，只是从「会话」扩到「服务器+会话」） |
+| 切换即清屏 | key 变化时**先**把 `data` 清空（`loading`），再发新请求——避免用上一台服务器的数字渲染新会话；即使此刻有请求在飞也照样清（`adopt()` 在 single-flight 守卫之前） |
+| 只读 | 仍然只有 `layout.open` / `toast.show`；没有新增 RPC 方法、没有写路径 |
+| 不聚合 | 一次只显示**当前路由会话所属服务器**的一份快照；不做跨服务器合并/缓存历史 |
+
+验证（`test/gui-entry.mjs`，断言均可变异验证）：
+
+- 远端会话 → 打到 `server.client`，`session` 是该远端会话 id，`ctx.client` **零**调用；
+- 无 `server` → 回退 `ctx.client`；
+- A→B 跨服务器切换 → 立即用 B 的 client；pill 数字从 A 的快照变成 B 的（不串台）；
+- A 慢回包在切到 B 之后到达 → **丢弃**：中途读到的是「无数据」而不是 A 的数字，最终是 B 的数字，且两个 client 各只被调用一次；
+- 无会话点 pill → toast 含 `server=this computer` 与版本，0 次 `layout.open`。
+
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

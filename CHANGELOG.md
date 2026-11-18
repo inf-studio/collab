@@ -3,6 +3,54 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.3] - 2026-11-19
+
+> 一件事：**GUI 的数据源从「本机 sidecar」改成「当前会话所属服务器」**。桌面端 2.3.x 的 GUI 宿主只跟踪
+> 本机 sidecar（`out/main/host-*.js`：本机 URL 由 `D = () => pe()` 给出，`subscribe-credentials` 用它；
+> `ie(serverId)` 只有 `id === 'sidecar'` 分支返回凭据；`plugin.list()` → `plugin.gui({id})` 取 bundle），
+> 所以装在远端的插件其 GUI **永远不会被窗口加载**——可行路径是装在本机，GUI 再按会话所属服务器读远端数据。
+> 仍然只读，不改桌面端、不伪造左侧栏、不请求新权限、不新增依赖。
+
+### Fixed
+
+- **R1 数据源跟随会话服务器（`src/gui.tsx`）**：`createSnapshotStore.load` 不再固定用 `ctx.client`，
+  每次请求前解析 `ctx.sessions.current()?.server?.client ?? ctx.client`。远端会话 → 远端服务器的
+  `collab.state.snapshot`（`session` 参数仍是该远端会话 id）；无 `server`（老宿主 / 测试宿主）→ 回退
+  `ctx.client`。`ServerRef.client` 已由 app 鉴权，不自建 token、不新增 RPC 方法。
+- **R2 轮询按「服务器+会话」重建**：`createKeyed` 的 key 从 `session.id` 改为
+  `${server.id}\n${session.id}`（无 server 时 `local\n<sid>`，无会话 `local\n`）。key 变化时先清空
+  `data`（`adopt()`，在 single-flight 守卫**之前**执行）再发新请求——避免用上一台服务器的数字渲染新会话；
+  请求前后比对 `source.key`，**不一致的回包直接丢弃**（不落库、不写 error），`finally` 里补排一次。
+  0.5.2 的 `inFlight` / 可见性显式 start/stop 不变。
+- **R3 探针标明身份**：`probe.description` 追加 `server=<server.id|this computer>`
+  （`server.local === true` 或无 server 视为本机）；面板顶部在远端时显示 `@<server.id>`（本机不显示）。
+  标题栏 pill 的 label 仍是 `collab` / `collab N`（不把服务器名塞进窄 pill）。
+
+### Changed
+
+- `state.source = { server?, session? }`：记录「屏上这份数据属于哪台服务器/哪个会话」，供面板标源。
+- 版本 `0.5.3`：`package.json` 与 `src/constants.ts` 的 `PLUGIN_VERSION` 同步；`dist/*` 随构建更新。
+- 文档：README 新增「Desktop 如何让它出现（必须装在本机）」并重写排查结论；`docs/collab.md`
+  §11.11.4（宿主只加载本机 sidecar，附源码位置描述）+ 新增 §11.11.5（数据源与迟到回包规则）；
+  `skills/collab/SKILL.md` 一句。
+
+### Tests
+
+- `test/gui-entry.mjs`（39 → 47 条）：harness 把 `ctx.client` 与每个 `session.server.client` 做成
+  **各自记录 rpc 调用**的假 client，会话可带 `ServerRef` 形状的 `server` 并可在用例中切换。新增 8 条
+  断言：远端会话打到 `server.client` 且 `session` 为远端 id（`ctx.client` 零调用）、无 `server` 回退
+  `ctx.client`、A→B 跨服务器切换立即用 B 的 client、旧服务器的数字在 B 的请求在飞时就已消失、
+  A 的慢回包在切到 B 之后被丢弃（中途读到「无数据」而不是 A 的数字，最终是 B 的数字，两个 client 各一次）、
+  toast 含 `server=this computer` 与版本。
+- `test/gui-panel.mjs`（新，5 条）：**真渲染** `Panel.render` 的最小 DOM 探针（复核方提供，已收进仓库）。
+  覆盖 `gui-entry.mjs` 无法断言的渲染面：远端会话面板显示 `@<server.id>`（含 title）、本机 `@sidecar` 不显示、
+  无 `server` 不显示；以及 **A 服务器的迟到失败回包不会把「server 不可达」横幅画到 B 上**。
+- 变异验证（原始输出见任务 `research/impl-notes.md`）：把 `server?.client` 改回 `ctx.client` → 7 条失败；
+  去掉回包前的 `source.key` 比对 → 迟到回包那条失败（中途读到 `collab 9`）；去掉 `adopt()` 的清屏 →
+  「切走即清」那条失败（`collab 2 → collab 2`）；**去掉 catch 分支的 key 比对 → `gui-panel` 的 PN4 失败**
+  （渲染出 `@srv-a-bad` + `server unreachable` + `srv-a-bad exploded`，证明该断言真的覆盖 catch 路径）。
+- 既有 `638 + 12 + 35 + 29` 全绿（现为 **638 + 12 + 35 + 29 + 47 + 5**）。
+
 ## [0.5.2] - 2026-11-18
 
 > 两件事，都在 `src/gui.tsx`，都**只读**：① 修 R-7——切换会话的瞬间若恰有一次快照请求在飞，那次「立即

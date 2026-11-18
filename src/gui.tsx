@@ -24,6 +24,15 @@
  *     the plugin, version, panel key and app/platform. That is the one piece of
  *     evidence a window can give that the GUI actually loaded — see README
  *     "Desktop 排查".
+ *   - **Read the session's server, not the window's** (0.5.3): the GUI host only
+ *     tracks the app's own sidecar, so a plugin installed *on a remote server*
+ *     never gets its window half loaded (see docs/collab.md §11.11.x). The
+ *     supported setup is "install on this computer": the window loads the GUI,
+ *     and every request goes to the client of the **server the routed session
+ *     belongs to** (`ctx.sessions.current()?.server?.client`), falling back to
+ *     `ctx.client` when a session carries no server. Remote rows therefore come
+ *     from the remote server, local rows from the local one — one source at a
+ *     time, never mixed.
  */
 import { For, Show, createMemo, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
@@ -51,13 +60,16 @@ const POLL_MS = 2000;
 const PANEL_TAB = 'main';
 
 /**
- * 0.5.2: the same version as `PLUGIN_VERSION` in `src/constants.ts` (and
+ * 0.5.3: the same version as `PLUGIN_VERSION` in `src/constants.ts` (and
  * `package.json`), restated rather than imported — `constants.ts` reads
  * `node:os` / `node:path` when it loads, and this bundle runs inside a window,
  * where neither exists. It appears in exactly one place (the probe toast's
  * description); `test/gui-entry.mjs` asserts all three agree.
  */
-const PLUGIN_VERSION = '0.5.2';
+const PLUGIN_VERSION = '0.5.3';
+
+/** What the probe calls the app's own server: there is no `ServerRef.id` to show. */
+const LOCAL_SERVER = 'this computer';
 
 /* ------------------------------------------------------------------ formatting */
 
@@ -109,12 +121,46 @@ interface SnapshotState {
   data?: Snapshot;
   error?: string;
   loading: boolean;
+  /**
+   * 0.5.3 (R3): which server/session the numbers in `data` belong to. The panel
+   * names it (when it is not this computer); it is also the record that the
+   * rows on screen were not carried over from another server.
+   */
+  source?: { server?: string; session?: string };
 }
 
 interface SnapshotStore {
   readonly state: SnapshotState;
   load(): Promise<void>;
   dispose(): void;
+}
+
+/**
+ * 0.5.3 (R1): where a snapshot must come from — **the routed session's server**.
+ *
+ * `ctx.client` is the client of the server that runs this plugin, i.e. the
+ * desktop app's own sidecar. A session routed from another server (an http
+ * connection, or a server another plugin contributes) has its own already
+ * authenticated `ServerRef.client`; the window is on that server's tab, so the
+ * credentials are the app's, not ours. Without a `server` (a window that predates
+ * the field, a test host) the fallback keeps the old behaviour.
+ *
+ * `key` names the source, so a reply can be matched to the request that asked for
+ * it: `${server id}\n${session id}`, `local\n<session>` when a session carries no
+ * server, and `local\n` with no routed session.
+ */
+function sourceFor(ctx: Context): { key: string; client: Context['client']; server?: string; session?: string } {
+  const session = ctx.sessions.current();
+  const server = session?.server;
+  return {
+    key: `${server?.id ?? 'local'}\n${session?.id ?? ''}`,
+    // Read `server.client` / `ctx.client` here, not when the store is built: a
+    // restarted or re-authenticated server gets a new controller under the same
+    // id, and the app replays that into the ref.
+    client: server?.client ?? ctx.client,
+    server: server?.id,
+    session: session?.id
+  };
 }
 
 /**
@@ -125,46 +171,70 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
   const [state, setState] = createStore<SnapshotState>({ at: 0, loading: true });
   let inFlight = false;
   let disposed = false;
+  /** The source the rows on screen belong to; '' before the first request. */
+  let shown = '';
 
-  /** The routed session, as the queue in a snapshot is keyed on it. */
-  const currentSessionID = (): string => ctx.sessions.current()?.id ?? '';
+  /**
+   * 0.5.3 (R2): switching server or session means the rows on screen belong to a
+   * source that is no longer routed. Drop them **before** the new request, so a
+   * slow answer from the previous server is never rendered as if it were the new
+   * one's. Runs even while a request is in flight (the poll re-run may be
+   * queued), which is why it is separate from `load`'s single-flight guard.
+   */
+  const adopt = (source: { key: string; server?: string; session?: string }): void => {
+    if (source.key === shown) return;
+    shown = source.key;
+    setState({
+      at: 0,
+      data: undefined,
+      error: undefined,
+      loading: true,
+      source: { server: source.server, session: source.session }
+    });
+  };
 
   const load = async (): Promise<void> => {
-    if (disposed || inFlight) return;
+    if (disposed) return;
+    // Resolve the source on every call: the routed session (and with it the
+    // server) changes while this window stays open.
+    const source = sourceFor(ctx);
+    adopt(source);
+    if (inFlight) return;
     inFlight = true;
-    // 0.5.2 (R-7): remember *which* session this request is for. `inFlight`
-    // still drops concurrent calls (one request per tick, never a pile-up), but
-    // a call dropped only because a request was in flight can now be honoured:
-    // if the routed session changed while the request was out, the reply that
-    // lands belongs to the old session and the new one's `queue` would be
-    // another tick (2 s) away.
-    const wanted = currentSessionID();
     try {
-      // Read `ctx.client` here, not when the store is built: the desktop app
-      // replaces it when its server restarts.
-      //
       // 0.5.1: name the routed session. `queue` is the *requester's* owner-queue
       // ("what did I ask of a protected session?"), and the server returns an
       // empty list without a `session` — i.e. it would look like "0" forever.
       // It narrows only `queue`; sessions / leases / hand-offs are unchanged,
       // and it is the same single call, not a second stream.
-      const reply = await ctx.client.rpc(CollabState).snapshot(wanted ? { session: wanted } : {});
+      const reply = await source.client.rpc(CollabState).snapshot(source.session ? { session: source.session } : {});
       if (disposed) return;
+      // 0.5.3 (R2): a reply that lands after the window switched servers or
+      // sessions answers a source that is no longer routed. Drop it; the
+      // `finally` below re-runs for the source that is routed now.
+      if (sourceFor(ctx).key !== source.key) return;
       const next = reply as Snapshot | undefined;
       if (!next || typeof next !== 'object') throw new Error('empty snapshot');
-      setState({ at: Number(next.at) || Date.now(), data: next, error: undefined, loading: false });
+      setState({
+        at: Number(next.at) || Date.now(),
+        data: next,
+        error: undefined,
+        loading: false,
+        source: { server: source.server, session: source.session }
+      });
     } catch (error) {
       if (disposed) return;
+      if (sourceFor(ctx).key !== source.key) return;
       // Keep the last snapshot: a blip shows the stale rows *and* the banner,
       // which is more honest than replacing data with an error screen.
-      setState({ error: describe(error), loading: false });
+      setState({ error: describe(error), loading: false, source: { server: source.server, session: source.session } });
     } finally {
       inFlight = false;
-      // One re-run, not a loop: the next `load` records its own `wanted`, so a
-      // second change queues a second run and an unchanged session queues none.
+      // One re-run, not a loop: the next `load` records its own source, so a
+      // second change queues a second run and an unchanged one queues none.
       // A hidden window queues nothing (the poller is not running while the
       // window is hidden) and a disposed store is silent.
-      if (!disposed && !pageHidden() && currentSessionID() !== wanted) void load();
+      if (!disposed && !pageHidden() && sourceFor(ctx).key !== source.key) void load();
     }
   };
 
@@ -251,6 +321,7 @@ const CSS = `
 .collab-error{display:flex;flex-direction:column;gap:2px;border-radius:6px;padding:6px 8px;color:#f85149;background:color-mix(in srgb, #f85149 10%, transparent);}
 .collab-error-title{font-weight:600;}
 .collab-empty{opacity:.6;padding:2px 0;}
+.collab-source{flex:none;align-self:flex-start;border-radius:4px;padding:0 6px;background:color-mix(in srgb, currentColor 8%, transparent);opacity:.75;}
 .collab-footer{font-size:11px;opacity:.5;border-top:1px solid color-mix(in srgb, currentColor 12%, transparent);padding-top:8px;}
 .collab-counts{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1;padding:0 4px;margin:0;border-radius:4px;opacity:.6;white-space:nowrap;cursor:pointer;}
 .collab-counts:hover{opacity:.9;background:color-mix(in srgb, currentColor 10%, transparent);}
@@ -349,8 +420,21 @@ function PanelView(props: { session: { id: string } }) {
   const store = storeFor(ctx);
   const groups = createMemo(() => (store.state.data ? groupByWorkspace(store.state.data) : []));
 
+  // 0.5.3 (R3): name the server the rows came from — remote only. The app's own
+  // server is the default and would be noise (`@sidecar` on every window).
+  const sourceLabel = (): string => {
+    const server = ctx.sessions.current()?.server;
+    if (server?.local === true || !store.state.source?.server) return '';
+    return `@${store.state.source.server}`;
+  };
+
   return (
     <div class="collab-panel">
+      <Show when={sourceLabel()}>
+        <div class="collab-source collab-mono collab-muted" title={ctx.t('panel.source')}>
+          {sourceLabel()}
+        </div>
+      </Show>
       <Show when={store.state.error}>
         <div class="collab-error">
           <span class="collab-error-title">{ctx.t('panel.unreachable')}</span>
@@ -452,7 +536,8 @@ export default Plugin.define({
       'header.unreachable': 'collab: n/a',
       'titlebar.title': 'Collab status — open the panel',
       'probe.title': 'Collab GUI loaded',
-      'probe.description': 'plugin v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}})'
+      'probe.description': 'plugin v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',
+      'panel.source': 'Rows come from this server'
     },
     zh: {
       'panel.title': '协作',
@@ -484,7 +569,8 @@ export default Plugin.define({
       'header.unreachable': 'collab: n/a',
       'titlebar.title': '协作状态 — 打开面板',
       'probe.title': 'Collab GUI 已加载',
-      'probe.description': '插件 v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}})'
+      'probe.description': '插件 v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',
+      'panel.source': '数据来自该服务器'
     }
   },
 
@@ -501,6 +587,10 @@ export default Plugin.define({
     // "nothing to open yet"); no toast means the GUI never loaded. Read-only —
     // it shows a toast and nothing else (R4).
     const probeToast = (): void => {
+      // 0.5.3 (R3): name the server the numbers would come from. With no routed
+      // session the source is the window's own client (the app's sidecar), so
+      // the honest answer is "this computer", not an invented id.
+      const server = ctx.sessions.current()?.server;
       ctx.toast.show({
         title: ctx.t('probe.title'),
         description: ctx.t('probe.description', {
@@ -508,7 +598,8 @@ export default Plugin.define({
           id: ctx.id,
           panel: `${ctx.id}:${PANEL_TAB}`,
           app: ctx.app.version,
-          platform: ctx.app.platform
+          platform: ctx.app.platform,
+          server: !server || server.local ? LOCAL_SERVER : server.id
         }),
         variant: 'success'
       });
@@ -531,13 +622,14 @@ export default Plugin.define({
       timer = undefined;
     };
 
-    // Keyed on the routed session only: `queue` is per-requester, so switching
-    // sessions must reload at once instead of showing the previous session's
-    // queue until the next tick.
+    // 0.5.3 (R2): keyed on the **source**, not just the session id: a session of
+    // another server is another set of rows, and `queue` is per-requester, so a
+    // switch must reload at once instead of showing another server's numbers
+    // until the next tick.
     createKeyed(
       () => {
         if (ctx.sessions.list().length === 0) return false;
-        return ctx.sessions.current()?.id ?? '';
+        return sourceFor(ctx).key;
       },
       () => {
         stopPolling();

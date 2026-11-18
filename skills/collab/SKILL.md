@@ -50,8 +50,13 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 >
 > 0.5.2 探针：Desktop 标题栏常驻一个 **`collab` pill**（无数据时就是 `collab`，有数据 `collab N`）。
 > 有会话时点它开面板；**没有会话时点它会弹「Collab GUI 已加载」toast**——看到 toast 就说明这个窗口确实
-> 加载了本插件的 GUI（面板打不开只是当前没有路由会话），看不到就说明没加载。插件行没有 GUI 开关时用这个
-> 自证，**不要据此断定平台缺陷**（远端是否加载 GUI 尚未确认，见 `docs/collab.md` §11.11.4）。
+> 加载了本插件的 GUI（面板打不开只是当前没有路由会话），看不到就说明没加载。
+>
+> 0.5.3 数据源：GUI 的 snapshot 走**当前会话所属服务器**（`ctx.sessions.current()?.server?.client`，
+> 缺失回退 `ctx.client`），所以打开远端会话时看到的是**远端**的租约/队列；面板顶部 `@<server.id>` 与
+> toast 的 `server=` 标明数据源。桌面端 GUI 宿主**只加载本机 sidecar**（0.5.3 已用桌面端源码确认），
+> 因此**插件要装在本机**（`opencode plugin add @inf-studio/collab@0.5.3` + 重启 app）；本机没装时远端
+> 窗口仍然「无 GUI」，这是平台行为，**不要据此断定平台缺陷**（见 `docs/collab.md` §11.11.4–§11.11.5）。
 
 ## 一点五、送达与闭环后追加（0.1.6）
 
