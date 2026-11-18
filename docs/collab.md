@@ -248,6 +248,10 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 验证：`opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"` → 无 `failed`，且含 `collab`。
 
+> ⚠ **版本与重载**：npm 包插件**不会**把新版本热重载到已运行会话（只有 `.opencode/plugins/*.js` 这类本地文件插件会）。
+> 升级 `@inf-studio/collab` 后需**重启 OpenCode 或新开会话**；`opencode plugin list` 显示的是*已安装*版本，
+> 不等于当前会话的*运行时*版本。诊断方法：`collab_report` 预览会打印「版本: x.y.z」——那是运行时真实版本。
+
 ### 11.2 五个工具（+ 协作链路五个 + 缺陷上报一个）
 
 | 工具 | 入参 | 说明 |
@@ -309,8 +313,14 @@ opencode plugin add @inf-studio/collab@0.1.0
 护栏是 **fail-closed**，`collab_reply` 同样受限：受保护线（或其后代）**发起的**请求，其回执默认也无法投回
 该线（错误文案会注明「回执同样适用该护栏」）。
 
-唯一例外是**限界 reply（bounded reply）**：`kind:"reply"` 且以下三条**同时**满足时放行投递（仍强制 `queue`，
+唯一例外是**限界 reply（bounded reply）**：以下三条**同时**满足时放行投递（仍强制 `queue`，
 返回里注明「回执按白名单放行」）：
+
+- 形态一：`kind:"reply"`；
+- 形态二（**遗留兼容，0.1.4+**）：`kind` 缺省，且正文含 `[handoff]` 与命中的 `bid`（0.1.1 的旧文案就是这种写法）；
+  显式 `kind:"request"` / `"note"` / `"steer"` **不**走兼容。
+
+三条判据：
 
 1. `target` 就是该 `bid` 记录的**发起方**（`record.from.sid`）；
 2. 发送者就是该单的**领取人**（`record.claim.by`）；
@@ -643,5 +653,10 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
     同一窗口（2h）内不再重复读对端历史。`claim.at` 缺失（0）的记录**一律不读**（否则 `since=0` 会把很久以前的回答当结论）。
     承接方 protected 不读；`actor !== from.sid` 不读；`done` / `blocked` / `expired` 不处理。
     `collab_list` 对这类单标 `静默=Nh 可自动提取`。
+
+13. **闭环后不再放行回执（刻意设计）**：`done` / `blocked` / `expired` 的单，限界 reply 白名单**关闭**——
+    任何会话都不得再向受保护发起方投递回执（`collab_reply` 与 `collab_send { kind:"reply", bid }` 均拒）。
+    闭环后的**追加结论 / 复查回写**请写进提案文件（单一真源），由受保护发起方下次读取；
+    护栏按**目标**判定，其它会话「中转」同样不可达（不存在绕过路径）。
     注意：受保护发起方没有 `context` 注入，收口发生在其下一次 `collab_broadcast` / `collab_handoff` 刷新时。
 

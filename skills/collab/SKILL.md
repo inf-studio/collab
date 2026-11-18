@@ -93,7 +93,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | 会话建出来没反应 | 创建时缺 `location.directory` → 落在 `/root`，插件不加载 | 建会话必须带 `{"location":{"directory":"<abs>"}}` |
 | 发布 403 `installation does not exist` | **npm scope ≠ 仓库 owner** | scope 必须与 owner 登录名逐字一致（`inf-studio` 不是 `info-studio`） |
 | `Duplicate plugin ID: collab` | 项目内 `.opencode/plugins/collab.js` 与全局包同时加载 | 二选一：删本地副本或移除包 |
-| 改了插件不生效 | 本地文件会热重载；**npm 包插件有缓存**，可能需重启 | `opencode plugin list` + `/api/plugin` 确认 |
+| 改了插件不生效 | 本地文件会热重载；**npm 包插件版本不会热重载到已运行会话** | 重启 OpenCode 或新开会话；用 `collab_report` 预览里的「版本」确认运行时版本 |
 | `collab_wait` 立刻报「没有 thread」 | thread 存储按 `location` 隔离 | 跨仓改用消息回执，不用 thread |
 | 交接卡在 `claimed` | 对端只分析、没调用工具 | 租约到期自动提取结论；或 `collab_promote` 后重发 |
 | 广播重复拉起会话 | 重复广播且 `bid` 不同（提案内容/mtime 变了） | 改提案后重新广播是预期行为；不要为同一内容反复广播 |

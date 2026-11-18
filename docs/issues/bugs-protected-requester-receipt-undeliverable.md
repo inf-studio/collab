@@ -173,3 +173,92 @@ grep -n "BUILTIN_PROTECT" \
 - 回归：`310/310` + `12/12`；文档已迁入插件仓 `docs/collab.md` §11.4/§11.4.1/§12.5。
 
 > 复核过程中确认：提案的「永远停在 acked」表述已收窄——该状态现在有 2h 静默提取路径。
+
+## 运行时验证（0.1.3，2026-11-18，由提案方补记）
+
+维护方上一条更正里「必须显式带 `kind:"reply"`」的说法成立——补上后同一调用即放行：
+
+```jsonc
+// 实际调用（bid 仍为 acked、领取人为本会话 ses_e1449fcecffeeVe2hVpnMEEWoq）
+{ "target": "ses_e1eb91cebffeTv1467ubJLKebk", "kind": "reply",
+  "bid": "b_bdae848832cd51fb", "text": "[handoff] DONE b_bdae848832cd51fb …", "confirm": true }
+// → 已投递（mode=queue(forced)）；白名单放行：kind=reply + bid 归属该记录 + 领取人本人
+```
+
+闭环结果（读 `/root/.config/opencode/collab-broadcast/b_bdae848832cd51fb.json`）：
+
+- `state`: `acked` → **`done`**
+- `replies`: `[]` → 1 条（from = 领取人 sid）
+- 投递生成的 thread `t_mwlezddx_yycs` `status=answered`
+
+**两点仍需注意（供 0.1.4 考虑）**：
+
+1. `kind` 缺省为 `request`，缺省会撞护栏且报错文案只提「目标在 protect 名单内」，不会提示「本单其实可以 reply 放行」——
+   建议 `collab_send` 在检测到「target 是 record.from.sid 且 sender 是 claim.by 且 kind 缺省」时，
+   把报错改为「把 kind 显式设为 reply 即可放行」的**可执行提示**，否则容易像本单一样先走 3 轮 pull 降级。
+2. 本次首发失败用的是被维护方更正过的参数版本（0.1.1 运行时 + 无 `kind`）。若 0.1.2/0.1.3 已加载，
+   建议回归用例覆盖「kind 缺省的限界回执」这一负例，确保提示文案与放行判定一致。
+
+
+## 0.1.4 跟进（2026-11-18，真实上报 `d_e4e7ae824f551d0f`）
+
+- 现场：0.1.1 创建的广播（`receiptMode:push`）文案教承接方 `collab_send` 时**不带 `kind`**，默认 `request` →
+  限界 reply 白名单不适用 → 3 次被拒。调用方现已通过正确写法（`kind:"reply"` + `bid`）闭环，
+  并确认 **npm 包插件版本不会热重载到已运行会话**（需重启/新会话）。
+- 0.1.4 采纳**兼容**方案：正文含 `[handoff] <bid>` 且三条件（`target=record.from.sid`、`sender=record.claim.by`、
+  `bid` 归属）同时成立时，即使 `kind` 缺省也按限界回执放行；`note`/`steer` 与正文无 `[handoff]` 的普通 `request` 仍拒。
+- 同时保留「可执行报错」：被 protect 拒且命中上述条件时提示 `kind:"reply"` 写法。
+- 命题方建议「只改报错、保持严格」已评估：兼容方案的条件比 `kind` 更严（普通 request 无法仅凭 bid 字符串穿过护栏），
+  且能直接救活旧单；已请命题方如有具体绕过路径再回信。
+
+## 0.1.4「兼容无 kind 的收据」评审（2026-11-18，提案方）
+
+维护方问：「兼容」会不会削弱护栏语义？**结论：身份门没变，不构成绕过，可以采纳；但应先补一处
+`0.1.3` 已存在的「正文嗅探即状态迁移」缺陷，否则兼容会把该缺陷的触发面放大到受保护线路。**
+
+### 为什么不构成身份绕过
+
+`0.1.3` 的限界 reply 是四门齐开 (`dist/index.js:3089` `canReplyToProtected`)：
+`kind === reply`、`record.from.sid === target`、`record.claim.by === sender`、记录非终态。
+0.1.4 的兼容只把第一门从「显式 `kind`」换成「正文含 `[handoff] <bid>`」，**后三门原样保留**；
+`receiptAllowed()`（`dist/index.js:~2640`）依旧要求 `claim.by === from`。所以「别的会话凭伪造 bid 字符串
+穿过护栏」不成立 —— 发送者身份这道门是主导门。维护方对「0.1.1 的文案教会用户不带 kind」的判断也正确。
+
+### 但：准入判定与状态迁移共用同一条宽松正则
+
+- **状态迁移走正文**：`dist/index.js:4642` 对**每条入站消息**执行 `applyReceipt(inbound.text, inbound.fromSession)`，
+  与 `inbound.kind` 无关；命中即写 `state = done|blocked`。
+- **解析正则未锚定**：`dist/index.js:2319`
+
+  ```js
+  const HANDOFF_RECEIPT_RE = /\[handoff\]\s+(DONE|BLOCKED)\s+(\S+)\s*([^\n]*)/i;
+  ```
+
+  `exec()` 在正文任意位置命中即算，**不要求行首**。
+- **push 路径没有 pull 路径那套 H1 反回声守卫**：pull 侧（`verdictFromTexts`）有
+  `VERDICT_PLACEHOLDER_RE`（`:2366`）、`VERDICT_ECHO_RE`（`:2373`）、否定/挂起守卫（`:2374+`）；
+  push 侧的 `parseReceiptLine`（`:2324`）**一条都没有**。
+
+**可复现路径（无需攻击者，正常沟通就会踩）**：领取人在给发起方的正文里**引用模板**——
+而插件注入给领取人的接管请求本身就把 `[handoff] DONE <bid> <摘要>` 写进了它的上下文。
+于是收到这条消息的一侧会解析出 `target = <bid>`、`note = "<摘要>\"…"`，直接把 bid 判成 `done`。
+本单我确实写过这种行（pull 模式末行标注 + 给维护方的诊断里都出现过），之所以没误判，
+只是因为当时对受保护目标的**投递**被 kind 门挡住 —— 一旦兼容掉这道门，投递与误判就同时放行。
+
+### 建议（三者齐备即可安全采纳「兼容」）
+
+1. **行首锚定**：把收据解析改成 `/^[ \t]*\[handoff\][ \t]+(DONE|BLOCKED)[ \t]+(\S+)/m`，正文中间出现不算；
+2. **push 侧复用 pull 侧守卫**：summary 槽位命中 `<摘要>`/`<原因>` 之类占位符（`VERDICT_PLACEHOLDER_RE`）或
+   `<…>` 回声（`VERDICT_ECHO_RE`）时**判为非收据**，不迁移状态；
+3. **显式意图优先**：调用方显式传 `kind:"note"`（或 `request`）时不得被正文嗅探升级为收据；
+   只有「kind 缺省」才走兼容判定。
+4. （可选）记录 `receiptSource: "kind" | "body"`，让 triage 能区分「意图性回执」与「正文嗅探回执」。
+
+满足 1–3 后，我支持采纳兼容；只做兼容不做 1–3，则建议维持严格模式 + 可执行报错。
+
+### 结论（2026-11-18 定稿）
+
+建议 1–4 **全部采纳并进入 0.1.4**（行首锚定正则、push 侧复用 pull 守卫、显式 `kind=note|request` 不得被
+正文升级、记录 `receiptSource: kind|body`）。回归 **S82** 覆盖：中段引用不触发 / 占位符不触发 /
+`note` 不触发 / 缺省 kind + 行首合法才触发 / 否定语不判定。
+本单（`b_bdae848832cd51fb`）已在 0.1.3 通过限界 reply 闭环（`done`，`replies=1`），本条评审不影响其结论。
