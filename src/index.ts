@@ -4,6 +4,7 @@ import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
 import { allBroadcasts } from './core/claim.ts';
+import { archiveSession, shouldArchive } from './core/archive.ts';
 import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
 import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
@@ -30,7 +31,7 @@ import type { CollabContext } from './types.ts';
  * `@inf-studio/collab` — the zero-dependency port of
  * `.opencode/plugins/collab.js`: cross-session collaboration (threads / inbox)
  * plus the cross-workspace hand-off chain (broadcast → score → atomic claim →
- * receipt), exposed as the sixteen native `collab_*` tools and one `context` hook.
+ * receipt), exposed as the seventeen native `collab_*` tools and one `context` hook.
  *
  * The host contract is the plugin `ctx` (in-process capability), never an HTTP
  * client: a plugin that reached the server through a port/token would break as
@@ -172,6 +173,12 @@ const plugin: Plugin.Plugin = {
         `protect=${initial.protect.length} autoDeliver=${initial.autoDeliver} maxInject=${initial.maxInject} ` +
         `readonly=${initial.readonlyAgents.join(',')} allowWrite=${initial.allowWrite}`
     );
+    // 0.5.0: the spawned-session archive is a background behaviour; say what it
+    // will do at startup so an operator does not have to read the docs.
+    log(
+      `archiveSpawned=${initial.archiveSpawned} archiveGraceMs=${initial.archiveGraceMs}` +
+        `${initial.archiveSpawned ? '' : ' (自动归档已关闭，手动 collab_archive 仍可用)'}`
+    );
     // R8④: the report entry point is visible without reading any docs — one
     // line in the plugin's own setup log (stderr), next to the other diagnostics.
     log(
@@ -228,5 +235,9 @@ export const __internals = {
   // Sidebar contract (0.3.0) — the read-only snapshot assembly, unit-testable
   // with injected readers (no host, no `~/.config` directory).
   CollabState,
-  buildSnapshot
+  buildSnapshot,
+  // Spawned-session archive (0.5.0) — the eight-rule gate and the one writer,
+  // unit-testable with an injected gate (no host).
+  shouldArchive,
+  archiveSession
 };

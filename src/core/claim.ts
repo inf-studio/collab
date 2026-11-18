@@ -339,6 +339,26 @@ export function mergeDelivery(bid: string, patch: JsonObject): BroadcastRecord |
 }
 
 /**
+ * 0.5.0: merge the archive stamp into the **current** record.
+ *
+ * Same read-merge-write rule as `mergeDelivery`: the `session.update` call is an
+ * `await`, and in that window the requester's refresh may write `state` /
+ * `receipt` (an auto receipt) or the session may be restored by hand. Writing
+ * back the pre-await snapshot would undo that, so only `archivedAt` is touched.
+ *
+ * `null` clears the stamp (restore). A record that disappeared (7-day prune) is
+ * not resurrected — the merge is a no-op.
+ */
+export function mergeArchive(bid: string, archivedAt: number | null): BroadcastRecord | undefined {
+  const fresh = readBroadcast(bid);
+  if (!fresh) return undefined;
+  const next: BroadcastRecord = { ...fresh };
+  if (archivedAt === null) delete next.archivedAt;
+  else next.archivedAt = archivedAt;
+  return writeBroadcast(next);
+}
+
+/**
  * Persist a record that `refreshBroadcast` mutated (lease expiry, attempts,
  * `expired`), so the next reader — a different location — sees the same state.
  */export function persistRefresh(before: BroadcastRecord, after: BroadcastRecord | undefined): BroadcastRecord;

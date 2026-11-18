@@ -268,6 +268,30 @@ const collabConfigPath = join(dir, 'collab.json');
 // module load, exactly like `COLLAB_BROADCAST_DIR`.
 process.env.COLLAB_CONFIG = collabConfigPath;
 
+// 0.5.0 (S94): the archive HTTP fallback. `constants.ts` reads
+// `COLLAB_SERVER_URL` **once at module load**, so the mock server is started
+// before the import. It only sees traffic from the S94 case that removes
+// `ctx.session.update` (the normal host path never reaches HTTP), and it stays
+// harmless to every other test.
+const archiveHttp = [];
+const archiveHttpServer = createServer((request, response) => {
+  const chunks = [];
+  request.on('data', chunk => chunks.push(chunk));
+  request.on('end', () => {
+    archiveHttp.push({
+      method: request.method,
+      url: request.url,
+      auth: request.headers.authorization,
+      body: Buffer.concat(chunks).toString('utf8')
+    });
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end('{}');
+  });
+});
+await new Promise(done => archiveHttpServer.listen(0, '127.0.0.1', done));
+process.env.COLLAB_SERVER_URL = `http://127.0.0.1:${archiveHttpServer.address().port}`;
+process.env.COLLAB_SERVER_TOKEN = 's94-token';
+
 // ------------------------------------------------------------ fake workspaces
 const wsRoot = join(dir, 'ws');
 const ws = name => {
@@ -546,6 +570,9 @@ const created = [];
 const patches = [];
 const patchFailures = new Set();
 let patchFailAll = false;
+// 0.5.0 (S94): every `update({ archived })` — the archive write path, counted so
+// idempotency ("one PATCH per record") is observable.
+const archivedPatches = [];
 // `collab_promote` goes through `ctx.session.switchAgent` (`POST …/agent`).
 const agentSwitches = [];
 const agentFailures = new Set();
@@ -621,8 +648,10 @@ const ctx = {
         patches.push({ sessionID, permissions: structuredClone(input.permissions) });
       }
       if (input.title !== undefined) sessions[sessionID].title = input.title;
-      if (input.archived !== undefined)
+      if (input.archived !== undefined) {
+        archivedPatches.push({ sessionID, archived: input.archived });
         sessions[sessionID].time = { ...sessions[sessionID].time, archived: input.archived ? Date.now() : 0 };
+      }
       if (input.metadata !== undefined) sessions[sessionID].metadata = structuredClone(input.metadata);
       return undefined;
     },
@@ -7426,6 +7455,365 @@ expect(
   /collab_request_owner/.test(s93FollowDesc) && /de-duplicated/.test(s93FollowDesc),
   s93FollowDesc.slice(0, 120)
 );
+
+// ================== S94 (0.5.0: archive — never delete — spawned sessions)
+// The owner's decision (prd R1–R8): a bootstrap (`claim.kind = "spawn"`) session
+// is *archived* once its hand-off is over, and restored with `restore:true`.
+//   - automatic: terminal bid + grace (default 10min) + idle + not protected +
+//     not referenced by an open hand-off + no unread owner-queue item + not
+//     already archived → exactly one `PATCH { archived:true }`, then
+//     `archivedAt` is written; every refusal above leaves both sides untouched;
+//   - the write: `ctx.session.update` first, HTTP fallback when the host has no
+//     `update`; a thrown update changes nothing and never breaks the caller;
+//   - manual `collab_archive { bid | session, restore?, confirm }`: preview,
+//     idempotent archive / restore, `[protected*]` refused, gates skipped;
+//   - `archiveSpawned:false` turns off only the automatic path;
+//   - `collab_list` marks `[archived]` for the session and the record.
+const WS_S94 = ws('s94');
+const S94_REQ = 'ses_s94req';
+const s94Session = (id, time = { updated: Date.now(), busy: 0 }) => {
+  sessions[id] = {
+    id,
+    agent: 'build',
+    title: `impl:${id}`,
+    time,
+    location: { directory: WS_S94 }
+  };
+  return id;
+};
+const S94_SPAWN = s94Session('ses_s94spawn');
+const S94_BUSY = s94Session('ses_s94busy', { updated: Date.now(), busy: Date.now(), idle: 0 });
+const S94_PROT = s94Session('ses_s94prot');
+const S94_REF = s94Session('ses_s94ref');
+const S94_QUEUE = s94Session('ses_s94queue');
+const S94_OFF = s94Session('ses_s94off');
+const S94_FAIL = s94Session('ses_s94fail');
+const S94_HTTP = s94Session('ses_s94http');
+const S94_MANUAL = s94Session('ses_s94manual', { updated: Date.now(), busy: Date.now(), idle: 0 });
+const S94_OPEN = s94Session('ses_s94open');
+const S94_YOUNG = s94Session('ses_s94young');
+sessions[S94_REQ] = {
+  id: S94_REQ,
+  agent: 'build',
+  title: 'S94 发起方',
+  time: { updated: Date.now(), busy: 0 },
+  location: { directory: WS_S94 }
+};
+await writeConfig({ protect: [S94_PROT], archiveGraceMs: 600_000 });
+const s94Old = () => Date.now() - 11 * 60_000;
+/** A spawned, terminal record whose spawned session is `by`. */
+const s94Record = (bid, by, over = {}) =>
+  writeRaw(bid, {
+    workspace: WS_S94,
+    state: 'done',
+    claim: { by, kind: 'spawn', token: 'k_s94', at: s94Old(), leaseMs: 300_000, spawner: S94_REQ },
+    from: { sid: S94_REQ, directory: WS_S94 },
+    receipt: { from: by, by, at: s94Old(), note: 'S94 已闭环' },
+    createdAt: s94Old(),
+    updatedAt: s94Old(),
+    ...over
+  });
+const s94Patched = sid => archivedPatches.filter(entry => entry.sessionID === sid);
+const s94Archived = (bid, sid) => Number(bcRead(bid).archivedAt) > 0 && Boolean(sessions[sid]?.time?.archived);
+
+// Eligible: spawn + done + 11min + idle + no reference + no queue.
+const s94Bid = 'b_aaaa0000000094a0';
+s94Record(s94Bid, S94_SPAWN);
+// R2 refusal fixtures (one record each).
+const s94BusyBid = 'b_aaaa0000000094a1';
+s94Record(s94BusyBid, S94_BUSY);
+const s94ProtBid = 'b_aaaa0000000094a2';
+s94Record(s94ProtBid, S94_PROT);
+const s94RefBid = 'b_aaaa0000000094a3';
+s94Record(s94RefBid, S94_REF);
+const s94RefOpenBid = 'b_aaaa0000000094a4';
+writeRaw(s94RefOpenBid, {
+  workspace: WS_S94,
+  state: 'open',
+  from: { sid: S94_REF, directory: WS_S94 },
+  createdAt: s94Old(),
+  updatedAt: s94Old()
+});
+const s94QueueBid = 'b_aaaa0000000094a5';
+s94Record(s94QueueBid, S94_QUEUE);
+// A real unread item (written directly: `collab_request_owner` only accepts a
+// protected target, but the gate must not depend on that refusal).
+mkdirSync(qdir(S94_QUEUE), { recursive: true });
+writeFileSync(
+  join(qdir(S94_QUEUE), 'q_s94_aaaa.json'),
+  JSON.stringify({
+    id: 'q_s94_aaaa',
+    target: S94_QUEUE,
+    from: S94_REQ,
+    at: Date.now(),
+    summary: 'S94 未读队列项',
+    issuePath: null,
+    bid: null,
+    revokedAt: null,
+    seenAt: null
+  })
+);
+// Not a spawn claim (a human/`accept` claim is never touched).
+const s94NonSpawnBid = 'b_aaaa0000000094a6';
+s94Record(s94NonSpawnBid, S94_MANUAL, {
+  claim: { by: S94_MANUAL, kind: 'accept', at: s94Old(), leaseMs: 300_000 }
+});
+// The spawned session's lease lapsed before anybody accepted, then a human took
+// the reopened hand-off: `refreshBroadcast` rewrites `claim.kind` to `accept`
+// and keeps the spawn trace in `expiredClaim` — the orphan is still ours.
+const S94_LAPSED = s94Session('ses_s94lapsed');
+const s94LapsedBid = 'b_aaaa0000000094aa';
+s94Record(s94LapsedBid, S94_MANUAL, {
+  claim: { by: S94_MANUAL, kind: 'accept', at: s94Old(), leaseMs: 300_000 },
+  expiredClaim: { by: S94_LAPSED, kind: 'spawn', at: s94Old(), spawner: S94_REQ, expiredAt: s94Old() }
+});
+// Not terminal.
+const s94OpenBid = 'b_aaaa0000000094a7';
+s94Record(s94OpenBid, S94_OPEN, { state: 'open' });
+// Terminal, but only 30s ago (grace not reached).
+const s94YoungBid = 'b_aaaa0000000094a8';
+s94Record(s94YoungBid, S94_YOUNG, { updatedAt: Date.now() - 30_000 });
+// The update itself throws: the automatic pass must log, not throw, not stamp.
+const s94FailBid = 'b_aaaa0000000094a9';
+s94Record(s94FailBid, S94_FAIL);
+patchFailures.add(S94_FAIL);
+
+// The one trigger (design §3): the requester's context refresh.
+// Stale classes are read before the pass; the pass itself is the chain refresh.
+await hooks.context(contextEvent(S94_REQ));
+const s94AfterPass = bcRead(s94Bid);
+out(
+  'S94 automatic archive (one pass)',
+  `archivedAt=${s94AfterPass.archivedAt ?? '-'} patches=${JSON.stringify(s94Patched(S94_SPAWN))} ` +
+    `state=${s94AfterPass.state} receipt=${s94AfterPass.receipt?.note ?? '-'}`
+);
+expect(
+  'S94 a terminal spawned session past the grace window is archived once',
+  s94Archived(s94Bid, S94_SPAWN) &&
+    s94Patched(S94_SPAWN).length === 1 &&
+    s94Patched(S94_SPAWN)[0].archived === true,
+  JSON.stringify(s94Patched(S94_SPAWN))
+);
+expect(
+  'S94 … archive is not delete: state / receipt are untouched',
+  s94AfterPass.state === 'done' && s94AfterPass.receipt?.note === 'S94 已闭环',
+  `${s94AfterPass.state} / ${s94AfterPass.receipt?.note ?? '-'}`
+);
+expect(
+  'S94 a non-spawn claim is never archived (user / accept sessions)',
+  !s94Patched(S94_MANUAL).length && !bcRead(s94NonSpawnBid).archivedAt,
+  JSON.stringify(s94Patched(S94_MANUAL))
+);
+expect(
+  'S94 a lapsed spawn lease re-accepted by a human still archives the spawned orphan',
+  s94Archived(s94LapsedBid, S94_LAPSED) &&
+    s94Patched(S94_LAPSED).length === 1 &&
+    !s94Patched(S94_MANUAL).length,
+  `lapsed=${JSON.stringify(s94Patched(S94_LAPSED))} human=${JSON.stringify(s94Patched(S94_MANUAL))}`
+);
+expect(
+  'S94 a non-terminal hand-off is never archived',
+  !s94Patched(S94_OPEN).length && !bcRead(s94OpenBid).archivedAt,
+  JSON.stringify(s94Patched(S94_OPEN))
+);
+expect(
+  'S94 the grace window debounces (30s < 10min): nothing archived',
+  !s94Patched(S94_YOUNG).length && !bcRead(s94YoungBid).archivedAt,
+  JSON.stringify(s94Patched(S94_YOUNG))
+);
+expect(
+  'S94 a busy target is never archived',
+  !s94Patched(S94_BUSY).length && !bcRead(s94BusyBid).archivedAt,
+  JSON.stringify(s94Patched(S94_BUSY))
+);
+expect(
+  'S94 a protected target is never archived',
+  !s94Patched(S94_PROT).length && !bcRead(s94ProtBid).archivedAt,
+  JSON.stringify(s94Patched(S94_PROT))
+);
+expect(
+  'S94 a session still referenced by an open hand-off is never archived',
+  !s94Patched(S94_REF).length && !bcRead(s94RefBid).archivedAt,
+  JSON.stringify(s94Patched(S94_REF))
+);
+expect(
+  'S94 a session with an unread owner-queue item is never archived',
+  !s94Patched(S94_QUEUE).length && !bcRead(s94QueueBid).archivedAt,
+  JSON.stringify(s94Patched(S94_QUEUE))
+);
+expect(
+  'S94 an update that throws is logged, not thrown, and stamps nothing',
+  !s94Patched(S94_FAIL).length && !bcRead(s94FailBid).archivedAt,
+  JSON.stringify(s94Patched(S94_FAIL))
+);
+
+// Idempotency: the second pass sees `archivedAt` and never PATCHes again.
+const s94Stamp = bcRead(s94Bid).archivedAt;
+await hooks.context(contextEvent(S94_REQ));
+expect(
+  'S94 a second refresh does not archive twice (archivedAt is the marker)',
+  s94Patched(S94_SPAWN).length === 1 && bcRead(s94Bid).archivedAt === s94Stamp,
+  `${JSON.stringify(s94Patched(S94_SPAWN))} / ${bcRead(s94Bid).archivedAt}`
+);
+
+// `collab_list` is read-only and marks both the session and (for a still-open
+// record) the hand-off line; it never triggers an archive.
+const s94ListBid = 'b_aaaa0000000094c0';
+writeRaw(s94ListBid, {
+  workspace: WS_S94,
+  state: 'open',
+  claim: { by: S94_MANUAL, kind: 'accept', at: Date.now(), leaseMs: 300_000 },
+  from: { sid: S94_REQ, directory: WS_S94 },
+  archivedAt: Date.now(),
+  createdAt: Date.now(),
+  updatedAt: Date.now()
+});
+const s94List = await call('collab_list', { directory: WS_S94 });
+const s94SpawnLine = s94List.split('\n').find(line => line.startsWith(S94_SPAWN)) ?? '';
+out('S94 collab_list [archived]', s94List.split('\n').filter(line => line.includes('archived')).join(' | ') || '(无)');
+expect(
+  'S94 collab_list marks the archived session [archived]',
+  /archived/.test(s94SpawnLine) && s94SpawnLine.includes('ses_s94spawn'),
+  s94SpawnLine || '(无)'
+);
+expect(
+  'S94 collab_list marks a record whose session was archived [archived]',
+  s94List.split('\n').some(line => line.startsWith(`- ${s94ListBid}`) && line.includes('[archived]')),
+  s94List.split('\n').find(line => line.startsWith(`- ${s94ListBid}`)) ?? '(无)'
+);
+expect(
+  'S94 collab_list does not archive anything by itself',
+  s94Patched(S94_BUSY).length === 0 && s94Patched(S94_REF).length === 0,
+  `${s94Patched(S94_BUSY).length}/${s94Patched(S94_REF).length}`
+);
+
+// Preview writes nothing.
+const s94Preview = await call('collab_archive', { bid: s94BusyBid, confirm: false });
+out('S94 manual preview', s94Preview.split('\n').slice(0, 3).join(' | '));
+expect(
+  'S94 confirm:false previews the target and the action, and writes nothing',
+  s94Preview.includes('未执行') && s94Preview.includes(S94_BUSY) && s94Preview.includes('归档（archived:true）') &&
+    !s94Patched(S94_BUSY).length && !bcRead(s94BusyBid).archivedAt,
+  s94Preview.split('\n')[1]
+);
+
+// Manual archive skips the gates (busy / non-spawn) — a human asked for it —
+// then `restore:true` brings the session back and clears the stamp.
+const s94Manual = await call('collab_archive', { session: S94_MANUAL, confirm: true });
+out('S94 manual archive', s94Manual.split('\n').slice(0, 5).join(' | '));
+expect(
+  'S94 collab_archive { session } archives a session the automatic path skips',
+  s94Manual.includes('已归档') && Boolean(sessions[S94_MANUAL].time.archived) &&
+    s94Patched(S94_MANUAL).length === 1 && Number(bcRead(s94NonSpawnBid).archivedAt) > 0,
+  JSON.stringify(s94Patched(S94_MANUAL))
+);
+const s94Restore = await call('collab_archive', { session: S94_MANUAL, restore: true, confirm: true });
+out('S94 restore', s94Restore.split('\n').slice(0, 5).join(' | '));
+expect(
+  'S94 restore:true sets archived:false and clears archivedAt (reversible)',
+  s94Restore.includes('已恢复') && !sessions[S94_MANUAL].time.archived &&
+    !bcRead(s94NonSpawnBid).archivedAt && s94Patched(S94_MANUAL).some(patch => patch.archived === false),
+  JSON.stringify({ archived: sessions[S94_MANUAL].time.archived, stamp: bcRead(s94NonSpawnBid).archivedAt })
+);
+// `bid` never guesses "the human who accepted": it resolves the session this
+// plugin spawned for that hand-off, or refuses and points at `session`.
+await expectFail(
+  'S94 collab_archive { bid } refuses a hand-off that spawned nothing',
+  () => call('collab_archive', { bid: s94NonSpawnBid, confirm: true }),
+  /不是本插件拉起的会话/
+);
+const s94LapsedPreview = await call('collab_archive', { bid: s94LapsedBid, confirm: false });
+expect(
+  'S94 collab_archive { bid } resolves the orphan from expiredClaim, not the human who took over',
+  s94LapsedPreview.includes(S94_LAPSED) && !s94LapsedPreview.includes(S94_MANUAL),
+  s94LapsedPreview.split('\n')[1]
+);
+expect(
+  'S94 restoring a session that is not archived is a no-op (no extra PATCH)',
+  (await call('collab_archive', { session: S94_MANUAL, restore: true, confirm: true })).includes('未归档') &&
+    s94Patched(S94_MANUAL).length === 2,
+  JSON.stringify(s94Patched(S94_MANUAL))
+);
+const s94ProtMsg = await expectFail(
+  'S94 a [protected*] target is refused by the manual tool',
+  () => call('collab_archive', { session: S94_PROT, confirm: true }),
+  /protect 名单内/
+);
+expect(
+  'S94 … and the refusal writes nothing',
+  s94ProtMsg !== '' && !s94Patched(S94_PROT).length,
+  JSON.stringify(s94Patched(S94_PROT))
+);
+expect(
+  'S94 an update failure is a readable result, not a thrown error',
+  (await call('collab_archive', { bid: s94FailBid, confirm: true })).includes('失败') &&
+    !bcRead(s94FailBid).archivedAt,
+  JSON.stringify(s94Patched(S94_FAIL))
+);
+const s94NoArg = await expectFail(
+  'S94 neither bid nor session is a readable validation error',
+  () => call('collab_archive', { confirm: true }),
+  /bid.*session|session.*bid/
+);
+out('S94 missing argument', s94NoArg);
+
+// `archiveSpawned:false` is the rollback switch: automatic off, manual still on.
+await writeConfig({ protect: [S94_PROT], archiveGraceMs: 600_000, archiveSpawned: false });
+const s94OffBid = 'b_aaaa0000000094b0';
+s94Record(s94OffBid, S94_OFF);
+await hooks.context(contextEvent(S94_REQ));
+expect(
+  'S94 archiveSpawned:false disables the automatic path only',
+  !s94Patched(S94_OFF).length && !bcRead(s94OffBid).archivedAt,
+  JSON.stringify(s94Patched(S94_OFF))
+);
+const s94OffManual = await call('collab_archive', { bid: s94OffBid, confirm: true });
+expect(
+  'S94 … while collab_archive still works by hand',
+  s94OffManual.includes('已归档') && Boolean(sessions[S94_OFF].time.archived) &&
+    Number(bcRead(s94OffBid).archivedAt) > 0,
+  s94OffManual.split('\n').find(line => line.includes('已归档')) ?? '(无)'
+);
+await writeConfig({ protect: [S94_PROT], archiveGraceMs: 600_000 });
+
+// HTTP fallback: a host without `session.update` goes through
+// `PATCH /api/session/{id}` with `COLLAB_SERVER_TOKEN`. The mock server records
+// the request (the fake host is *not* touched: only the result matters here).
+const s94HttpBid = 'b_aaaa0000000094b1';
+s94Record(s94HttpBid, S94_HTTP);
+const s94SavedUpdate = ctx.session.update;
+delete ctx.session.update;
+const s94Http = await call('collab_archive', { bid: s94HttpBid, confirm: true });
+ctx.session.update = s94SavedUpdate;
+const s94Patch = archiveHttp.find(entry => entry.method === 'PATCH' && entry.url.endsWith(`/session/${S94_HTTP}`));
+out('S94 HTTP fallback', `${s94Http.split('\n').find(line => line.includes('via')) ?? '(无)'} · ${JSON.stringify(s94Patch)}`);
+expect(
+  'S94 a host without session.update falls back to PATCH /api/session/{id}',
+  s94Http.includes('via http') &&
+    s94Patch?.body === '{"archived":true}' &&
+    s94Patch?.auth === 'Bearer s94-token' &&
+    Number(bcRead(s94HttpBid).archivedAt) > 0,
+  JSON.stringify(s94Patch)
+);
+const s94HttpRestore = await call('collab_archive', { bid: s94HttpBid, restore: true, confirm: true });
+expect(
+  'S94 restore over the same record clears archivedAt (no second PATCH needed)',
+  s94HttpRestore.includes('未归档') && !bcRead(s94HttpBid).archivedAt,
+  s94HttpRestore.split('\n').find(line => line.includes('未归档')) ?? '(无)'
+);
+
+// The tool description states the contract (archive ≠ delete, restore, gates).
+const s94Desc = String(tool('collab_archive').description);
+expect(
+  'S94 the tool description says archive ≠ delete and names restore / the gates',
+  /not delete/i.test(s94Desc) && /restore/i.test(s94Desc) && /archived:false/i.test(s94Desc) &&
+    /protected/i.test(s94Desc) && /confirm:false/i.test(s94Desc),
+  s94Desc.slice(0, 160)
+);
+
+// Leave no S94 artifacts for the other suites' closing checks.
+rmSync(qdir(S94_QUEUE), { recursive: true, force: true });
+archiveHttpServer.close();
 
 // Cleanup: leave no queue files behind for the closing summary.
 rmSync(ownerQueueDir, { recursive: true, force: true });

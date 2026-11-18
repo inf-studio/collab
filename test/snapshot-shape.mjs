@@ -121,6 +121,18 @@ const broadcasts = [
     title: 'closed already',
     from: { sid: 'ses_a2', directory: wsA },
     createdAt: now - 900_000
+  },
+  // 0.5.0: an unresolved hand-off whose spawned session was archived (the
+  // manual path can archive while the bid is still `claimed`).
+  {
+    bid: 'b_00000000d4',
+    state: 'claimed',
+    workspace: wsA,
+    title: 'archived claimant',
+    from: { sid: 'ses_a2', directory: wsA },
+    claim: { by: 'ses_a1', kind: 'spawn' },
+    archivedAt: now - 10_000,
+    createdAt: now - 30_000
   }
 ];
 
@@ -243,6 +255,13 @@ expect(
   'C2 hand-offs are oldest first (the one waiting longest leads)',
   snapshot.handoffs[0]?.bid === 'b_00000000b2'
 );
+// 0.5.0: the archive marker is read-only — the row stays, the flag is added.
+expect(
+  'C2 an archived hand-off carries archived:true (and the row itself stays)',
+  snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.archived === true &&
+    !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2')?.archived,
+  JSON.stringify(snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4'))
+);
 
 /* ------------------------------------------------------- 4. workspace filter */
 
@@ -311,6 +330,12 @@ expect(
   ['queueId', 'target', 'ageMs', 'summary', 'seen'].every(key =>
     output.properties?.queue?.items?.required?.includes(key)
   )
+);
+expect(
+  'C2 the hand-off row declares the optional archived marker (0.5.0)',
+  Boolean(output.properties?.handoffs?.items?.properties?.archived) &&
+    !output.properties?.handoffs?.items?.required?.includes('archived'),
+  JSON.stringify(output.properties?.handoffs?.items?.properties)
 );
 
 /* ------------------------------------------------------------- 7. GUI bundle */

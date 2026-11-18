@@ -3,6 +3,54 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-18
+
+> 现象：`collab_broadcast` 在没人可接时拉起的 bootstrap 会话（`claim.kind="spawn"`）只为一单而存在，
+> 那单闭环后仍一直占着会话列表与侧栏。owner 的决定是**归档**而不是删除：
+> `PATCH /api/session/{id} { archived:true }` 从列表隐藏，会话与消息全部保留，`archived:false` 原样恢复。
+> 本版新增自动归档判定 + `collab_archive` 手动工具；工具语义（handoff / lease / protected）不变，
+> 归档路径**不调用** `DELETE /api/session/{id}`（`selftest` 清理与 spawn 落点回滚仍用 `session.remove`）。
+
+### Added
+
+- **R1–R3 自动归档（`src/core/archive.ts`）**：`shouldArchive(record, now, gate)` 按八条顺序判定——
+  ① 目标是本插件拉起的会话（`claim.kind="spawn"` → `claim.by`；spawn 租约过期后才被领取、
+  `claim.kind` 已改写成 `accept` 的 → `expiredClaim.by`）；② 终态 `done|blocked|expired`；③ 终态已过
+  `archiveGraceMs`（**默认 10 分钟**，范围 1min–1h，越界夹取）；④ 目标 `session.get` 可读且 **idle**；
+  ⑤ 非 `[protected*]`（按血缘）；⑥ 该 sid 不被任何**未决**交接引用（`from.sid` 或 `claim.by`）；
+  ⑦ 没有未读 owner-queue 项；⑧ 记录还没有 `archivedAt`（幂等）。
+  `archiveSession` 优先 `ctx.session.update({archived})`，宿主无 `update` 时走
+  `COLLAB_SERVER_URL` 的 `PATCH /api/session/{id}`（带 `COLLAB_SERVER_TOKEN`）；**失败只 log，不抛、不改状态**。
+  成功后才写 `archivedAt`（`mergeArchive`：读-合并-写，不覆盖并发字段）。触发点是 `chain.refresh()` ——
+  发起方的 `context` 刷新，无 cron、无轮询；`collab_list` / 侧栏快照只读，**不触发**归档。
+- **R4 `collab_archive { bid?, session?, restore?, confirm }`**：`bid` → 该单**拉起的** spawn 会话（`claim.by`，spawn 租约过期后才被领取的取 `expiredClaim.by`；非 spawn 单直接报错），`session` 可直指任意会话；
+  `restore:true` → `archived:false` 并清 `archivedAt`；`confirm:false` 只预览（目标 / 标题 / 当前状态 / 动作）；
+  `[protected*]` 拒绝；手动路径**跳过**自动判定的门（人说了算），但同样幂等（已归档不重复 PATCH）。
+- **R5 配置**：`archiveSpawned`（默认 `true`；`false` 只关自动路径）、`archiveGraceMs`（默认 `600000`）。
+- **R6 可见性**：`collab_list` 的会话 `state` 列显示 `archived` 并标 `[archived]`（记录行尾同样标）；
+  `collab.state.snapshot` 的 `handoffs[]` 增可选 `archived?: boolean`（只读，不改变布局）。
+
+### 文档
+
+- `docs/collab.md`：§11.2 工具表 **十七个** + `collab_archive` 行；§11.4 配置示例 +
+  `archiveSpawned` / `archiveGraceMs`；**新增 §11.13「协作结束后自动归档 spawn 会话」**（归档 ≠ 删除、
+  `/api/session?archived` 可查、恢复命令、回滚开关）；§12.2 记录字段补 `archivedAt`；§12.5 新增第 17 条。
+- README：能力表 + 配置表 + 回归清单（S94）；`skills/collab` 速查表 + §一点七。
+
+### 回归
+
+- `test/handoff-harness.mjs` **608 → 638 项**：新增 S94 —— 终态 + 11min + idle + 无引用 → 归档一次并写
+  `archivedAt`（`state`/`receipt` 不变）；非 spawn / 非终态 / 防抖未满（30s）/ busy / protected /
+  有未决引用 / 有未读队列 七类均不归档；`update` 抛错不抛且不写；二次刷新不重复 PATCH；
+  `restore:true` 还原并清 `archivedAt`、未归档时恢复是 no-op；`[protected*]` 手动拒绝；
+  `archiveSpawned:false` 只关自动路径；宿主无 `update` 时 HTTP `PATCH` 带 token；
+  `collab_list` 的 `[archived]`；工具描述写明「archive is not delete」；
+  spawn 租约过期后才被领取的孤儿（`expiredClaim`）仍会被归档、`collab_archive { bid }` 解析它而非接手人、
+  非 spawn 单按 `bid` 归档是**可读拒绝**并提示改用 `session`。
+- `test/snapshot-shape.mjs` **33 → 35 项**：归档行带 `archived:true` 且仍在列表里；schema 声明可选 `archived`。
+- `test/readonly-default.mjs`：工具注册表 16 → 17（含 `collab_archive`）。
+- 既有 608 + 12 + 33 + 17 全绿（现为 638 + 12 + 35 + 17）。
+
 ## [0.4.2] - 2026-11-18
 
 > 现象：Desktop（远程连 Linux server）看不到 `collab` 侧栏；TUI 完全没有状态视图。

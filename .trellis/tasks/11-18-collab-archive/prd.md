@@ -9,7 +9,7 @@
   `collab_handoff` 的对象、requester 一律不碰。
 - **R2 触发条件（全部满足）**
   1. 该 bid 已终态：`done` / `blocked` / `expired`；
-  2. 终态已过 ≥ **5min**（防抖，不是等待窗口）；
+  2. 终态已过 ≥ **10min**（防抖，不是等待窗口；默认 `archiveGraceMs=600000`，可配 1min–1h）；
   3. 目标 **idle**；
   4. 它不再被任何未决交接引用（既非 `from.sid` 也非 `claim.by` 的非终态记录）；
   5. 没有指向它的未读 owner-queue 项；
@@ -19,7 +19,7 @@
   成功写 `archivedAt`；失败只记录，不影响主流程。
 - **R4 手动工具**：`collab_archive { bid? | session?, restore?, confirm }` ——
   手动归档 / 恢复（`restore:true` → `archived:false`）；`confirm:false` 只预览。
-- **R5 配置**：`archiveSpawned`（默认 `true`）、`archiveGraceMs`（默认 5min，范围 1min–1h）。
+- **R5 配置**：`archiveSpawned`（默认 `true`）、`archiveGraceMs`（默认 10min，范围 1min–1h）。
 - **R6 可见性**：`collab_list` 对已归档显示 `[archived]`；归档不改变记录状态。
 - **R7 回归**：六类不归档（非 spawn / 非终态 / 仍有未决引用 / 有未读队列 / busy / protected）+
   正常归档一次 + restore + update 抛错不抛 + 幂等。
@@ -27,7 +27,7 @@
 
 ## Acceptance Criteria
 
-- [ ] 终态+5min+idle+无未决引用 → 归档一次，`archivedAt` 落库
+- [ ] 终态+11min+idle+无未决引用 → 归档一次，`archivedAt` 落库
 - [ ] 六类场景均不归档（构造断言）
 - [ ] `collab_archive {restore:true}` 恢复成功（`archived:false`）
 - [ ] update 抛错不改变工具返回、不抛出

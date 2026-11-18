@@ -1,7 +1,7 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：十六个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约与受保护目标请求队列）+
-thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
+多会话（含跨工作区）协作插件：十七个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列
+与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
 `bid` 算法与单文件版逐字一致，差别只有「可选类型 + 模块边界 + 默认只读」三点。
@@ -34,6 +34,7 @@ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」�
 | `collab_lock`      | 取资源租约（测试窗口/同一文件/构建；exclusive 或 shared，TTL 10s–2h，被占可 `wait` 排队） | 写本地租约        |
 | `collab_unlock`    | 释放**自己**持有的租约（`shared` 组只移除自己；无 force 抢占）             | 写本地租约        |
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
+| `collab_archive`   | 归档/恢复某个会话（**不是删除**）：`PATCH { archived }`，会话与消息保留；spawn 会话在交接终态 10 分钟后自动归档（可 `archiveSpawned:false` 关闭） | 写会话归档位      |
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
@@ -42,7 +43,12 @@ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」�
 
 > **权限提示（务必读）**：本插件可以**读取该实例上的会话元信息与消息上下文**（用于打分与
 > 判断回执）、可以**向其它会话投递消息**（即以该实例的身份说话）、在 `allowWrite:true`
-> 时可以**修改某个会话的 permissions / agent**。默认 `allowWrite:false`，后两项写入能力关闭。
+> 时可以**修改某个会话的 permissions / agent**。默认 `allowWrite:false`，第二项（投递）是插件本职、
+> 不在此开关内，第三项关闭。
+> 另有一种**独立写入**：`collab_archive` 写会话的**归档位**（`PATCH { archived }`，从列表隐藏，
+> 会话与消息全部保留、可 `restore:true` 恢复）。它**不受 `allowWrite` 约束**——自动路径只碰本插件
+> 自己 spawn 的会话，手动路径必须 `confirm:true` 且 `[protected*]` 一律拒绝；要彻底关掉用
+> `archiveSpawned:false`（只关自动路径）。归档**不是删除**：归档路径不调用 `DELETE`。
 
 ## 状态视图（Desktop 侧栏 / TUI，experimental）
 
@@ -127,6 +133,8 @@ opencode plugin remove @inf-studio/collab     # 包安装
   "allowWrite": false,
   "protect": ["ses_…"],
   "readonlyAgents": ["explore", "plan"],
+  "archiveSpawned": true,
+  "archiveGraceMs": 600000,
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -138,6 +146,8 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `readonlyAgents` | `explore` / `plan` | 只读 agent 永远不会收到 `steer`，入站消息一律降级为 `queue`                                        |
 | `autoDeliver`    | `true`             | `false` 时不注入未读摘要（`collab_inbox` 仍可读）                                                  |
 | `maxInject`      | `3`                | 每次请求最多注入几条未读（1–10）                                                                   |
+| `archiveSpawned` | `true`             | 交接终态后自动归档 spawn 会话（**不是删除**，可 `collab_archive {restore:true}`）；`false` 只关自动路径 |
+| `archiveGraceMs` | `600000`           | 终态后的防抖窗口（1 分钟–1 小时），夹取                                                           |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |
@@ -171,7 +181,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 608 项 harness + 12 项只读默认 + 33 项快照/产物 + 17 项 TUI 渲染
+pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照/产物 + 17 项 TUI 渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -197,6 +207,10 @@ pnpm test          # build + 608 项 harness + 12 项只读默认 + 33 项快照
   0.4.1 追加 S93：受保护注入按提案去重（任一 `issuePath`/`bid` 键相同即同一提案、含传递，追加提示与
   `[owner-queue]` 行只渲染 `at` 最新的一条、两类合计 ≤3 行；被去重掉的条目不标记、下一轮仍提示；
   不同提案各占一行；同 bid 的队列项与追加（哪怕队列项不带路径）同样合并）。
+  0.5.0 追加 S94：spawn 会话归档——终态 + 10 分钟防抖 + idle + 非 protected + 无未决引用 + 无未读队列 →
+  归档一次并写 `archivedAt`；六类拒绝（非 spawn / 非终态 / 防抖未满 / busy / protected / 有引用）加未读队列、
+  抛错、幂等各一条；`restore:true` 还原并清 `archivedAt`；宿主无 `session.update` 时走 HTTP `PATCH`；
+  `archiveSpawned:false` 只关自动路径；`collab_list` 的 `[archived]`。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
@@ -208,7 +222,7 @@ pnpm test          # build + 608 项 harness + 12 项只读默认 + 33 项快照
   需 `node --conditions=browser`，否则 solid-js 解析到 SSR 构建）——`/collab` 注册、三块表格内容、
   不可达时的横幅 + 宿主会话列表、切到别的插件面板不轮询、轮询开启/停止/恢复、侧栏摘要一行。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/侧栏快照）、`src/tools`（十六个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（十七个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill，只在 `setup` 里跑）、
 `src/tui.tsx`（`./tui`：`collab.status` 面板 + 侧栏摘要 + `/collab` 命令，只读）、

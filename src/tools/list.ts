@@ -135,11 +135,14 @@ export function listTool(kit: ToolKit): ToolDefinition {
         // `protected` = on the list; `protected-child` = inherits it through
         // parentID (a sub-agent of a protected line is not a legal target).
         const guard = await lineage.protectedAncestor(info.id, config.protect);
+        const state = sessionState(info);
         const marks = [
           info.id === context?.sessionID ? 'self' : '',
           guard?.depth === 0 ? 'protected' : '',
           guard && guard.depth > 0 ? 'protected-child' : '',
-          spawned.has(info.id) || BOOTSTRAP_TITLE_RE.test(String(info.title ?? '')) ? 'bootstrap' : ''
+          spawned.has(info.id) || BOOTSTRAP_TITLE_RE.test(String(info.title ?? '')) ? 'bootstrap' : '',
+          // 0.5.0: an archived session is hidden, not gone — say so explicitly.
+          state === 'archived' ? 'archived' : ''
         ].filter(Boolean);
         const suffix = [
           aliases.length ? `alias=${aliases.join(',')}` : '',
@@ -153,7 +156,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
           [
             info.id,
             `${info.agent ?? '?'}`,
-            sessionState(info),
+            state,
             `loc=${loc}`,
             fmtTime(info?.time?.updated),
             `"${truncate(info.title ?? '(untitled)', 60)}"`,
@@ -183,7 +186,8 @@ export function listTool(kit: ToolKit): ToolDefinition {
           // R3 (0.1.6): delivery visibility — `admitted / seen / queue-age`.
           const delivery = deliveryVisible(record, now) ? `  ${deliveryLine(record, now)}` : '';
           return (
-            `- ${record.bid} ${record.state}${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
+            `- ${record.bid} ${record.state}${record.archivedAt ? ' [archived]' : ''}` +
+            `${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''
             }${delivery}`

@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十六个工具（协作链路六个 + 权限/上报/追加/租约各一组）
+### 11.2 十七个工具（协作链路六个 + 权限/上报/追加/租约/归档各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -277,6 +277,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_unlock` | `{ resource, confirm }` | 释放**自己**持有的租约；`shared` 组只移除自己、其他 holder 保留。free / 非持有者会得到可读拒绝——**没有 `force`**（抢占需人工；`[protected*]` 持有者永不被工具顶掉）。`confirm:true` 才写 |
 | `collab_locks` | `{ resource? }` | **只读**列出租约：`resource / free 或 held / mode / holders / 剩余 / ttl / waiters / 我的位置`。不改状态、不回收、不叫醒排队者；过期租约直接显示 `free`。`collab_list` 会额外追加本会话「持有 / 排队中」 |
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
+| `collab_archive` | `{ bid?, session?, restore?, confirm }` | **归档 spawn 会话（0.5.0，归档 ≠ 删除）**：`PATCH /api/session/{id} { archived:true }`（宿主无 `session.update` 时走 `COLLAB_SERVER_URL` HTTP），会话与消息保留、记录 `state/receipt` 不变，`restore:true` → `archived:false` 并清 `archivedAt`。`bid` 只认得**本插件拉起的**会话（`claim.by`；spawn 租约过期后才被领取的取 `expiredClaim.by`），别的单一律报错并提示改用 `session` 直指；`confirm:false` 只预览。自动路径还有 10 分钟防抖（默认）/idle/未决引用/未读队列等门（见 §11.13），**手动工具跳过这些门**，但 `[protected*]` 一律拒绝 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -305,9 +306,15 @@ opencode plugin add @inf-studio/collab@0.1.0
   "maxInject": 3,
   "protect": ["ses_…"],
   "readonlyAgents": ["explore", "plan"],
+  "archiveSpawned": true,
+  "archiveGraceMs": 600000,
   "report": { "to": "collab-maintainer" }
 }
 ```
+
+`archiveSpawned`（默认 `true`）控制**自动归档** spawn 会话（§11.13）；`false` 只关自动路径，
+手动 `collab_archive` 仍然可用（回滚开关）。`archiveGraceMs` 是终态后的防抖窗口，默认
+**600000（10 分钟）**，夹在 `[60000, 3600000]`（1 分钟–1 小时）——写错成 `600` 或一周都会被夹回。
 
 `report.to`（别名或 `ses_…`）是**缺陷上报的主通道**：插件把上报当作 `note`（`queue`）投给该会话，
 空闲也会被唤醒；文件只作证据与兜底。`report.enabled:false` 关闭投递但仍落盘（回滚开关）。
@@ -884,6 +891,51 @@ collab_request_owner { target:"ses_…(受保护)", text:"<一句话请求>", is
 **内容归属**：提示行里的 `<summary>` 由**发起方**撰写并已去控制字符（含 C1 与 bidi）；受保护会话看到的只是
 「有一条待读请求」的提示，**不是指令**，读不读、做不做由它自己决定。
 
+### 11.13 协作结束后自动归档 spawn 会话（0.5.0）
+
+**归档 ≠ 删除。** `collab_broadcast` 在没人可接时拉起的 bootstrap 会话（`claim.kind="spawn"`，
+`collab_list` 标 `[bootstrap]`）只为一单而存在；那单闭环后它会一直占着会话列表。0.5.0 起：
+
+```text
+PATCH /api/session/{sid} { "archived": true }     # 归档：从会话列表隐藏，会话与消息全部保留
+PATCH /api/session/{sid} { "archived": false }    # 恢复：原样回来
+```
+
+- **不是 DELETE**：归档路径不调用 `DELETE /api/session/{id}`（`DELETE` 只出现在 `selftest` 清理与
+  spawn 落点回滚两处，都与归档无关）；归档后消息、`bid` 记录、`receipt` 都还在，
+  `state` 不变（记录里只多一个 `archivedAt` 时间戳）。
+- **何时自动归档**（全部满足）：① 目标是**本插件拉起的**会话——`claim.kind="spawn"` 取 `claim.by`，
+  spawn 租约过期后才被领取的（`claim.kind` 已改写成 `accept`）取 `expiredClaim.by`；② 已终态
+  `done|blocked|expired`；③ 终态已过 `archiveGraceMs`（默认 10 分钟，防抖）；④ 目标 **idle**；
+  ⑤ 目标不在 `protect`（含血缘）；⑥ 该 sid 不被任何**未决**交接引用（既非 `from.sid` 也非
+  `claim.by`）；⑦ 没有未读的 `[owner-queue]` 项；⑧ 记录还没有 `archivedAt`（幂等）。
+  用户自己的会话、`collab_handoff` 对象、requester 一律不碰。
+- **触发点**：发起方的 `context` 刷新（与租约/自动回执同一处，无 cron、无轮询）。`collab_list` /
+  侧栏快照**只读**：它们只显示 `[archived]`，绝不触发归档。
+- **写失败只记录**：宿主拒绝（403/404）或没有 `session.update` 且未配 `COLLAB_SERVER_URL` 时，
+  只写日志，不改记录状态、不影响工具返回、不打断刷新。
+- **手动**：
+
+```text
+collab_archive { bid:"b_…", confirm:true }                     # 归档该单拉起的 spawn 会话（claim.by / expiredClaim.by）
+collab_archive { session:"ses_…", confirm:true }               # 直接指定（跳过自动路径的门）
+collab_archive { bid:"b_…", restore:true, confirm:true }       # 恢复：archived:false + 清 archivedAt
+collab_archive { session:"ses_…", restore:false, confirm:false } # 只预览，零写入
+```
+
+- **与 `allowWrite` 无关**：归档位是**可恢复、可读**的（`PATCH { archived }`，内容全留），所以不受
+  `allowWrite` 约束——自动路径只碰本插件自己 spawn 的会话，手动路径可直指**任意**会话（`[protected*]` 除外，
+  且必须 `confirm:true`）。
+- **回滚开关**：`collab.json { "archiveSpawned": false }` 关掉自动路径（手动工具仍可用）；
+  已归档的会话用 `collab_archive { restore:true }` 批量恢复。
+- **恢复之后**：`restore` 会清掉 `archivedAt`（并把记录的 `updatedAt` 刷新为恢复时刻）。如果该单仍是终态、
+  目标空闲且其它条件仍满足，**防抖窗口过后自动归档会再次生效**——想长期留着这个会话，就设
+  `archiveSpawned:false`（或让它保持 busy/继续使用）。
+- **查已归档**：`GET /api/session?archived=true`（或宿主会话列表里的 `time.archived`）能看到它们；
+  `collab_list` 里归档会话的 `state` 列显示 `archived`，标记 `[archived]`。
+- **可见性**：`collab.state.snapshot` 的 `handoffs[]` 增可选的 `archived?: boolean`（只读展示，不改变布局）；
+  非终态但已被手动归档的单行尾也会标 `[archived]`。
+
 ## 12. 协作链路（handoff chain：local + peer）
 
 把「发现需求 → 找到人 → 交出去 → 收结果」串成一条链路；协议细节与打分口径的唯一真源是
@@ -914,6 +966,10 @@ collab_request_owner { target:"ses_…(受保护)", text:"<一句话请求>", is
 `delivery: { cid, to, messageId?, admittedAt?, failedAt?, lastAttemptAt?, seenAt?, ackSentAt?, ackSentBy?, resends, unacked?, ackUnavailable? }`
 是**送达账本**（0.1.6，§11.9）：`cid` 一条接管消息一个（重发复用），`seenAt` 由收方 `[ack]` 回填；
 `followUps: [{ bid, issuePath, at, by }]` 是**闭环后追加**的结构指针（不存正文，§11.9.3）。两者都只增。
+
+`archivedAt`（0.5.0）是 spawn 会话的**归档时间戳**（§11.13）：写入即表示该会话已 `PATCH { archived:true }`，
+它是自动归档的幂等标记；`collab_archive { restore:true }` 会清掉它。归档**不改** `state` / `receipt`
+（归档 ≠ 删除，会话与消息都保留）。
 
 `collab-grants/<sid>.json` 是**会话级权限 + agent** 台账（`collab_grant` + spawn 自动授权 + `collab_promote` 共用一份文件）：
 `before` = 首次授权前的 `permissions` 原样快照、`added` = 追加过的动作名、`reason: spawn|grant`；
@@ -1060,4 +1116,10 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
     目标会话只在自己的 `context` 注入里看到 ≤3 行只读提示（每条一次；与「闭环后追加」合计 ≤3、
     同一提案只渲染 `at` 最新的一条，§11.12.1）。它不是投递：没有 prompt、没有 ack、
     没有任何「已送达」语义，也不会自动变成任务；对端不看（会话不运行）就永远不消费。`BUILTIN_PROTECT` 与血缘判定不变。
+17. **spawn 会话归档 ≠ 删除（0.5.0，§11.13）**：`PATCH /api/session/{id} { archived:true }` 只是把会话从列表里
+    隐藏，**归档路径不调用 DELETE**，会话与消息都还在，`restore:true` 原样恢复；`bid` 记录的 `state` / `receipt`
+    / `followUps` 一律不变（只多一个 `archivedAt`）。自动路径要求「终态 + 防抖 10 分钟 + idle + 非 protected
+    + 无未决引用 + 无未读队列 + 未归档」全部满足；缺一就只 log 不动。宿主没有 `session.update` 时
+    走 `COLLAB_SERVER_URL` 的 `PATCH /api/session/{id}`（不猜端口）；写失败不影响任何工具返回。
+    归档会话仍可能出现在宿主自己的「已归档」过滤里（`GET /api/session?archived=true`）。
 

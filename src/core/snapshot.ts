@@ -107,7 +107,9 @@ function toHandoff(record: BroadcastRecord, now: number): SnapshotHandoff | unde
     from: String(record.from?.sid ?? ''),
     ...(record.claim?.by ? { claimBy: String(record.claim.by) } : {}),
     ...(record.workspace ? { workspace: String(record.workspace) } : {}),
-    title: truncate(record.title ?? record.slug ?? '(untitled)', 60)
+    title: truncate(record.title ?? record.slug ?? '(untitled)', 60),
+    // 0.5.0: read-only marker for a hand-off whose spawned session was archived.
+    ...(Number(record.archivedAt) > 0 ? { archived: true } : {})
   };
 }
 

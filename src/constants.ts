@@ -57,7 +57,9 @@ export const DEFAULTS = {
   /** R8: the package never patches a session's permissions / agent by default. */
   allowWrite: false,
   protect: BUILTIN_PROTECT,
-  readonlyAgents: DEFAULT_READONLY_AGENTS
+  readonlyAgents: DEFAULT_READONLY_AGENTS,
+  /** 0.5.0: archive the sessions we spawned once their hand-off is over. */
+  archiveSpawned: true
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -284,6 +286,26 @@ export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
 /** R2: at most one extra delivery per hand-off (same `cid`, so it is idempotent). */
 export const MAX_RESENDS = 1;
 
+// ------------------------------------------------------ spawn session archive
+
+/**
+ * 0.5.0: a spawned (`claim.kind = "spawn"`) session is **archived** — never
+ * deleted — once the hand-off it exists for is over and nobody needs it any
+ * more. `PATCH /api/session/{sid} { archived:true }` is reversible
+ * (`archived:false`), so this only hides the session from the list; the record
+ * and every message stay.
+ *
+ * The grace window is a **debounce**, not a wait for work: a hand-off that is
+ * `done` / `blocked` / `expired` for longer than this is over even if the last
+ * message was written a second before the state flipped (auto receipts,
+ * `collab_followup`). Clamped to [`ARCHIVE_GRACE_MIN_MS`, `ARCHIVE_GRACE_MAX_MS`]
+ * so a typo (`600` = 0.6s, `604800000` = a week) cannot archive something that
+ * is still in use.
+ */
+export const ARCHIVE_GRACE_MS = 10 * 60 * 1000;
+export const ARCHIVE_GRACE_MIN_MS = 60 * 1000;
+export const ARCHIVE_GRACE_MAX_MS = 60 * 60 * 1000;
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.4.2';
+export const PLUGIN_VERSION = '0.5.0';
 

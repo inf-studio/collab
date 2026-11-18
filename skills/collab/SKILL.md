@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十七个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -34,6 +34,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
 | `collab_followup` | `bid, issuePath?, confirm` | **闭环后追加**：只登记结构化指针（不投递、不改 state） | 写交接记录（本单领取人） |
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
+| `collab_archive` | `bid?` / `session?`, `restore?`, `confirm` | **归档 ≠ 删除**：把 spawn 会话藏起来（`PATCH {archived:true}`，消息全留），`restore:true` 恢复；交接终态 10 分钟后自动归档 | 写会话归档位 |
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `expected` 三值：`implement`（默认，改代码）/ `review`（确认）/ **`research`**（只读排查 + 结论，对 `build` 也合法）。
@@ -92,6 +93,22 @@ collab_request_owner {
   `collab_request_owner { id, revoke:true, confirm:true }` 撤回。
 - 发起方自己在 `collab_list` 里能看到「我提交给受保护会话的请求：N 条待处理」。
 - 受保护会话不能给另一个受保护会话投队列项（不做 protected → protected 转发）；普通目标请用 `collab_handoff`。
+
+## 一点七、spawn 会话会在协作结束后自动归档（0.5.0）
+
+`collab_broadcast` 拉起的 bootstrap 会话（`collab_list` 标 `[bootstrap]`）只为一单存在。那单
+`done|blocked|expired` 且过了防抖窗口（默认 10 分钟）、目标 idle、不在 `protect`、没有别的未决交接引用它、
+也没有未读 owner-queue 项时，发起方下一次 `context` 刷新会把它**归档**：
+
+```text
+PATCH /api/session/{sid} { archived: true }     # 只是隐藏：会话与消息全留，记录 state/receipt 不变
+collab_archive { bid:"b_…", confirm:true }      # 手动归档（跳过上面那些门）
+collab_archive { bid:"b_…", restore:true, confirm:true }   # 恢复（archived:false + 清 archivedAt）
+```
+
+- **归档 ≠ 删除**：归档路径不 `DELETE`（`selftest` 清理与 spawn 落点回滚另有用例）；归档会话仍可用 `GET /api/session?archived=true` 找到。
+- 关掉自动路径：`collab.json { "archiveSpawned": false }`（手动工具仍可用）；窗口 `archiveGraceMs` 夹在 1min–1h。
+- 用户自己的会话 / `collab_handoff` 对象 / requester **永不**归档；`[protected*]` 连手动工具也拒绝。
 
 ## 二、同工作区（local）
 

@@ -63,6 +63,11 @@ export interface SnapshotHandoff {
   claimBy?: string;
   workspace?: string;
   title: string;
+  /**
+   * 0.5.0: the spawned session of this hand-off was archived (read-only display;
+   * the panel keeps the row, only the marker is added).
+   */
+  archived?: boolean;
 }
 
 /**
@@ -161,7 +166,8 @@ export const CollabState = {
                 from: str,
                 claimBy: str,
                 workspace: str,
-                title: str
+                title: str,
+                archived: bool
               },
               ['bid', 'state', 'ageMs', 'from', 'title']
             )

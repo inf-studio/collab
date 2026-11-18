@@ -38,6 +38,7 @@ import {
   releaseLock,
   writeBroadcast
 } from './claim.ts';
+import { archiveIfDue, createArchiveGate } from './archive.ts';
 import {
   followUpsOf,
   nextFollowUpHint,
@@ -259,6 +260,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
   const PATH_TTL_MS = 120_000;
   const infoCache = new Map<string, { at: number; value: SessionInfoLike | undefined }>();
   const pathCache = new Map<string, { at: number; paths: string[] }>();
+  // 0.5.0: the archive gate (design §1). It reads sessions **fresh** through its
+  // own `sessionInfo`, because the 60s `infoCache` above may still say "idle"
+  // after the session started working — exactly the case that must not archive.
+  const archiveGate = createArchiveGate(ctx, readConfig);
 
   async function sessionInfo(sessionID: string | undefined): Promise<SessionInfoLike | undefined> {
     if (!sessionID) return undefined;
@@ -515,7 +520,7 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * The returned record is *not* written: callers keep using `persistRefresh`,
    * which sees the state change and writes it once.
    */
-  async function refresh(
+  async function refreshCore(
     record: BroadcastRecord | undefined,
     now = Date.now(),
     { actor }: { actor?: string } = {}
@@ -568,6 +573,34 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       replies: [...(current.replies ?? []), { from: sid, at: now, text: verdict.summary }].slice(-MAX_STORED),
       autoVerdictAt: now
     };
+  }
+
+  /**
+   * 0.5.0: the lease / auto-receipt refresh, plus the archive pass (design §3).
+   *
+   * The archive decision runs at the **end** of every refresh, i.e. exactly where
+   * the state is already settled: a record that just flipped to `done` is judged
+   * in the same turn the requester sees it, and the `context` hook is the only
+   * trigger (no timer, no polling, and `collab_list` — a read-only view — never
+   * writes). A refusal or a failed PATCH changes nothing and never throws; the
+   * hand-off result is returned untouched.
+   */
+  async function refresh(
+    record: BroadcastRecord | undefined,
+    now = Date.now(),
+    options: { actor?: string } = {}
+  ): Promise<BroadcastRecord | undefined> {
+    const refreshed = await refreshCore(record, now, options);
+    if (!refreshed) return refreshed;
+    try {
+      const archived = await archiveIfDue(refreshed, now, archiveGate);
+      return archived ?? refreshed;
+    } catch (error) {
+      // Belt and braces: `shouldArchive` / `archiveSession` already refuse to
+      // throw, but an archive must never be able to break a refresh.
+      log(`archive pass failed for ${refreshed.bid}: ${errText(error)}`);
+      return refreshed;
+    }
   }
 
   /**

@@ -1,4 +1,13 @@
-import { BUILTIN_PROTECT, CONFIG_PATH, DEFAULTS, DEFAULT_READONLY_AGENTS, LEGACY_ALIAS_PATH } from './constants.ts';
+import {
+  ARCHIVE_GRACE_MAX_MS,
+  ARCHIVE_GRACE_MIN_MS,
+  ARCHIVE_GRACE_MS,
+  BUILTIN_PROTECT,
+  CONFIG_PATH,
+  DEFAULTS,
+  DEFAULT_READONLY_AGENTS,
+  LEGACY_ALIAS_PATH
+} from './constants.ts';
 import type { CollabConfig } from './types.ts';
 import { asObject, clamp, dedupe, mtime, readJsonFile } from './util.ts';
 
@@ -62,6 +71,21 @@ export function loadConfig(options: unknown): CollabConfig {
         ? reportOptions.enabled
         : undefined;
 
+  // 0.5.0: auto-archive of spawned sessions. `archiveSpawned:false` is the
+  // rollback switch (the manual `collab_archive` tool keeps working);
+  // `archiveGraceMs` is clamped so a typo cannot archive a session still in use.
+  const archiveSpawned =
+    typeof file.archiveSpawned === 'boolean'
+      ? file.archiveSpawned
+      : typeof fromOptions.archiveSpawned === 'boolean'
+        ? fromOptions.archiveSpawned
+        : DEFAULTS.archiveSpawned;
+  const archiveGraceMs = clamp(
+    file.archiveGraceMs ?? fromOptions.archiveGraceMs ?? ARCHIVE_GRACE_MS,
+    ARCHIVE_GRACE_MIN_MS,
+    ARCHIVE_GRACE_MAX_MS
+  );
+
   return {
     aliases,
     autoDeliver,
@@ -69,6 +93,8 @@ export function loadConfig(options: unknown): CollabConfig {
     allowWrite,
     protect,
     readonlyAgents,
+    archiveSpawned,
+    archiveGraceMs,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '../types.ts';
 import { acceptTool } from './accept.ts';
+import { archiveTool } from './archive.ts';
 import { broadcastTool } from './broadcast.ts';
 import { followupTool } from './followup.ts';
 import { grantTool } from './grant.ts';
@@ -45,7 +46,8 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     reportTool(kit),
     lockTool(kit),
     unlockTool(kit),
-    locksTool(kit)
+    locksTool(kit),
+    archiveTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

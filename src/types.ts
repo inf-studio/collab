@@ -313,6 +313,15 @@ export interface BroadcastRecord {
    * window). `state` / `receipt` stay exactly as they were.
    */
   followUps?: BroadcastFollowUp[];
+  /**
+   * 0.5.0: when the spawned session of this record was archived
+   * (`PATCH /api/session/{sid} { archived:true }`). Written **after** the host
+   * accepted the write, so its presence is the idempotency marker: an archived
+   * record is never PATCHed again. Archiving is reversible — `archived:false`
+   * clears this field (see `collab_archive { restore:true }`) — and never
+   * touches `state` / `receipt` (`archived ≠ deleted`).
+   */
+  archivedAt?: number;
   createdAt?: number;
   updatedAt?: number;
   [key: string]: any;
@@ -493,6 +502,14 @@ export interface CollabConfig {
   allowWrite: boolean;
   protect: string[];
   readonlyAgents: string[];
+  /**
+   * 0.5.0: automatically archive a spawned session once its hand-off is over
+   * (default `true`). `false` disables **only** the automatic path —
+   * `collab_archive` always works by hand.
+   */
+  archiveSpawned: boolean;
+  /** Debounce after the terminal state before archiving (1min–1h). */
+  archiveGraceMs: number;
   report?: ReportConfig;
 }
 
