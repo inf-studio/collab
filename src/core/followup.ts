@@ -31,6 +31,12 @@
  *     reports the count (once per session, see `takeInvalidFollowUpNotice`);
  *   - F3: the path is normalised first (`./`, `.` and repeated `/` collapse to
  *     the same file); only `..` and absolute paths are refused outright.
+ *
+ * 0.4.1 (R1): `pendingFollowUpCandidates` exposes *every* pending entry, not
+ * just the first line — the protected-session injection merges them with the
+ * owner-queue hints and de-duplicates per proposal (any shared `issuePath` /
+ * `bid` key, transitively) before it renders, so one proposal never costs two
+ * lines.
  */
 import { lstatSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve, sep } from 'node:path';
@@ -199,6 +205,55 @@ export function followUpHintLine(entry: FollowUpRecord): string {
 }
 
 /**
+ * R1 (0.4.1): one renderable append — the line, the seen key and the fields the
+ * render layer de-duplicates on (`bid` / `issuePath`). The path is the
+ * **normalised, validated** one, so the same proposal spelled `./docs/issues/x.md`
+ * and `docs/issues/x.md` collapses to one candidate.
+ */
+export interface FollowUpCandidate {
+  bid: string;
+  issuePath: string;
+  at: number;
+  line: string;
+  key: string;
+}
+
+/**
+ * R5/R1: **every** pending, renderable append of one record, oldest first —
+ * a pure query (F1: nothing is stamped here). An entry already shown to this
+ * session, or whose path does not validate, is skipped (F2: not stamped, so it
+ * is retried next round and counted by `collab_list`). Never renders anything
+ * derived from a free-text field.
+ *
+ * 0.4.1: the protected injection merges these with the owner-queue candidates
+ * and de-duplicates on `(bid, issuePath)`, so it needs the whole list — not
+ * just the first line (`nextFollowUpHint`).
+ */
+export function pendingFollowUpCandidates(
+  record: BroadcastRecord,
+  sessionID: string,
+  seen: string[],
+  { workspace }: { workspace?: unknown } = {}
+): FollowUpCandidate[] {
+  const known = new Set(seen);
+  const out: FollowUpCandidate[] = [];
+  for (const entry of followUpsOf(record)) {
+    const key = followUpSeenKey(sessionID, record.bid, entry.at);
+    if (known.has(key)) continue;
+    const check = validateIssuePath(workspace ?? record.workspace, entry.issuePath);
+    if (!check.ok) continue; // F2: not stamped — retried next round, counted by collab_list
+    out.push({
+      bid: String(record.bid),
+      issuePath: check.issuePath,
+      at: entry.at,
+      line: followUpHintLine({ ...entry, issuePath: check.issuePath }),
+      key
+    });
+  }
+  return out;
+}
+
+/**
  * R5: pick **at most one** append to hint about, oldest first, skipping the
  * ones already shown to this session and the ones whose path does not validate.
  * Returns the line plus the key(s) the caller should stamp **after** the line
@@ -221,18 +276,8 @@ export function nextFollowUpHint(
   seen: string[],
   { workspace }: { workspace?: unknown } = {}
 ): { line: string; keys: string[] } | undefined {
-  const known = new Set(seen);
-  for (const entry of followUpsOf(record)) {
-    const key = followUpSeenKey(sessionID, record.bid, entry.at);
-    if (known.has(key)) continue;
-    const check = validateIssuePath(workspace ?? record.workspace, entry.issuePath);
-    if (!check.ok) continue; // F2: not stamped — retried next round, counted by collab_list
-    return {
-      line: followUpHintLine({ ...entry, issuePath: check.issuePath }),
-      keys: [key]
-    };
-  }
-  return undefined;
+  const [first] = pendingFollowUpCandidates(record, sessionID, seen, { workspace });
+  return first ? { line: first.line, keys: [first.key] } : undefined;
 }
 
 /**

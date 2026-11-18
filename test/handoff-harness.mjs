@@ -201,6 +201,18 @@
  *        note; a same-workspace `collab_broadcast` is refused on `realpath`
  *        (symlink spelling included) and writes nothing
  *
+ * S93 (`11-18-collab-hint-dedupe`, 0.4.1) covers the std-ui counterpart's
+ * finding that one proposal was reported twice to a protected session:
+ *   S93  the two read-only hint sources (a pending `followUps` append and an
+ *        `[owner-queue]` line) are merged and de-duplicated per proposal —
+ *        every candidate carries all its keys (`bid`, normalized `issuePath`)
+ *        and any shared key groups them, transitively (so a bid-only
+ *        `collab_request_owner { bid }` item merges with the append that knows
+ *        both), newest `at` wins — capped at 3 **together**; a de-duplicated
+ *        entry is not stamped, so it renders on the next request instead of
+ *        disappearing; different proposals keep their own line; queue items for
+ *        the same proposal collapse the same way
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -7056,6 +7068,363 @@ expect(
   'S92 … while a build target with implement is not flagged',
   !s92BuildHandoff.includes('只读 agent'),
   s92BuildHandoff.split('\n')[0]
+);
+
+// ================== S93 (0.4.1: protected hints de-duplicated per proposal)
+// The std-ui counterpart's finding: the same proposal may be reported through
+// `collab_followup` (a pending append) **and** `collab_request_owner` (a queue
+// item), and both used to render their own line in a protected session's
+// injection — the same proposal bombarding the owner twice.
+const WS_S93 = ws('s93');
+const ISSUE_S93 = issueFile(
+  WS_S93,
+  'fix-hint-dedupe.md',
+  '# 提示去重（11-18-collab-hint-dedupe）\n\n`src/core/chain.ts`\n'
+);
+const ISSUE_S93B = issueFile(
+  WS_S93,
+  'feat-hint-dedupe-b.md',
+  '# 提示去重 B（11-18-collab-hint-dedupe）\n\n`src/core/owner-queue.ts`\n'
+);
+const ISSUE_S93D = issueFile(
+  WS_S93,
+  'feat-hint-dedupe-d.md',
+  '# 提示去重 D（11-18-collab-hint-dedupe）\n\n`src/hooks/context.ts`\n'
+);
+const S93_FROM = 'ses_s93from';
+/** Seven protected **root** sessions (config `protect`), one per sub-case. */
+const S93_OWNERS = [
+  'ses_s93owner_a',
+  'ses_s93owner_b',
+  'ses_s93owner_c',
+  'ses_s93owner_d',
+  'ses_s93owner_e',
+  'ses_s93owner_f',
+  'ses_s93owner_g'
+];
+const [S93_A, S93_B, S93_C, S93_D, S93_E, S93_F, S93_G] = S93_OWNERS;
+await writeConfig({ protect: S93_OWNERS });
+sessions[S93_FROM] = {
+  id: S93_FROM,
+  agent: 'build',
+  title: 'S93 发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_S93 }
+};
+for (const sid of S93_OWNERS) {
+  sessions[sid] = {
+    id: sid,
+    agent: 'build',
+    title: `S93 受保护会话 ${sid.slice(-1)}`,
+    time: { updated: now, busy: 0 },
+    location: { directory: WS_S93 }
+  };
+}
+/** A closed hand-off *started by* the protected session, with appends. */
+const s93Closed = (bid, from, issuePath, followUps) =>
+  writeRaw(bid, {
+    workspace: WS_S93,
+    issuePath,
+    state: 'done',
+    claim: { by: 'ses_s93by', at: nowMs - 3_600_000, leaseMs: 300_000 },
+    from: { sid: from },
+    receipt: { from: 'ses_s93by', at: nowMs - 3_600_000, note: '已闭环' },
+    followUps
+  });
+const s93FollowLines = text => String(text).split('\n').filter(line => /^- b_[0-9a-f]+ 已闭环/.test(line));
+const s93All = text => [...qLines(text), ...s93FollowLines(text)];
+
+// --- S93a: the queue item is newer → one line, and the append comes back later.
+const s93BidA = 'b_aaaa0000000000f1';
+s93Closed(s93BidA, S93_A, ISSUE_S93, [
+  { bid: s93BidA, issuePath: ISSUE_S93, at: Date.now() - 600_000, by: 'ses_s93by' }
+]);
+const s93QueueA = await call(
+  'collab_request_owner',
+  { target: S93_A, text: 'S93 同一提案：队列这条更新', issuePath: ISSUE_S93, confirm: true },
+  as(S93_FROM)
+);
+const s93QueueAID = qids(s93QueueA)[0];
+const s93CtxA1 = contextEvent(S93_A);
+await hooks.context(s93CtxA1);
+const s93TextA1 = textOf(s93CtxA1);
+out('S93a one proposal, two sources (queue newer)', s93All(s93TextA1).join(' | ') || '(无)');
+expect(
+  'S93 the same proposal renders exactly one line (queue + followUp merged)',
+  s93All(s93TextA1).length === 1,
+  s93All(s93TextA1).join(' | ') || '(无)'
+);
+expect(
+  'S93 … and the newest source wins (the queue item, not the older append)',
+  qLines(s93TextA1).length === 1 && s93FollowLines(s93TextA1).length === 0,
+  qLines(s93TextA1)[0] ?? '(无)'
+);
+expect(
+  'S93 the rendered queue item is stamped seenAt',
+  Number(qRead(S93_A, s93QueueAID).seenAt) > 0,
+  String(qRead(S93_A, s93QueueAID).seenAt)
+);
+const s93CtxA2 = contextEvent(S93_A);
+await hooks.context(s93CtxA2);
+const s93TextA2 = textOf(s93CtxA2);
+out('S93a next request (deduped entry is still pending)', s93All(s93TextA2).join(' | ') || '(无)');
+expect(
+  'S93 the de-duplicated append was not stamped: it renders on the next request',
+  s93FollowLines(s93TextA2).length === 1 && s93FollowLines(s93TextA2)[0].includes(ISSUE_S93),
+  s93FollowLines(s93TextA2)[0] ?? '(无)'
+);
+const s93CtxA3 = contextEvent(S93_A);
+await hooks.context(s93CtxA3);
+expect(
+  'S93 … and once it really rendered it is not repeated',
+  s93All(textOf(s93CtxA3)).length === 0,
+  s93All(textOf(s93CtxA3)).join(' | ') || '(无)'
+);
+
+// --- S93b: the append is newer → one line, and the queue item stays unread.
+const s93BidB = 'b_aaaa0000000000f2';
+const s93QueueB = await call(
+  'collab_request_owner',
+  { target: S93_B, text: 'S93 同一提案：队列这条更旧', issuePath: ISSUE_S93B, confirm: true },
+  as(S93_FROM)
+);
+const s93QueueBID = qids(s93QueueB)[0];
+s93Closed(s93BidB, S93_B, ISSUE_S93B, [
+  { bid: s93BidB, issuePath: ISSUE_S93B, at: Date.now() + 60_000, by: 'ses_s93by' }
+]);
+const s93CtxB1 = contextEvent(S93_B);
+await hooks.context(s93CtxB1);
+const s93TextB1 = textOf(s93CtxB1);
+out('S93b one proposal, two sources (append newer)', s93All(s93TextB1).join(' | ') || '(无)');
+expect(
+  'S93 the merged line takes the newer append (one line, not two)',
+  s93All(s93TextB1).length === 1 &&
+    s93FollowLines(s93TextB1).length === 1 &&
+    s93FollowLines(s93TextB1)[0].includes(s93BidB),
+  s93All(s93TextB1).join(' | ') || '(无)'
+);
+expect(
+  'S93 … the de-duplicated queue item is not stamped',
+  qRead(S93_B, s93QueueBID).seenAt === null,
+  String(qRead(S93_B, s93QueueBID).seenAt)
+);
+const s93CtxB2 = contextEvent(S93_B);
+await hooks.context(s93CtxB2);
+expect(
+  'S93 … and it renders (and is stamped) on the next request',
+  qLines(textOf(s93CtxB2)).length === 1 &&
+    Number(qRead(S93_B, s93QueueBID).seenAt) > 0 &&
+    s93FollowLines(textOf(s93CtxB2)).length === 0,
+  qLines(textOf(s93CtxB2))[0] ?? '(无)'
+);
+
+// --- S93c: different proposals keep their own line, and the cap stays at 3.
+for (const [index, name] of ['s93-p1.md', 's93-p2.md', 's93-p3.md'].entries()) {
+  await call(
+    'collab_request_owner',
+    { target: S93_C, text: `S93 独立提案 ${index + 1}`, issuePath: `docs/issues/${name}`, confirm: true },
+    as(S93_FROM)
+  );
+}
+const s93BidC = 'b_aaaa0000000000f3';
+s93Closed(s93BidC, S93_C, ISSUE_S93D, [
+  { bid: s93BidC, issuePath: ISSUE_S93D, at: Date.now() + 60_000, by: 'ses_s93by' }
+]);
+const s93CtxC1 = contextEvent(S93_C);
+await hooks.context(s93CtxC1);
+const s93TextC1 = textOf(s93CtxC1);
+out('S93c four distinct proposals (first request)', s93All(s93TextC1).join(' | ') || '(无)');
+expect(
+  'S93 four distinct proposals render at most 3 lines (the newest waits)',
+  s93All(s93TextC1).length === 3 && s93FollowLines(s93TextC1).length === 0,
+  String(s93All(s93TextC1).length)
+);
+expect(
+  'S93 … oldest first: the three queue items, in submission order',
+  qLines(s93TextC1)
+    .map(line => /S93 独立提案 (\d)/.exec(line)?.[1] ?? '?')
+    .join(',') === '1,2,3',
+  qLines(s93TextC1)
+    .map(line => /S93 独立提案 (\d)/.exec(line)?.[1] ?? '?')
+    .join(',')
+);
+const s93CtxC2 = contextEvent(S93_C);
+await hooks.context(s93CtxC2);
+expect(
+  'S93 … and the fourth (a different proposal) arrives on the next request',
+  s93All(textOf(s93CtxC2)).length === 1 &&
+    s93FollowLines(textOf(s93CtxC2))[0]?.includes(ISSUE_S93D) === true,
+  s93All(textOf(s93CtxC2)).join(' | ') || '(无)'
+);
+
+// --- S93d: two queue items for the same proposal collapse, oldest re-appears.
+const s93QueueD1 = await call(
+  'collab_request_owner',
+  { target: S93_D, text: 'S93 同一提案：第一条', issuePath: ISSUE_S93D, confirm: true },
+  as(S93_FROM)
+);
+const s93QueueD2 = await call(
+  'collab_request_owner',
+  { target: S93_D, text: 'S93 同一提案：第二条（更新）', issuePath: ISSUE_S93D, confirm: true },
+  as(S93_FROM)
+);
+const s93D1 = qids(s93QueueD1)[0];
+const s93D2 = qids(s93QueueD2)[0];
+const s93CtxD1 = contextEvent(S93_D);
+await hooks.context(s93CtxD1);
+expect(
+  'S93 two queue items for the same proposal render as one line (newest wins)',
+  qLines(textOf(s93CtxD1)).length === 1 && qLines(textOf(s93CtxD1))[0].includes('第二条'),
+  qLines(textOf(s93CtxD1)).join(' | ') || '(无)'
+);
+expect(
+  'S93 … the merged-away item is not stamped',
+  Number(qRead(S93_D, s93D2).seenAt) > 0 && qRead(S93_D, s93D1).seenAt === null,
+  `${qRead(S93_D, s93D1).seenAt} / ${qRead(S93_D, s93D2).seenAt}`
+);
+const s93CtxD2 = contextEvent(S93_D);
+await hooks.context(s93CtxD2);
+expect(
+  'S93 … and it is still pending on the next request',
+  qLines(textOf(s93CtxD2)).length === 1 && qLines(textOf(s93CtxD2))[0].includes('第一条'),
+  qLines(textOf(s93CtxD2)).join(' | ') || '(无)'
+);
+
+// --- S93e (P2): a queue item that only knows the bid still merges with the
+// append that knows both — `collab_request_owner { target, text, bid }` without
+// `issuePath` was the reachable case where one proposal still cost two lines.
+const s93BidE = 'b_aaaa0000000000f5';
+s93Closed(s93BidE, S93_E, ISSUE_S93B, [
+  { bid: s93BidE, issuePath: ISSUE_S93B, at: Date.now() - 600_000, by: 'ses_s93by' }
+]);
+const s93QueueE = await call(
+  'collab_request_owner',
+  { target: S93_E, text: 'S93 只有 bid 的队列项（更新）', bid: s93BidE, confirm: true },
+  as(S93_FROM)
+);
+const s93QueueEID = qids(s93QueueE)[0];
+const s93CtxE1 = contextEvent(S93_E);
+await hooks.context(s93CtxE1);
+const s93TextE1 = textOf(s93CtxE1);
+out('S93e bid-only queue item + same-bid append', s93All(s93TextE1).join(' | ') || '(无)');
+expect(
+  'S93 a queue item carrying only the bid still merges with the append (one line)',
+  qRead(S93_E, s93QueueEID).issuePath === null && s93All(s93TextE1).length === 1,
+  s93All(s93TextE1).join(' | ') || '(无)'
+);
+expect(
+  'S93 … and the newest source wins (the bid-only queue line)',
+  qLines(s93TextE1).length === 1 && s93FollowLines(s93TextE1).length === 0 && qLines(s93TextE1)[0].includes('只有 bid'),
+  qLines(s93TextE1)[0] ?? '(无)'
+);
+const s93CtxE2 = contextEvent(S93_E);
+await hooks.context(s93CtxE2);
+expect(
+  'S93 … the de-duplicated append still renders on the next request',
+  s93All(textOf(s93CtxE2)).length === 1 &&
+    s93FollowLines(textOf(s93CtxE2))[0]?.includes(s93BidE) === true,
+  s93All(textOf(s93CtxE2)).join(' | ') || '(无)'
+);
+
+// --- S93f (P2): two queue items for the same bid, only one of them with a path.
+const s93BidF = 'b_aaaa0000000000f6';
+const s93QueueF1 = await call(
+  'collab_request_owner',
+  { target: S93_F, text: 'S93 同 bid 队列 A（带路径）', issuePath: ISSUE_S93D, bid: s93BidF, confirm: true },
+  as(S93_FROM)
+);
+const s93QueueF2 = await call(
+  'collab_request_owner',
+  { target: S93_F, text: 'S93 同 bid 队列 B（只有 bid，更新）', bid: s93BidF, confirm: true },
+  as(S93_FROM)
+);
+const s93F1 = qids(s93QueueF1)[0];
+const s93F2 = qids(s93QueueF2)[0];
+const s93CtxF1 = contextEvent(S93_F);
+await hooks.context(s93CtxF1);
+const s93TextF1 = textOf(s93CtxF1);
+out('S93f two queue items, one bid, one path', s93All(s93TextF1).join(' | ') || '(无)');
+expect(
+  'S93 two queue items sharing a bid (one with a path) render as one line',
+  qLines(s93TextF1).length === 1 && qLines(s93TextF1)[0].includes('队列 B'),
+  qLines(s93TextF1).join(' | ') || '(无)'
+);
+expect(
+  'S93 … the merged-away item is not stamped',
+  Number(qRead(S93_F, s93F2).seenAt) > 0 && qRead(S93_F, s93F1).seenAt === null,
+  `${qRead(S93_F, s93F1).seenAt} / ${qRead(S93_F, s93F2).seenAt}`
+);
+const s93CtxF2 = contextEvent(S93_F);
+await hooks.context(s93CtxF2);
+expect(
+  'S93 … and it is still pending on the next request',
+  qLines(textOf(s93CtxF2)).length === 1 && qLines(textOf(s93CtxF2))[0].includes('队列 A'),
+  qLines(textOf(s93CtxF2)).join(' | ') || '(无)'
+);
+
+// --- S93g (P2): the merge relation is transitive. A(path p1, bid b1) and
+// B(path p1, bid b2) share a path; B and C(bid b2) share a bid → A/B/C are one
+// proposal even though A and C have no key in common.
+const s93BidG1 = 'b_aaaa0000000000f7';
+const s93BidG2 = 'b_aaaa0000000000f8';
+await call(
+  'collab_request_owner',
+  { target: S93_G, text: 'S93 传递 A（路径 + bid b1）', issuePath: ISSUE_S93, bid: s93BidG1, confirm: true },
+  as(S93_FROM)
+);
+await call(
+  'collab_request_owner',
+  { target: S93_G, text: 'S93 传递 B（路径 + bid b2）', issuePath: ISSUE_S93, bid: s93BidG2, confirm: true },
+  as(S93_FROM)
+);
+await call(
+  'collab_request_owner',
+  { target: S93_G, text: 'S93 传递 C（只有 bid b2，最新）', bid: s93BidG2, confirm: true },
+  as(S93_FROM)
+);
+const s93CtxG1 = contextEvent(S93_G);
+await hooks.context(s93CtxG1);
+const s93TextG1 = textOf(s93CtxG1);
+out('S93g transitive proposal group (path → bid)', s93All(s93TextG1).join(' | ') || '(无)');
+expect(
+  'S93 a path link and a bid link put three queue items in one group (one line)',
+  qLines(s93TextG1).length === 1 && qLines(s93TextG1)[0].includes('传递 C'),
+  qLines(s93TextG1).join(' | ') || '(无)'
+);
+const s93CtxG2 = contextEvent(S93_G);
+await hooks.context(s93CtxG2);
+expect(
+  'S93 … the group re-renders one line at a time (newest removed first)',
+  qLines(textOf(s93CtxG2)).length === 1 && qLines(textOf(s93CtxG2))[0].includes('传递 B'),
+  qLines(textOf(s93CtxG2)).join(' | ') || '(无)'
+);
+const s93CtxG3 = contextEvent(S93_G);
+await hooks.context(s93CtxG3);
+expect(
+  'S93 … and the oldest member of the group still arrives eventually',
+  qLines(textOf(s93CtxG3)).length === 1 && qLines(textOf(s93CtxG3))[0].includes('传递 A'),
+  qLines(textOf(s93CtxG3)).join(' | ') || '(无)'
+);
+const s93CtxG4 = contextEvent(S93_G);
+await hooks.context(s93CtxG4);
+expect(
+  'S93 … then the group is empty (nothing re-rendered)',
+  s93All(textOf(s93CtxG4)).length === 0,
+  s93All(textOf(s93CtxG4)).join(' | ') || '(无)'
+);
+
+// --- S93h: the tool descriptions state the de-dup contract (R3).
+const s93OwnerDesc = String(tool('collab_request_owner').description);
+const s93FollowDesc = String(tool('collab_followup').description);
+expect(
+  'S93 collab_request_owner says the broadcast pool excludes protected sessions',
+  /excludes/.test(s93OwnerDesc) && s93OwnerDesc.includes('[protected*]'),
+  s93OwnerDesc.slice(0, 120)
+);
+expect(
+  'S93 collab_followup says not to register a followUp for an already-queued proposal',
+  /collab_request_owner/.test(s93FollowDesc) && /de-duplicated/.test(s93FollowDesc),
+  s93FollowDesc.slice(0, 120)
 );
 
 // Cleanup: leave no queue files behind for the closing summary.

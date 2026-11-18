@@ -4,6 +4,7 @@ import {
   BCAST_LEASE_MS,
   BCAST_DONE_STATES,
   MAX_STORED,
+  OWNER_QUEUE_HINT_LIMIT,
   SCORE_CANDIDATE_LIMIT,
   VERDICT_MESSAGE_LIMIT
 } from '../constants.ts';
@@ -40,12 +41,13 @@ import {
 import {
   followUpsOf,
   nextFollowUpHint,
+  pendingFollowUpCandidates,
   readFollowUpSeen
 } from './followup.ts';
 import { createGrants } from './grants.ts';
 import type { Grants } from './grants.ts';
 import { createLineage } from './lineage.ts';
-import { unseenHints } from './owner-queue.ts';
+import { unseenCandidates } from './owner-queue.ts';
 import { pathsFromMessages, scoreCandidate } from './score.ts';
 import {
   assistantTexts,
@@ -141,6 +143,106 @@ export interface HandoffChain extends Grants {
     now?: number,
     input?: { actor?: string }
   ): Promise<BroadcastRecord | undefined>;
+}
+
+/**
+ * R1 (0.4.1): one candidate line of a protected session's injection, **before**
+ * de-duplication. Two read-only sources produce it — a closed hand-off's
+ * pending `followUps` entry and an unread `[owner-queue]` item — and both may
+ * name the same proposal, which used to cost one line each (the same proposal
+ * bombarding the owner twice).
+ */
+interface ProtectedHint {
+  at: number;
+  bid?: string;
+  issuePath?: string;
+  /**
+   * R1 (0.4.1, P2): **every** proposal key this hint carries — `path:<normalized>`
+   * and/or `bid:<bid>`. Two hints naming the same proposal share at least one key
+   * even when only one of them knows the path (`collab_request_owner { bid }`
+   * without `issuePath`), so a single "path first, else bid" key was too coarse.
+   * An empty list means "cannot be proven to be the same proposal" → never merged.
+   */
+  keys: string[];
+  line: string;
+  /** follow-up seen key (`<sid>:<bid>:<at>`) — stamped after the push. */
+  key?: string;
+  /** owner-queue item id — stamped after the push. */
+  queueID?: string;
+  source: 'followup' | 'owner-queue';
+}
+
+/** R1 (0.4.1, P2): the proposal keys of a hint — path and bid may both be present. */
+function hintKeys(issuePath: string | undefined, bid: string | undefined): string[] {
+  const keys: string[] = [];
+  if (issuePath) keys.push(`path:${issuePath}`);
+  if (bid) keys.push(`bid:${bid}`);
+  return keys;
+}
+
+/** R1 (0.4.1): within one proposal group, does `hint` replace `previous`? */
+function hintIsNewer(hint: ProtectedHint, previous: ProtectedHint | undefined): boolean {
+  if (!previous) return true;
+  if (hint.at !== previous.at) return hint.at > previous.at;
+  // Same millisecond (only possible across sources / hand-written items): the
+  // conclusion wins over the nudge; otherwise the first one seen is kept.
+  return hint.source === 'followup' && previous.source !== 'followup';
+}
+
+/**
+ * R1 (0.4.1): merge the two protected-session hint sources into at most
+ * `OWNER_QUEUE_HINT_LIMIT` lines, one per proposal.
+ *
+ *   - a candidate is identified by **all** the keys it carries (`path:…`,
+ *     `bid:…`); any shared key means "same proposal", and the relation is
+ *     transitive (A shares a path with B, B shares a bid with C → one group).
+ *     So a queue item that only knows the `bid` still merges with the follow-up
+ *     that knows both, which a single `issuePath ? path : bid` key did not;
+ *   - a candidate with no key at all is never merged (nothing proves it is the
+ *     same thing), so two unrelated queue items both still render;
+ *   - the **newest** `at` wins (a later append beats an older nudge; on the same
+ *     millisecond the conclusion wins over the nudge);
+ *   - the survivors are sorted `at` ascending and capped — oldest first, the same
+ *     FIFO order the queue alone used;
+ *   - only the survivors are returned, so only they get stamped (R2): a merged
+ *     away entry stays pending and can be shown on the next request.
+ */
+function dedupeProtectedHints(hints: ProtectedHint[]): ProtectedHint[] {
+  // Union–find over the candidates (a proposal group may be built from both
+  // sources, in any order), then the newest member of each group survives.
+  const ordered = [...hints].sort((a, b) => a.at - b.at);
+  const roots = ordered.map((_, index) => index);
+  const find = (start: number): number => {
+    let root = start;
+    while (roots[root] !== root) root = roots[root];
+    let cursor = start;
+    while (roots[cursor] !== root) {
+      const next = roots[cursor];
+      roots[cursor] = root;
+      cursor = next;
+    }
+    return root;
+  };
+  const firstWithKey = new Map<string, number>();
+  ordered.forEach((hint, index) => {
+    for (const key of hint.keys) {
+      const previous = firstWithKey.get(key);
+      if (previous === undefined) {
+        firstWithKey.set(key, index);
+        continue;
+      }
+      const a = find(index);
+      const b = find(previous);
+      if (a !== b) roots[a] = b;
+    }
+  });
+  const groups = new Map<number, ProtectedHint>();
+  ordered.forEach((hint, index) => {
+    const root = find(index);
+    const previous = groups.get(root);
+    if (hintIsNewer(hint, previous)) groups.set(root, hint);
+  });
+  return [...groups.values()].sort((a, b) => a.at - b.at).slice(0, OWNER_QUEUE_HINT_LIMIT);
 }
 
 /**
@@ -720,6 +822,50 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
   }
 
   /**
+   * R1 (0.4.1): **every** follow-up hint this requester could see right now —
+   * all of its closed records, all pending entries, oldest first. The plain
+   * `followUpHints` path renders at most one line; the protected path merges
+   * these with the owner-queue candidates and de-duplicates before it caps, so
+   * it needs the whole list. Pure query (F1): nothing is stamped here.
+   */
+  async function followUpCandidates(sessionID: string): Promise<ProtectedHint[]> {
+    const seen = await readFollowUpSeen(ctx, sessionID);
+    const out: ProtectedHint[] = [];
+    for (const record of allBroadcasts()) {
+      if (String(record.from?.sid ?? '') !== sessionID) continue; // requester only
+      if (!['done', 'blocked'].includes(String(record.state))) continue;
+      if (!followUpsOf(record).length) continue;
+      for (const candidate of pendingFollowUpCandidates(record, sessionID, seen, {
+        workspace: record.workspace
+      })) {
+        out.push({
+          at: candidate.at,
+          bid: candidate.bid,
+          issuePath: candidate.issuePath,
+          keys: hintKeys(candidate.issuePath, candidate.bid),
+          line: candidate.line,
+          key: candidate.key,
+          source: 'followup'
+        });
+      }
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }
+
+  /** R1 (0.4.1): the unread owner-queue items as render candidates (all of them). */
+  function queueCandidates(sessionID: string): ProtectedHint[] {
+    return unseenCandidates(sessionID).map(item => ({
+      at: item.at,
+      bid: item.bid,
+      issuePath: item.issuePath,
+      keys: hintKeys(item.issuePath, item.bid),
+      line: item.line,
+      queueID: item.id,
+      source: 'owner-queue' as const
+    }));
+  }
+
+  /**
    * What this session should be told on its next model request, as plain text
    * lines (the hook wraps them), plus the follow-up keys to stamp **after** the
    * block was pushed (F1, 0.3.1):
@@ -739,6 +885,15 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * `seenAt` only after the block is pushed (same F1 rule as the follow-ups).
    * A `[protected-child]` is not a group member and therefore returns early
    * below; it still gets its queue hints (nothing can be delivered to it either).
+   *
+   * R1 (0.4.1): those two sources are now **merged before rendering**. One
+   * proposal reported twice — a queue item plus a `followUps` append, or two
+   * queue items — costs one line as soon as they share **any** key (`bid` or
+   * normalized `issuePath`, transitively), which also covers the reachable
+   * `collab_request_owner { bid }` (no path) case; the survivor is the newest
+   * (`at`). Only the lines that actually render are returned for stamping, so a
+   * de-duplicated entry stays pending for the next request instead of
+   * disappearing.
    */
   async function injectionFor(
     sessionID: string | undefined,
@@ -752,19 +907,29 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     // sessions can never be a queue target (`collab_request_owner` refuses
     // them), so the directory read is skipped for them.
     const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
-    const queue = guard ? unseenHints(sessionID) : { lines: [], ids: [] };
+    const queued = guard ? queueCandidates(sessionID) : [];
     if (!info || info.parentID) {
       // Children are not group members: they used to get nothing at all. A
       // protected child is still a legal queue target, so its (read-only) queue
       // lines are the one thing it may see.
-      return guard
-        ? { lines: queue.lines, keys: [], ownerQueue: queue.ids }
-        : { lines: [], keys: [] };
+      if (!guard) return { lines: [], keys: [] };
+      const rendered = dedupeProtectedHints(queued);
+      return {
+        lines: rendered.map(hint => hint.line),
+        keys: [],
+        ownerQueue: rendered.flatMap(hint => (hint.queueID ? [hint.queueID] : []))
+      };
+    }
+    if (guard) {
+      const hints = await followUpCandidates(sessionID);
+      const rendered = dedupeProtectedHints([...hints, ...queued]);
+      return {
+        lines: rendered.map(hint => hint.line),
+        keys: rendered.flatMap(hint => (hint.key ? [hint.key] : [])),
+        ownerQueue: rendered.flatMap(hint => (hint.queueID ? [hint.queueID] : []))
+      };
     }
     const hints = await followUpHints(sessionID);
-    if (guard) {
-      return { lines: [...hints.lines, ...queue.lines], keys: hints.keys, ownerQueue: queue.ids };
-    }
 
     const lines: string[] = [];
     for (const raw of allBroadcasts()) {

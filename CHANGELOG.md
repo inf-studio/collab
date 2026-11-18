@@ -3,6 +3,45 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-11-18
+
+> 来源：std-ui 承接方对 0.2.0 的实测（`t_mwls3zbk_9ac9`）——同一提案既可用 `collab_followup`
+> （登记追加）也可用 `collab_request_owner`（队列），两者在受保护会话的 `context` 注入里**各占一行**，
+> 指向同一份提案 → 重复轰炸。只改**渲染层**与工具说明：队列/followUps 的存储结构、权限模型、
+> handoff/lease 语义都不变。
+
+### Fixed
+
+- **R1 受保护注入按提案去重**：`chain.injectionFor` 先把 §11.9.3 的追加提示与 §11.12 的
+  `[owner-queue]` 行合并为候选（每条带 `at` / `bid` / `issuePath` / 行文本 / 待标记键），
+  再按**提案键集合**去重——每个候选登记它带的全部键（`path:<规范化路径>`、`bid:<bid>`，可同时有），
+  **任一键相同即同一提案**且传递生效（A 与 B 同路径、B 与 C 同 bid → A/B/C 一组）；组内
+  **保留 `at` 最新的一条**（同一毫秒内 `followUp` 优先）；两个键都没有的条目不参与合并。
+  去重后按 `at` 升序取前 **3** 行——两类提示**合计** ≤3（旧口径为追加 ≤1 + 队列 ≤3，共可到 4 行）。
+- **R2 去重项不标记**：`keys` / `ownerQueue` 只包含**实际渲染**的条目，`context` hook 仍然只在
+  `event.system.push` 成功后写 `seenAt` / followUp key；被去重掉的条目保持待读，下一次请求仍会提示
+  （不是静默丢弃）。
+
+### Changed
+
+- **R3 工具说明**：`collab_request_owner` 补「broadcast 的候选池**排除** `[protected*]`，因此触达受保护
+  会话只有本工具排队、或它自己 pull 提案/提示两条路」，并说明同一提案只渲染一行；`collab_followup`
+  补「同一提案若已用 `collab_request_owner` 提交，不必再登记 followUp（渲染层按提案去重，只显示最新一条）」。
+
+### 文档
+
+- `docs/collab.md`：新增 §11.12.1「两类提示的去重规则」（去重键 / 保留哪条 / ≤3 合计 / 只标记渲染项 /
+  仅渲染层），§11.9.3 与 §11.12 的提示口径同步；`skills/collab` 补一句「已排队就不必再登记 followUp」。
+
+### 回归
+
+- `test/handoff-harness.mjs` 新增 **S93（26 项）**：同提案「队列较新」→ 1 行取队列、被去重的 followUp
+  不 stamp 且下一轮渲染；同提案「追加较新」→ 1 行取追加、队列项不 stamp 且下一轮渲染；4 个不同提案 →
+  首轮 3 行（最旧优先）、次轮 1 行；两条队列项指向同一提案 → 1 行（取新）+ 旧的下一轮仍提示；
+  **只带 `bid` 的队列项**（`collab_request_owner { bid }`）与同 bid 的追加 → 1 行取新；同 bid 的一条带路径
+  一条不带 → 1 行；`path` 链 + `bid` 链的传递分组（A–B 同路径、B–C 同 bid）→ 1 行且按新到旧逐轮放出；
+  两个工具的描述含去重/broadcast 排除 protected 的说明。`pnpm test` 现在 = **608 + 12 + 18**。
+
 ## [0.4.0] - 2026-11-18
 
 > 缺陷 `d_6180f4ab4fb4368a`（muke-pos-app CLI 线，0.3.1）的三条成立项：D1 受保护目标没有合规

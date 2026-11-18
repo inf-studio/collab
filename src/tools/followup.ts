@@ -50,11 +50,13 @@ export function followupTool(_kit: ToolKit): ToolDefinition {
       'Register a post-closure conclusion for a hand-off you claimed (state done/blocked): appends ' +
       '{bid, issuePath, at, by} to record.followUps[] and NOTHING else — no delivery, no state change, no ' +
       'reopen. The conclusion itself must be written into the proposal file; the requester only gets one ' +
-      'read-only context line pointing at that file. Only the session that claimed the bid may call it; ' +
-      '`issuePath` defaults to the record\'s own proposal and must resolve inside the record workspace under ' +
-      'docs/issues/ (no `..`, no absolute path, no symlink; `.` / `./` and repeated `/` are normalised away, ' +
-      'so `./docs/issues/x.md` is accepted). At most 3 appends per bid. Requires confirm:true; ' +
-      'otherwise it only previews.',
+      'read-only context line pointing at that file. If the same proposal was already submitted through ' +
+      'collab_request_owner (the protected-target pull queue), do not register a followUp as well: both hints ' +
+      'are de-duplicated per proposal at render time and only the newest renders. Only the session that ' +
+      'claimed the bid may call it; `issuePath` defaults to the record\'s own proposal and must resolve inside the ' +
+      'record workspace under docs/issues/ (no `..`, no absolute path, no symlink; `.` / `./` and repeated `/` ' +
+      'are normalised away, so `./docs/issues/x.md` is accepted). At most 3 appends per bid. Requires ' +
+      'confirm:true; otherwise it only previews.',
     input: jsonInput({
       properties: {
         bid: { type: 'string', description: 'The closed hand-off (`b_…`) you claimed.' },

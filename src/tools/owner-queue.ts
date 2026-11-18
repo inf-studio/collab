@@ -49,8 +49,11 @@ export function requestOwnerTool(kit: ToolKit): ToolDefinition {
       'This is a pull channel, not a delivery: it writes one JSON item into ' +
       '~/.config/opencode/collab-owner-queue/<targetSid>/ and sends no prompt, creates no bid/thread, changes no ' +
       'collaboration state. The protected session sees 1–3 read-only lines in its own context injection (each only ' +
-      'once, no reply required). Only a non-protected session may queue, and only for a protected target — for an ' +
-      'ordinary session use collab_handoff instead. At most 50 unread items per target (a full queue refuses a new ' +
+      'once, no reply required; one line per proposal — hints sharing a bid **or** an issuePath are merged, ' +
+      'transitively, newest wins). Only a non-protected session may queue, and only for a protected ' +
+      'target — for an ordinary session use collab_handoff instead; note that the broadcast candidate pool ' +
+      '**excludes** `[protected*]` sessions, so this tool (or the protected session pulling the proposal/hints ' +
+      'itself) is the only way to reach one. At most 50 unread items per target (a full queue refuses a new ' +
       'one; items the owner already read do not count and are swept after 7 days). ' +
       '`revoke:true` deletes one of my own pending items. ' +
       'Requires confirm:true; otherwise it only previews (zero writes).',

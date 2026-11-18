@@ -29,13 +29,18 @@
  * even be on this machine, so there is no `realpath` to check — and because the
  * owner reads the file itself, under its own permissions, a bad path costs
  * nothing.
+ *
+ * 0.4.1 (R1): `unseenCandidates` returns every unread item with its `at` /
+ * `bid` / `issuePath`, so the render layer can merge these lines with the
+ * pending `followUps` hints and show one line per proposal (newest wins; any
+ * shared `bid` / `issuePath` key groups them, transitively). The cap is applied
+ * by that caller, *after* the merge.
  */
 import { mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   OWNER_QUEUE_DIR,
   OWNER_QUEUE_HINT_CHARS,
-  OWNER_QUEUE_HINT_LIMIT,
   OWNER_QUEUE_ISSUE_LIMIT,
   OWNER_QUEUE_LIMIT,
   OWNER_QUEUE_PRUNE_LIMIT,
@@ -304,29 +309,47 @@ function hhmm(at: number): string {
 }
 
 /**
- * The unread owner-queue hints of one protected session, **oldest first**, at
- * most `OWNER_QUEUE_HINT_LIMIT` per injection.
- *
- * Pure query (F1 rule): the ids are returned alongside the lines and the
- * caller (`hooks/context.ts`) stamps `seenAt` only after the block was really
- * pushed onto the request. A failed injection therefore leaves every item
- * unread for the next request instead of losing it.
- *
- * The line carries no instruction and no reply request — `summary` is the
- * sender's own words, capped, and the rest is `from` / time / proposal path:
+ * The line an owner sees for one item. It carries no instruction and no reply
+ * request — `summary` is the sender's own words, capped, and the rest is
+ * `from` / time / proposal path:
  *   `- [owner-queue] <from short id> @ <HH:MM>：<summary ≤120>（<issuePath 或 ->）`
  */
-export function unseenHints(targetSid: string): { lines: string[]; ids: string[] } {
-  const unread = listFor(targetSid).filter(item => !item.seenAt);
-  const shown = unread.slice(0, OWNER_QUEUE_HINT_LIMIT);
-  return {
-    lines: shown.map(
-      item =>
-        `- [owner-queue] ${shortID(item.from)} @ ${hhmm(item.at)}：` +
-        `${item.summary.slice(0, OWNER_QUEUE_HINT_CHARS)}（${item.issuePath ?? '-'}）`
-    ),
-    ids: shown.map(item => item.id)
-  };
+function hintLine(item: OwnerQueueItem): string {
+  return (
+    `- [owner-queue] ${shortID(item.from)} @ ${hhmm(item.at)}：` +
+    `${item.summary.slice(0, OWNER_QUEUE_HINT_CHARS)}（${item.issuePath ?? '-'}）`
+  );
+}
+
+/**
+ * R1 (0.4.1): one unread item, with the fields the render layer
+ * de-duplicates on — `bid` / `issuePath` — plus the line itself.
+ */
+export interface OwnerQueueCandidate {
+  id: string;
+  at: number;
+  bid?: string;
+  issuePath?: string;
+  line: string;
+}
+
+/**
+ * **All** unread items of one target, oldest first, as render candidates. The
+ * cap belongs to the caller: the protected injection merges these with the
+ * pending `followUps` lines, de-duplicates by proposal and *then* keeps at most
+ * `OWNER_QUEUE_HINT_LIMIT` — so the three it renders are the three oldest that
+ * survived, not the three oldest items regardless of overlap.
+ */
+export function unseenCandidates(targetSid: string): OwnerQueueCandidate[] {
+  return listFor(targetSid)
+    .filter(item => !item.seenAt)
+    .map(item => ({
+      id: item.id,
+      at: item.at,
+      bid: item.bid ?? undefined,
+      issuePath: item.issuePath ?? undefined,
+      line: hintLine(item)
+    }));
 }
 
 /**

@@ -270,7 +270,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
-| `collab_request_owner` | `{ target?, text?, issuePath?, bid?, id?, revoke?, confirm }` | **受保护目标请求队列（0.4.0）**：只允许「非受保护 → `[protected]`/`[protected-child]`」，写入 `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`（`tmp+rename`，每目标上限 **50 条未读**，满则拒新；已读项不计、7 天后回收）。**不投递、不唤醒、不建 bid/thread、不改任何协作状态**（0 条 prompt）；`confirm:false` 零写入。`text` → `summary`（去控制字符、≤500）；`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。目标会话只在自己 `context` 注入里看到 ≤3 行只读提示；`revoke:true` + `id` 只允许发起方撤回自己的一条。见 §11.12 |
+| `collab_request_owner` | `{ target?, text?, issuePath?, bid?, id?, revoke?, confirm }` | **受保护目标请求队列（0.4.0）**：只允许「非受保护 → `[protected]`/`[protected-child]`」，写入 `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`（`tmp+rename`，每目标上限 **50 条未读**，满则拒新；已读项不计、7 天后回收）。**不投递、不唤醒、不建 bid/thread、不改任何协作状态**（0 条 prompt）；`confirm:false` 零写入。`text` → `summary`（去控制字符、≤500）；`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。目标会话只在自己 `context` 注入里看到 ≤3 行只读提示（与「闭环后追加」合计 ≤3、同一提案一行，§11.12.1）；`revoke:true` + `id` 只允许发起方撤回自己的一条。见 §11.12 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
 | `collab_report` | `{ note?, bid?, threadID?, confirm }` | **缺陷上报（旁路，不改任何协作状态）**：把现场写到 `~/.config/opencode/collab-reports/<signature>/<ts>.{json,md}`（版本/工具/分类/错误名与消息≤2KB/stackTop 5 帧/短 id/工作区/记录快照；**不含正文、文件内容、token**），配了 `report.to` 时额外 `collab_send`（`note`+`queue`）通知维护方；同签名 1 小时最多 1 条。任何非参数校验类错误都会在错误文案末尾提示这个入口（见 §11.8） |
 | `collab_lock` | `{ resource, mode?, ttlMs?, reason?, wait?, confirm }` | **资源租约（0.2.0）**：同工作区共享资源（测试窗口 / 同一文件 / 全量构建）的可判定互斥。`exclusive`（默认）与任何模式互斥，`shared` 之间可共存；`ttlMs` 默认 15 分钟、夹在 `[10s, 2h]`；过期在下次访问时回收（写 `history: expire`），无需人工清理。同一会话重复申请**幂等**（返回既有租约，不重复计数、不延长 TTL）。被占时：不传 `wait` → 返回「持有者 + 剩余 TTL」；`wait:true` → 按 FIFO 入队并返回排位。**不投递消息、不打断会话、不提供抢占**。`confirm:true` 才写，否则只预览。见 §11.10 |
@@ -369,7 +369,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 > ⚠ 提醒可达性：`injectionFor` 的**外部**提醒对受保护会话是白名单化的——只有两类只读提示：
 > ① 「提案有闭环后追加」（§11.9.3；条件：它是该单发起方且存在未提示的 `followUps`）；
-> ② 「`[owner-queue] …`」未读队列项（§11.12；≤3 行/次，每条一次）。
+> ② 「`[owner-queue] …`」未读队列项（§11.12；每条一次）。两类提示**合计 ≤3 行**，且同一提案只渲染
+> `at` 最新的一条（§11.12.1）。
 > 接管请求 / 群组广播 / 未闭环提醒都不会注入。
 > 另一路 `injectStale` 是**本地**「与本人相关的挂起记录」提醒（`involves(record, sessionID)`：
 > 本人发起、本人领取或正在问询本人），不含任何他人正文、不含任何指令，因此对受保护会话照常生效。
@@ -606,6 +607,8 @@ delivery.cid 存在 && !seenAt && resends < 1
 - **不投递、不改 state、不改 receipt、不重开 bid**：记录只是多了一个「有追加」的指针。
 - **去重粒度是 `(sid, bid, followUp.at)`**：同一单的第二条追加会在下一次注入里再提示一次；
   每次注入最多 1 行。
+- **跨类去重（0.4.1）**：受保护会话的注入把这条提示与 §11.12 的 `[owner-queue]` 行**合并**后按提案
+  （共享任一 `issuePath` / `bid` 键，含传递）去重，只渲染 `at` 更新的一条；被去重掉的条目不标记，之后仍会提示（§11.12.1）。
 - **标记时机（0.3.1 F1）**：提示行**先进入本次请求，再标记**。`context` hook 在
   `event.system.push(...)` 成功之后才 `markFollowUpSeen`；注入抛错（或宿主没接住这块）→ **不标记**，
   下一次请求自然重试。旧实现是「先标记、后投递」，等于一次没有投递确认的 at-most-once。
@@ -787,17 +790,35 @@ collab_request_owner { target:"ses_…(受保护)", text:"<一句话请求>", is
 | 方向 | 只允许「**非受保护 → 受保护**」；发起方本身受保护（含 `[protected-child]`）一律拒绝——不做 protected → protected 转发。目标不是受保护 → 拒绝并提示改用 `collab_handoff` |
 | 存储 | `<dir>/<targetSid>/<queueId>.json`，`q_<base36ts>_<rand4>`，`tmp + rename`；每目标上限 **50 条未读**，满则**拒新**（不驱逐已有项）；已读项**不计入上限**（否则 owner 读完后队列会永久占满），并在 `seenAt` 超过 7 天后于下次写入时回收（每次最多 20 条）。`COLLAB_OWNER_QUEUE_DIR` 可覆盖目录（harness/沙箱） |
 | 字段 | `{ id, target, from, at, summary, issuePath, bid, revokedAt, seenAt }`；`summary` 去控制字符 / 合并空白 / ≤500，`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径；目标工作区可能不在本机视图内，故不读 fs） |
-| 提示 | 受保护会话每次 `context` 注入最多 **3 行**，按 `at` 升序，**只读**：不含指令、不要求回复、不产生投递；每条只提示一次（`seenAt`） |
+| 提示 | 受保护会话每次 `context` 注入最多 **3 行**（与 §11.9.3 的追加提示**合计**），按 `at` 升序，**只读**：不含指令、不要求回复、不产生投递；每条只提示一次（`seenAt`）；同一提案最多一行（§11.12.1） |
 | 标记时机 | 与 §11.9.3 的 F1 一致：`context` hook 在 `event.system.push` **成功之后**才写 `seenAt`；注入抛错 → 不标记，下一轮重试 |
 | 发起方视图 | `collab_list` 追加「我提交给受保护会话的请求：N 条待处理（其中 M 条已被目标读到）」+ ≤3 行明细（`queueId` → 目标短 id / 时间 / 摘要，已读项标 `· 已读`）+ `…还有 N 条`；只读 |
 | 撤回 | `collab_request_owner { id:"q_…", revoke:true, confirm:true }`（可省略 `target`）；**只有发起方**能删自己写的项；`confirm:false` 只预览 |
 | 边界 | 队列**不是**投递通道、不构成送达确认；不会自动变成任务；`BUILTIN_PROTECT` 名单与血缘判定完全不变 |
 
 受保护会话的注入面是**显式白名单**：`[protected]` / `[protected-child]` 只会看到两类行——
-① §11.9.3 的「提案有闭环后追加」（≤1 行）；② 本节 `[owner-queue]` 行（≤3 行）。
+① §11.9.3 的「提案有闭环后追加」（≤1 行）；② 本节 `[owner-queue]` 行（≤3 行，与 ① 合计 ≤3）。
 接管请求 / 群组广播 / 未闭环提醒对其仍然**不可见**（§11.4.1 的 ⚠ 一节）。
 
-**去重口径**：不做 `(target, text)` 去重——同一内容可以多次提交（补材料/催办场景），由发起方自行撤回。
+### 11.12.1 两类提示的去重规则（0.4.1）
+
+两类只读提示可能指向**同一份提案**：§11.9.3 的「提案有闭环后追加」（`followUps`）与本节 `[owner-queue]` 行。
+0.4.1 起渲染层先合并、再去重（只改渲染，不改存储）：
+
+| 规则 | 口径 |
+| --- | --- |
+| 去重键 | 每个候选登记它带的**全部**键：`path:<规范化路径>`、`bid:<bid>`（可同时有）；**任一键相同即同一提案**，且关系**可传递**（A 与 B 同路径、B 与 C 同 `bid` → A/B/C 一组）。所以「只带 `bid` 的队列项」与「`bid`+路径的追加」也会合并；`./`、`.`、重复 `/` 视为同一路径；**两个键都没有 → 不去重**（无法判定是同一提案） |
+| 保留哪条 | 组内 `at` **更新**的那条；同一毫秒内 `followUp` 优先于队列行 |
+| 上限 | 去重后存活的行按 `at` 升序取前 **3** 行（两类合计；合并前各自 ≤1 / ≤3 的旧口径作废） |
+| 标记 | 只对**实际渲染**的行写 `seenAt` / followUp seen key；被去重掉的条目**不标记**，下一次请求仍可提示（§11.9.3 的 F1 口径不变） |
+| 范围 | 只在渲染层：队列文件、`followUps[]`、状态与权限都不改；非受保护会话的注入不走这条合并 |
+
+因此「同一提案既 `collab_followup` 又 `collab_request_owner`」最多只占一行；两边都还在待读时先渲染最新一条，
+另一条在之后的请求里出现（不是丢弃）。两个会话对同一提案各排一条队列项也一样按提案合并；
+`collab_request_owner { bid }`（**不传** `issuePath`）与同 `bid` 的追加同样合并。
+
+**去重口径**：不做 `(target, text)` 去重——同一内容可以多次提交（补材料/催办场景），由发起方自行撤回；
+但指向同一提案（共享任一 `issuePath` / `bid` 键，含传递）的多条提示按上表合并成一行。
 **内容归属**：提示行里的 `<summary>` 由**发起方**撰写并已去控制字符（含 C1 与 bidi）；受保护会话看到的只是
 「有一条待读请求」的提示，**不是指令**，读不读、做不做由它自己决定。
 
@@ -974,6 +995,7 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
     时直接抛错并提示 `collab_handoff { text }`，**不写任何记录**（预览也同样拒绝）。比较用 `realpath`，
     所以 `./ws` / `ws/` / 指向同目录的软链都算同一个工作区。跨工作区要广播，工作区路径必须解析到别处。
 16. **受保护目标只有队列，没有送达（0.4.0，D1）**：`collab_request_owner` 写的是**队列文件**，
-    目标会话只在自己的 `context` 注入里看到 ≤3 行只读提示（每条一次）。它不是投递：没有 prompt、没有 ack、
+    目标会话只在自己的 `context` 注入里看到 ≤3 行只读提示（每条一次；与「闭环后追加」合计 ≤3、
+    同一提案只渲染 `at` 最新的一条，§11.12.1）。它不是投递：没有 prompt、没有 ack、
     没有任何「已送达」语义，也不会自动变成任务；对端不看（会话不运行）就永远不消费。`BUILTIN_PROTECT` 与血缘判定不变。
 

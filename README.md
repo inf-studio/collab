@@ -37,7 +37,7 @@ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」�
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
 受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
-（每条一次，不含指令、不产生投递）。
+（每条一次，不含指令、不产生投递；两类合计 ≤3 行，同一提案只渲染 `at` 最新的一条）。
 
 > **权限提示（务必读）**：本插件可以**读取该实例上的会话元信息与消息上下文**（用于打分与
 > 判断回执）、可以**向其它会话投递消息**（即以该实例的身份说话）、在 `allowWrite:true`
@@ -127,7 +127,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`） |
+| `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
 | `0.1.x` | `2.3.x`  | `>=22.18` | 与单文件版行为等价；`@opencode/plugin` 由宿主提供 |
@@ -146,7 +146,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 vp build -c vite.gui.config.ts → dist/gui-experimental.cjs
 pnpm install
 pnpm typecheck
-pnpm test          # build + 582 项 harness + 12 项只读默认 + 18 项侧栏快照
+pnpm test          # build + 598 项 harness + 12 项只读默认 + 18 项侧栏快照
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -169,6 +169,9 @@ pnpm test          # build + 582 项 harness + 12 项只读默认 + 18 项侧栏
   `collab_list` 的待处理 / 已读视图）、
   `expected:"research"`（枚举 + 接管文案 + `explore`+`implement` 的能力不匹配提示）、
   同工作区 `collab_broadcast` 按 `realpath` 拒绝且零写入。
+  0.4.1 追加 S93：受保护注入按提案去重（任一 `issuePath`/`bid` 键相同即同一提案、含传递，追加提示与
+  `[owner-queue]` 行只渲染 `at` 最新的一条、两类合计 ≤3 行；被去重掉的条目不标记、下一轮仍提示；
+  不同提案各占一行；同 bid 的队列项与追加（哪怕队列项不带路径）同样合并）。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
