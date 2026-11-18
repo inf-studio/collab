@@ -25,7 +25,7 @@ import type { CollabContext } from './types.ts';
  * `@inf-studio/collab` — the zero-dependency port of
  * `.opencode/plugins/collab.js`: cross-session collaboration (threads / inbox)
  * plus the cross-workspace hand-off chain (broadcast → score → atomic claim →
- * receipt), exposed as the ten native `collab_*` tools and one `context` hook.
+ * receipt), exposed as the twelve native `collab_*` tools and one `context` hook.
  *
  * The host contract is the plugin `ctx` (in-process capability), never an HTTP
  * client: a plugin that reached the server through a port/token would break as
@@ -94,6 +94,15 @@ const plugin: Plugin.Plugin = {
                 toSession: inbound.sessionID
               })
             );
+          }
+          // R1 (0.1.6): the receiving plugin's `[ack] <cid> seen`. It closes no
+          // hand-off — it only stamps `delivery.seenAt`, which stops the
+          // requester from resending and shows `seen=<age>` in `collab_list`.
+          try {
+            const seen = await chain.applyAck(inbound.text, inbound.fromSession);
+            if (seen) log(`delivery ${seen.bid} seen${seen.delivery?.seenAt ? '' : ' (already seen)'}`);
+          } catch (error) {
+            log('ack handling failed:', (error as Error)?.message ?? error);
           }
           // A `[handoff] DONE|BLOCKED <bid> <摘要>` receipt closes the matching
           // hand-off; a `DECLINE` from the asked candidate skips it and asks the

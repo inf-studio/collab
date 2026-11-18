@@ -1,13 +1,14 @@
 import type { ConfigReader } from '../config.ts';
-import { BCAST_DONE_STATES, BCAST_LEASE_MS, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
+import { BCAST_DONE_STATES, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
+import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
-import { readBroadcast } from '../core/claim.ts';
+import { allBroadcasts, mergeDelivery, readBroadcast } from '../core/claim.ts';
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
-import { handoffActions } from '../core/verdict.ts';
+import { takeoverBody } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import type { WakeSignal } from '../ids.ts';
 import { errText, log } from '../log.ts';
@@ -52,6 +53,11 @@ const HANDOFF_LINE_RE = /\[handoff\]/i;
  * generic way into the protected line. Returns the matching record, or
  * `undefined` (= refuse); the record itself is never modified — `applyReceipt`
  * still owns the state.
+ *
+ * R5 (0.1.6) keeps that refusal on purpose: a closure is **not** a licence to
+ * push into a protected line. A post-closure conclusion is a *pull* — the
+ * claimant writes `collab_followup` (and the proposal file), and the requester
+ * sees one read-only hint in its own `context` injection.
  *
  * The bid comes from the explicit `bid` argument first, then from the body
  * (`[handoff] DONE b_… …`), so an existing receipt command needs no new field.
@@ -107,7 +113,8 @@ export function canReplyToProtected({
   // The file must really be about the bid that was authorised (a hand-written
   // record whose `bid` field disagrees with its name is not a receipt).
   if (String(record.bid ?? '') !== wanted) return undefined;
-  // A decided hand-off is not a receipt anymore: fail-closed again.
+  // A decided hand-off is not a receipt anymore: fail-closed again (R5: the
+  // post-closure conclusion is a pull — `collab_followup` + the proposal file).
   if (BCAST_DONE_STATES.includes(String(record.state))) return undefined;
   if (String(record.from?.sid ?? '') !== String(target ?? '')) return undefined;
   if (String(record.claim?.by ?? '') !== String(sender)) return undefined;
@@ -136,6 +143,18 @@ export interface DeliveryMode {
   forced: boolean;
 }
 
+/**
+ * R1 (0.1.6): what `dispatch` actually admitted. The caller writes it into the
+ * hand-off record (`delivery`), so the receiving plugin can ack it and the
+ * sender can resend / show `admitted / seen`.
+ */
+export interface DeliveryOutcome {
+  cid: string;
+  to: string;
+  messageId?: string;
+  admittedAt: number;
+}
+
 /** Everything a tool file needs besides `deps`: the shared delivery helpers. */
 export interface ToolKit {
   deps: ToolDeps;
@@ -154,15 +173,20 @@ export interface ToolKit {
     target: Target;
     /** R2: a bounded reply (`canReplyToProtected`) — the only guard bypass. */
     allowProtectedReply?: boolean;
-  }): Promise<ToolResult>;
+  }): Promise<ToolResult & { delivery?: DeliveryOutcome }>;
   waitForReply(threadID: string, timeoutMs: number, context: ToolContext | undefined): Promise<ToolResult>;
+  /**
+   * R3 (0.1.6): read-only `admitted / seen / queue-age / resend / unacked` of
+   * the hand-offs a thread (or a target session) is involved in.
+   */
+  deliveryStatus(input: { threadID?: string; target?: string }): string[];
   deliverAsk(input: {
     record: JsonObject;
     target: string;
     wake: boolean;
     threadID?: string;
     spawn?: boolean;
-  }): Promise<boolean>;
+  }): Promise<{ delivered: boolean; record: BroadcastRecord }>;
 }
 
 export function createToolKit(deps: ToolDeps): ToolKit {
@@ -250,7 +274,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     notes: string[];
     target: Target;
     allowProtectedReply?: boolean;
-  }): Promise<ToolResult> {
+  }): Promise<ToolResult & { delivery?: DeliveryOutcome }> {
     const config = readConfig();
     const body = String(input?.text ?? '').trim();
     if (!body) throw invalid('text 不能为空');
@@ -260,7 +284,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     // Fail-closed, replies included — see the note in `docs/collab.md` §11.4.
     // R2: the single exception is a *bounded* reply — this bid's own requester,
     // from this bid's own claimant, as `kind:reply` — decided before the call by
-    // `canReplyToProtected`; nothing else may bypass the guard.
+    // `canReplyToProtected`; nothing else may bypass the guard (a closed record
+    // stays refused: R5's post-closure conclusion is a pull, not a push).
     const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
     if (guard && !allowProtectedReply) {
       // R1 (guard-conflict): the whitelist itself says this is the receipt of
@@ -345,6 +370,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       };
     }
 
+    const admittedAt = Date.now();
     const admitted = await deliverPrompt({
       sessionID,
       text,
@@ -356,7 +382,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           cid,
           kind,
           threadID,
-          ts: Date.now()
+          ts: admittedAt
         }
       }
     });
@@ -387,7 +413,10 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           : kind === 'reply'
             ? '提示: 回执已记入 thread；对端可用 collab_wait {threadID} 取到全文。'
             : '提示: note 只作通知，不改变 thread 状态。'
-      ].join('\n')
+      ].join('\n'),
+      // R1 (0.1.6): the admission receipt the caller writes into the record
+      // (`delivery`), so the receiver can ack it and the sender can resend.
+      delivery: { cid, to: sessionID, messageId: admitted?.id, admittedAt }
     };
   }
 
@@ -460,6 +489,16 @@ export function createToolKit(deps: ToolDeps): ToolKit {
    * The 接管请求: one queued prompt to the chosen candidate, used both for the
    * `busy > 30min` wake-up of a peer broadcast and for telling a freshly spawned
    * session what to do. `queue` only — the plugin never interrupts anyone.
+   *
+   * R1/R2 (0.1.6): the delivery is recorded on the record (`delivery.cid` /
+   * `to` / `messageId` / `admittedAt` / `failedAt` / `resends`), so the receiving
+   * plugin can ack it and the requester can resend / show `admitted · seen`.
+   * The `cid` is **reused** across wake / spawn / resend for the same target —
+   * one message id per hand-off, which is what keeps the receiving side's
+   * de-duplication working when the same text arrives twice.
+   *
+   * Returns the (written) record too: the caller must not keep writing a stale
+   * copy of it, or the delivery bookkeeping would be clobbered.
    */
   async function deliverAsk({
     record,
@@ -473,67 +512,99 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     wake: boolean;
     threadID?: string;
     spawn?: boolean;
-  }): Promise<boolean> {
+  }): Promise<{ delivered: boolean; record: BroadcastRecord }> {
+    const current = readBroadcast(String(record?.bid ?? '')) ?? (record as BroadcastRecord);
     const config = readConfig();
     const guard = await createLineage(ctx).protectedAncestor(target, config.protect);
-    if (guard) return false; // never deliver into a protected line
+    if (guard) return { delivered: false, record: current }; // never deliver into a protected line
     const requester = String(record?.from?.sid ?? '');
     const from = senderLabel(requester) || 'handoff';
-    const leaseMin = Math.round(BCAST_LEASE_MS / 60_000);
-    // R1 (pull): a protected requester cannot receive a pushed receipt, so the
-    // takeover text asks for the in-session `[handoff]` line instead.
-    const receiptMode: 'push' | 'pull' = record?.receiptMode === 'pull' ? 'pull' : 'push';
-    const body = [
-      `[collab-handoff] ${record.title ?? '(untitled)'}`,
-      `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
-      `影响面：${(record.affectedFiles ?? []).slice(0, 8).join(', ') || '(未标注)'}`,
-      `期望：${record.expected}`,
-      // R1-2: full requester sid (no `collab_inbox` lookup needed to say no).
-      `发起方：${requester || '(记录里没有发起方 sid，回执用 collab_inbox 查)'}`,
-      '按顺序完成（三步都不要省略）：',
-      // R1 (G1): accept → receipt → "analysing in-session is not done", with
-      // copy-pasteable commands (full sid + bid).
-      ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode }),
-      spawn
-        ? receiptMode === 'pull'
-          ? '确实做不了：在最后一条回复里写 BLOCKED 回执（不要 collab_send），不要静默挂起。'
-          : '确实做不了：发 BLOCKED 回执，不要静默挂起。'
-        : '',
-      wake ? '（你已 busy 超过 30 分钟，这条是叫醒消息：不打断当前轮，排在下一轮）' : ''
-    ]
-      .filter(Boolean)
-      .join('\n');
+    const previous = current.delivery ?? {};
+    // Same message, same cid — a wake / spawn / resend is not a new message.
+    const cid = previous.to === target && previous.cid ? String(previous.cid) : newCorrelationID();
+    const at = Date.now();
+    const base = {
+      ...previous,
+      cid,
+      to: target,
+      admittedAt: Number(previous.admittedAt) || at,
+      lastAttemptAt: at,
+      ...(previous.ackUnavailable ? {} : {})
+    };
     try {
-      await deliverPrompt({
+      const admitted = await deliverPrompt({
         sessionID: target,
-        text: envelope({ from, kind: 'request', threadID, body }),
+        text: envelope({
+          from,
+          kind: 'request',
+          threadID,
+          body: takeoverBody({ record: current, wake, spawn })
+        }),
         delivery: 'queue',
         metadata: {
           collab: {
             from,
             fromSessionID: record?.from?.sid ?? 'unknown',
-            cid: newCorrelationID(),
+            cid,
             kind: 'request',
             threadID,
-            ts: Date.now()
+            ts: at
           }
         }
       });
-      return true;
+      // F1 (review): merge into the *current* record — this write happens after
+      // an `await`, so a concurrent `seenAt` (the receiver's `[ack]`) must not
+      // be overwritten by the pre-await snapshot.
+      return {
+        delivered: true,
+        record:
+          mergeDelivery(current.bid, {
+            ...base,
+            messageId: admitted?.id ?? previous.messageId,
+            failedAt: undefined
+          }) ?? current
+      };
     } catch (error) {
       log(`deliverAsk failed for ${target}: ${errText(error)}`);
       // A takeover request that could not be delivered used to be a log line
       // only — exactly the "silent hang" this task exists for. Reporting is a
-      // side path: the hand-off still follows its lease path.
+      // side path: the hand-off still follows its lease path (R2: the failed
+      // admission is the one case that may be retried without waiting 2h).
+      const written = mergeDelivery(current.bid, { ...base, failedAt: at }) ?? current;
       await deps.reporter.reportNow({
         tool: 'collab_handoff',
         defect: classify(error) ?? 'delivery-5xx',
         error,
         input: { bid: String(record?.bid ?? ''), target }
       });
-      return false;
+      return { delivered: false, record: written };
     }
   }
 
-  return { deps, resolveTarget, senderLabel, isReadonlyAgent, resolveMode, dispatch, waitForReply, deliverAsk };
+  /**
+   * R3 (0.1.6): what `collab_wait`/`collab_list` show about the delivery of the
+   * hand-offs a thread or a target is part of. Read-only: no refresh, no write.
+   */
+  function deliveryStatus({ threadID, target }: { threadID?: string; target?: string }): string[] {
+    const now = Date.now();
+    const thread = threadID ? String(threadID) : '';
+    const to = target ? String(target) : '';
+    if (!thread && !to) return [];
+    return allBroadcasts()
+      .filter(record => (thread && String(record.threadID ?? '') === thread) || (to && String(deliveryOf(record).to ?? '') === to))
+      .filter(record => deliveryVisible(record, now))
+      .map(record => `${record.bid} ${deliveryLine(record, now)}`);
+  }
+
+  return {
+    deps,
+    resolveTarget,
+    senderLabel,
+    isReadonlyAgent,
+    resolveMode,
+    dispatch,
+    waitForReply,
+    deliveryStatus,
+    deliverAsk
+  };
 }

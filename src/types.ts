@@ -215,6 +215,54 @@ export interface BroadcastClaim {
   [key: string]: any;
 }
 
+/**
+ * R1/R2 (0.1.6): delivery + acknowledgement of one hand-off's **takeover
+ * message**. One record tracks one message (`cid`), which stays the same across
+ * a resend so the receiving side's `extractInbound` de-duplication keeps working.
+ */
+export interface BroadcastDelivery {
+  /** Correlation id of the takeover message (`c_…`) — the id an `[ack]` names. */
+  cid?: string;
+  /** Session the message was/is delivered to (ask target, spawn, local claimant). */
+  to?: string;
+  /** `session.prompt` admission receipt (`message.id`), when a prompt really went out. */
+  messageId?: string;
+  /** When the hand-off became the target's job (record write or prompt admission). */
+  admittedAt?: number;
+  /** Admission failure (the prompt threw) — retryable once. */
+  failedAt?: number;
+  /** Last delivery attempt (admission, wake or resend) — the `unacked` clock. */
+  lastAttemptAt?: number;
+  /** First time the receiving plugin confirmed it surfaced the message (`[ack]`). */
+  seenAt?: number;
+  /** Receiving-side stamp: an ack was already sent for this `cid`. */
+  ackSentAt?: number;
+  ackSentBy?: string;
+  /** 0..1 — one resend at most (`MAX_RESENDS`). */
+  resends?: number;
+  /** No `seen` after the resend budget + window: surfaced by `collab_list`. */
+  unacked?: boolean;
+  /**
+   * R4: no ack can ever come back — the requester is on the protect list (a
+   * pushed ack is refused there). Never retried, never reported as an error.
+   */
+  ackUnavailable?: boolean;
+  [key: string]: any;
+}
+
+/**
+ * R5 (0.1.6): one post-closure append — **structure only** (`{ bid, issuePath,
+ * at, by }`). The conclusion itself goes into the proposal file; storing free
+ * text here would let any session write arbitrary words into a protected
+ * session's context.
+ */
+export interface BroadcastFollowUp {
+  bid?: string;
+  issuePath?: string;
+  at?: number;
+  by?: string;
+}
+
 /** One hand-off record (`~/.config/opencode/collab-broadcast/<bid>.json`). */
 export interface BroadcastRecord {
   bid: string;
@@ -254,6 +302,17 @@ export interface BroadcastRecord {
    */
   receiptMode?: 'push' | 'pull';
   receipt?: { from?: string; by?: string; at?: number; note?: string; auto?: boolean; source?: 'kind' | 'body' };
+  /**
+   * R1/R2 (0.1.6): delivery + ack of the takeover message. Absent on records
+   * written by ≤0.1.5 — those are treated as "already admitted, no ack
+   * capability" and are never resent.
+   */
+  delivery?: BroadcastDelivery;
+  /**
+   * R5 (0.1.6): conclusions appended **after** the hand-off closed (24h
+   * window). `state` / `receipt` stay exactly as they were.
+   */
+  followUps?: BroadcastFollowUp[];
   createdAt?: number;
   updatedAt?: number;
   [key: string]: any;

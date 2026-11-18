@@ -1,4 +1,5 @@
 import { allBroadcasts } from '../core/claim.ts';
+import { isAckText } from '../core/ack.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
@@ -30,6 +31,11 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
    * Unread cross-session messages. Only messages that are neither already
    * injected nor part of this very request are surfaced, so a hand-off never
    * shows up twice (the body is already a user turn of its own).
+   *
+   * R1 (0.1.6): every message this request accounts for — shown, already part of
+   * the request, or skipped because its thread is closed — is *seen* by the
+   * receiving side, so its hand-off cid is acked on a side path (`[ack] <cid>
+   * seen`). `[ack]` messages themselves are neither injected nor acked.
    */
   async function injectInbox(event: ContextHookEvent): Promise<string | undefined> {
     const config = readConfig();
@@ -53,6 +59,11 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
 
     for (const message of box.messages) {
       if (messageIDs(message).some(id => accounted.has(id))) continue;
+      // R1 (0.1.6): ack traffic is machine chatter, not a message for the model.
+      if (isAckText(message.text)) {
+        acknowledge(message);
+        continue;
+      }
       if (message.cid && inRequest.cids.has(message.cid)) {
         acknowledge(message);
         continue;
@@ -77,6 +88,21 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
 
     const markAccounted = box.injected.length !== accounted.size;
     const shown = pending.slice(0, config.maxInject);
+    // Shown = about to be surfaced in *this* request, so it counts as accounted
+    // before the ack below is computed (a message is "seen" the moment it is
+    // injected, not on the next request).
+    for (const message of shown) acknowledge(message);
+
+    // R1 (0.1.6): confirm the hand-off deliveries this request has surfaced —
+    // best-effort and detached: the ack must never delay or fail the request.
+    const seenCids = box.messages
+      .filter(message => Boolean(message.cid) && !isAckText(message.text))
+      .filter(message => messageIDs(message).some(id => accounted.has(id)))
+      .map(message => String(message.cid));
+    if (seenCids.length)
+      void chain
+        .ackSeen(sessionID, seenCids)
+        .catch(error => log('ack failed:', (error as Error)?.message ?? error));
     if (!shown.length) {
       if (markAccounted) {
         await inbox.update(sessionID, current => {
@@ -90,7 +116,6 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       }
       return undefined;
     }
-    for (const message of shown) acknowledge(message);
 
     const rest = pending.length - shown.length;
     const requests = shown.filter(message => normalizeKind(message.kind) === 'request');

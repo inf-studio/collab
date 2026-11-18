@@ -1,4 +1,4 @@
-import { VERDICT_MESSAGE_LIMIT, VERDICT_NOTE_LIMIT } from '../constants.ts';
+import { VERDICT_MESSAGE_LIMIT, VERDICT_NOTE_LIMIT, BCAST_LEASE_MS } from '../constants.ts';
 import type { BroadcastRecord, SessionMessageLike } from '../types.ts';
 import { truncateRaw } from '../util.ts';
 
@@ -232,6 +232,48 @@ export function verdictFromTexts(texts: string[] | undefined, { bid }: { bid?: s
   const claim = last.replace(ANALYSIS_DONE_RE, '');
   if (DONE_VERDICT_RE.test(claim)) return { state: 'done', summary: verdictNote(last) };
   return undefined;
+}
+
+/**
+ * R1: the takeover message body, shared by the three places that deliver it:
+ * the `busy > 30min` wake prompt, the freshly spawned session and the 0.1.6
+ * resend (same `cid`, so the receiving side de-duplicates it). One builder keeps
+ * all of them saying the same three steps.
+ */
+export function takeoverBody({
+  record,
+  wake = false,
+  spawn = false
+}: {
+  record: BroadcastRecord;
+  wake?: boolean;
+  spawn?: boolean;
+}): string {
+  const requester = String(record?.from?.sid ?? '');
+  const leaseMin = Math.round(BCAST_LEASE_MS / 60_000);
+  // R1 (pull): a protected requester cannot receive a pushed receipt, so the
+  // takeover text asks for the in-session `[handoff]` line instead.
+  const receiptMode: 'push' | 'pull' = record?.receiptMode === 'pull' ? 'pull' : 'push';
+  return [
+    `[collab-handoff] ${record.title ?? '(untitled)'}`,
+    `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
+    `影响面：${(record.affectedFiles ?? []).slice(0, 8).join(', ') || '(未标注)'}`,
+    `期望：${record.expected}`,
+    // R1-2: full requester sid (no `collab_inbox` lookup needed to say no).
+    `发起方：${requester || '(记录里没有发起方 sid，回执用 collab_inbox 查)'}`,
+    '按顺序完成（三步都不要省略）：',
+    // R1 (G1): accept → receipt → "analysing in-session is not done", with
+    // copy-pasteable commands (full sid + bid).
+    ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode }),
+    spawn
+      ? receiptMode === 'pull'
+        ? '确实做不了：在最后一条回复里写 BLOCKED 回执（不要 collab_send），不要静默挂起。'
+        : '确实做不了：发 BLOCKED 回执，不要静默挂起。'
+      : '',
+    wake ? '（你已 busy 超过 30 分钟，这条是叫醒消息：不打断当前轮，排在下一轮）' : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**

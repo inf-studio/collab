@@ -183,6 +183,27 @@ export const STALE_ACKED_MS = ACKED_EXTRACT_MS;
 /** Per-session memory of already-shown `class:bid` reminders. */
 export const STALE_SEEN_LIMIT = 200;
 
+// ------------------------------------------------------- delivery / ack (0.1.6)
+
+/**
+ * R1/R2 (0.1.6): two-level delivery acknowledgement.
+ *
+ * `admitted` is the host's own receipt (`session.prompt` returned a
+ * `message.id`, or the ask was written into the record for the receiving
+ * plugin's next `context` injection). `seen` is the *receiving* plugin saying
+ * "I put this in front of the model" — the only honest signal that exists:
+ * a long-lived session can run a single turn for tens of minutes (50 sessions,
+ * 900h+ uptime, 57M tokens observed on this host), so "the turn finished" is
+ * not a usable definition of delivered.
+ *
+ * A hand-off may be re-delivered **at most once**, and only after this window
+ * AND only while the target is idle (a busy target is never re-queued: it
+ * already holds the message).
+ */
+export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
+/** R2: at most one extra delivery per hand-off (same `cid`, so it is idempotent). */
+export const MAX_RESENDS = 1;
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.1.5';
+export const PLUGIN_VERSION = '0.1.6';
 

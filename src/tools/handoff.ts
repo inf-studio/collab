@@ -160,6 +160,11 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         notes,
         target
       });
+      // R4 (0.1.6): a protected requester can never receive a pushed ack (the
+      // same guard refuses the delivery), so the record says so up front.
+      const requesterProtected = Boolean(
+        me && (await createLineage(ctx).protectedAncestor(String(me), readConfig().protect))
+      );
       writeBroadcast({
         bid,
         scope: 'local',
@@ -184,6 +189,11 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         reminded: [],
         replies: [],
         from: { sid: me, directory: workspace },
+        // R1 (0.1.6): the admission receipt of the very prompt `dispatch` sent —
+        // the receiving plugin acks this `cid` from its inbox/context.
+        delivery: delivered.delivery
+          ? { ...delivered.delivery, ...(requesterProtected ? { ackUnavailable: true } : {}) }
+          : undefined,
         createdAt: Date.now()
       } satisfies JsonObject);
 

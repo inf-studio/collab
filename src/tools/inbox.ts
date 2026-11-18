@@ -1,8 +1,10 @@
 import { INBOX_TEXT_LIMIT, MAX_STORED } from '../constants.ts';
+import { isAckText } from '../core/ack.ts';
 import { messageIDs } from '../core/messages.ts';
 import { normalizeKind, normalizeThreadID } from '../ids.ts';
 import type { ToolDefinition } from '../types.ts';
 import { clamp, fmtTime, truncateRaw } from '../util.ts';
+import { log } from '../log.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
@@ -10,10 +12,14 @@ import type { ToolKit } from './shared.ts';
  * `collab_inbox` — the authoritative read of this session's cross-session
  * messages. Read-only: it never advances the cursor, so the injected summary can
  * stay short without losing the full body.
+ *
+ * R1 (0.1.6): reading a message **is** seeing it — the hand-off cid of every
+ * returned message is acked on a side path (best-effort). `[ack]` notes are
+ * shown as `system-ack` (machine traffic, never a message to act on).
  */
 export function inboxTool(kit: ToolKit): ToolDefinition {
   const { deps } = kit;
-  const { inbox, threads } = deps;
+  const { inbox, threads, chain } = deps;
 
   return {
     name: 'collab_inbox',
@@ -50,6 +56,7 @@ export function inboxTool(kit: ToolKit): ToolDefinition {
         const flags = [
           offset + index >= box.cursor ? 'new' : 'seen',
           messageIDs(message).some(id => injected.has(id)) ? 'injected' : '',
+          isAckText(message.text) ? 'system-ack' : '',
           thread ? `status=${thread.status}` : ''
         ].filter(Boolean);
         lines.push(
@@ -57,6 +64,17 @@ export function inboxTool(kit: ToolKit): ToolDefinition {
             `from=${message.from} (${message.fromSession})  ${flags.join(' ')}\n` +
             `    ${truncateRaw(message.text, INBOX_TEXT_LIMIT)}`
         );
+      }
+
+      // R1 (0.1.6): this session has now read these messages in full — ack the
+      // hand-off deliveries among them (once per cid, best-effort).
+      const cids = shown
+        .filter(message => Boolean(message.cid) && !isAckText(message.text))
+        .map(message => String(message.cid));
+      if (cids.length) {
+        await chain
+          .ackSeen(sessionID, cids)
+          .catch(error => log('ack failed:', (error as Error)?.message ?? error));
       }
 
       const unread = Math.max(0, box.messages.length - box.cursor);

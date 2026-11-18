@@ -12,6 +12,7 @@ import {
   summarizeProposal
 } from '../core/score.ts';
 import { handoffActions } from '../core/verdict.ts';
+import { newCorrelationID } from '../ids.ts';
 import { errText } from '../log.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
 import { truncate } from '../util.ts';
@@ -117,7 +118,9 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         const shouldWake = record?.state === 'open' && Boolean(top) && busy > 30 && record.wokeBy !== top?.sid;
         if (shouldWake && !preview && record && top) {
           const woke = await deliverAsk({ record, target: top.sid, wake: true });
-          record = writeBroadcast({ ...record, wokeBy: woke ? top.sid : record.wokeBy });
+          // R1 (0.1.6): write back the record `deliverAsk` returned — a stale
+          // copy would drop the delivery bookkeeping (`cid` / `messageId`).
+          record = writeBroadcast({ ...woke.record, wokeBy: woke.delivered ? top.sid : woke.record.wokeBy });
         }
         return {
           content: [
@@ -275,7 +278,16 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           }));
         const record = writeBroadcast({
           ...spawned,
-          permissionGrant: granted.ok ? 'granted' : 'failed'
+          permissionGrant: granted.ok ? 'granted' : 'failed',
+          // R1/R2/R4 (0.1.6): the takeover message to the new session. A
+          // protected requester can never receive the ack back (`pull`), so the
+          // record is marked `ackUnavailable` from the start and is never resent.
+          delivery: {
+            cid: newCorrelationID(),
+            to: info.id,
+            admittedAt: Date.now(),
+            ...(requesterProtected ? { ackUnavailable: true } : {})
+          }
         });
         const delivered = await deliverAsk({
           record,
@@ -292,9 +304,9 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
             granted.ok
               ? `已自动授予 5 条 collab_* 会话级权限（changed=${granted.changed}，记录 ${grantFile(info.id)}）。`
               : `未授予权限（${granted.reason}）→ 交接照常；对端无法回执时按租约到期自动提取。`,
-            delivered
+            delivered.delivered
               ? '已向新会话投递接管请求（queue）。'
-              : '新会话已创建，但接管请求投递失败（用 collab_send 补发）。',
+              : '新会话已创建，但接管请求投递失败（用 collab_send 补发；下次刷新会重试 1 次）。',
             // R1: the same three actions the new session was told, so the
             // requester can re-send them verbatim if delivery failed.
             ...handoffActions({ bid, requester: me, spawn: true, receiptMode }),
@@ -327,12 +339,21 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         replies: [],
         from: { sid: me, directory: ctx?.location?.directory },
         receiptMode,
+        // R1/R2/R4 (0.1.6): the ask *is* the delivery for the injected path —
+        // one cid per hand-off, refreshed when the ask advances to another
+        // candidate (`injectionFor`). A protected requester: `ackUnavailable`.
+        delivery: {
+          cid: newCorrelationID(),
+          to: top.sid,
+          admittedAt: Date.now(),
+          ...(requesterProtected ? { ackUnavailable: true } : {})
+        },
         createdAt: Date.now()
       });
 
       const wake = top.busyMinutes > 30;
-      const delivered = wake ? await deliverAsk({ record, target: top.sid, wake: true }) : false;
-      if (delivered) writeBroadcast({ ...record, wokeBy: top.sid });
+      const delivered = wake ? await deliverAsk({ record, target: top.sid, wake: true }) : undefined;
+      if (delivered?.delivered) writeBroadcast({ ...delivered.record, wokeBy: top.sid });
 
       return {
         content: [

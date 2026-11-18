@@ -3,6 +3,73 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.6] - 2026-11-18
+
+> 数据驱动：本机 50 会话、5 忙；常驻会话 900h+，单轮可达数十分钟，单会话 token 峰值 5774 万。
+> 「对方这一轮跑完 = 送达」太晚也不可靠，盲目重投又会把同一件事排两次队。因此送达拆成两级、
+> 重发严格受限、闭环后的补充结论改成**拉取**。
+
+### Added
+
+- **R1 两级送达确认（ack）**：接管请求/回执的投递写 `record.delivery`
+  （`cid` / `to` / `messageId` / `admittedAt`）；收方插件第一次把这条消息注入 `context` 或
+  被 `collab_inbox` 读到时，回一条 `[ack] <cid> seen`（`kind:note` + `queue`，旁路、失败不影响收方流程、
+  同一 `cid` 只回一次）；发方事件流解析后写 `delivery.seenAt`。`[ack]` 自身不再产生 ack（防环），
+  `collab_inbox` 把它标 `system-ack`，`context` 注入不展示。伪造的 `[ack]`（不是 `delivery.to` 那个会话）
+  会被忽略。
+- **R3 可见性**：`collab_list` / `collab_wait` 每条交接显示
+  `admitted=<age> seen=<age> queue-age=<age> resend=<n> unacked=<yes|->`；`unacked` 的单在
+  `collab_list` 里单独一行「未确认送达 … → 可人工补投」。
+- **R5 闭环后追加（pull）**：新工具
+  `collab_followup { bid, issuePath?, confirm }` —— 只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调，
+  只往 `record.followUps[]` 追加结构 `{ bid, issuePath, at, by }`（**不存正文**，每单 ≤3 条），
+  **不投递、不改 state/receipt、不重开 bid**。结论本身写进提案文件
+  （`## 闭环后追加（<date>）`）；发起方（含受保护线）在自己的 `context` 注入里看到**一行只读提示**
+  「`- b_xxx 已闭环，提案 <path> 有追加结论（<ts>），请读取文件`」——只含路径与时间，不含正文/指令。
+
+### Fixed
+
+- **ack 竞态会丢掉 `seenAt`（复核 F1）**：`ackSeen` 在 `await session.prompt(…)` 之后用**进入循环前**的
+  记录快照整条写回；若发方的 `applyAck` 在这段 await 期间写入 `delivery.seenAt`，会被这次写回覆盖
+  （`ackSentAt/ackSentBy` 在、`seenAt` 丢）→ 2h 后多余重发 → 再 2h 变 `unacked`。
+  现在所有「await 之后写 `delivery`」的地方（`ackSeen` / `resendOnce` / `resendIfDue` / `deliverAsk`）
+  统一走新增的 `mergeDelivery(bid, patch)`：**先重读**当前记录、只合并本次字段
+  （`state`/`receipt`/`followUps`/`claim` 与其它并发写入保持原样；被 7 天保留策略删除的记录不复活）。
+
+### Changed
+
+- **重发受限（R2）**：只由**发方**自己的 `context` 注入评估；条件为
+  `admission 失败` 或 `2h 内没有 seen` 且 **目标当时 idle**，且 `resends < 1`；同 `cid` 幂等
+  （收方按 `cid` 去重，重发不会变成第二条消息）。**busy 目标永不重发**（它已握着消息）。
+  预算用满、窗口又过、仍无 ack → `unacked`。
+- **受保护发起方（R4）**：往 protect 线投递本就受限，`seen` 不可能回来 → 记录标
+  `delivery.ackUnavailable`，不重试、不报错，回执继续走 pull / 提案文件。
+- **受保护会话的注入窄化为白名单**：`injectionFor` 原先对 protect 线直接返回空，现在**只多返回**
+  上面那条只读 follow-up 提示（条件：`record.from.sid === 自己` 且存在未提示的追加）；不是放开注入，
+  是单独函数产出、单独分支返回，任何消息正文/回执指令都进不去。
+- `collab_followup` 的 `issuePath` 校验与 `collab_broadcast` 一致：必须 realpath 落在该记录 workspace 的
+  `docs/issues/<name>.md`，拒绝 `..`、绝对路径、软链、非 `.md`；控制字符/换行剔除、上限 200 字。
+  校验失败 → 写入口拒绝，渲染时**整行不渲染**（不做降级拼接）。去重粒度是 `(sid, bid, at)`，
+  所以同一单的第二条追加会在下一次注入里再提示一次；每次注入 ≤1 行。
+- 旧记录（≤0.1.5，无 `delivery`）视为「已 admitted、无 ack 能力」，**永不重发**；旧收方不认 `[ack]`
+  只意味着发方收不到 `seen`，不影响投递。
+
+### Regression
+
+- `test/handoff-harness.mjs` 新增 **S83**（ack：本地交接写 admission、收方注入 → `[ack] <cid> seen`
+  （note+queue，独立 cid）、发方写 `seenAt`、同一 cid 只 ack 一次、旁观者伪造 ack 无效、
+  `collab_list` 与 `collab_wait` 的 admitted/seen/queue-age 行、busy 目标不误判不重发、
+  受保护发起方 `ackUnavailable` 且零投递、**ack 在 prompt await 期间落地时不被写回覆盖**
+  （复核 F1：`seenAt` 与 `ackSentAt` 并存、之后不重发））、**S84**（重发：idle 目标 2h 无 seen →
+  恰好 1 次同 cid 投递、预算用尽不再投、同 cid 只落一条 inbox、admission 失败立即重试 1 次、
+  问询已顺延的单不会重投给旧目标、`unacked` 在 `collab_list` 单独一行可人工补投）、
+  **S85**（闭环后追加：预览不写、非 claim.by/旁观者/未闭环拒绝、只追加结构化字段、
+  state 与 receipt 不变、受保护发起方看到一次性只读提示、两条追加各提示一次、
+  非法路径（`..`/绝对/越界/缺失/软链/非 md/自由文本）全部拒绝或整行不渲染、每单第 4 条拒绝、
+  以及 `kind:reply`/`note` 仍无法 push 进受保护发起方）。
+- S72 的 `staleClass` 边界用例改为显式传入时钟（原来 1ms 抖动会导致偶发失败）。
+- 合计 **456 项 harness + 12 项只读默认**；`build` / `typecheck` / `check:skill` 通过。
+
 ## [0.1.5] - 2026-11-18
 
 > **0.1.4 在 OpenCode CLI 2.3.x 上无法安装**（`No matching version found for @opencode/util@2.3.2`），

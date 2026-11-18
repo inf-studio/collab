@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十二个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -31,10 +31,33 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
+| `collab_followup` | `bid, issuePath?, confirm` | **闭环后追加**：只登记结构化指针（不投递、不改 state） | 写交接记录（本单领取人） |
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `confirm:true` 才真正执行；否则只预览。
+
+## 一点五、送达与闭环后追加（0.1.6）
+
+**两级 ack**：`admitted` = 宿主收下（`prompt` 返回 `message.id`，或接管请求写进记录）；`seen` = 收方插件把它
+送到模型面前（`context` 注入 / `collab_inbox` 读到 → 回 `[ack] <cid> seen`）。`collab_list` / `collab_wait`
+显示 `admitted= / seen= / queue-age= / resend= / unacked=`。
+
+- `seen=-` **不等于**「没送到」：目标 busy 时它只是还没开下一轮；busy 目标**永不重发**。
+- 只会补投 **1 次**（admission 失败，或 2h 无 `seen` 且目标当时 idle），同 `cid` 幂等。
+- `unacked=yes` = 预算用满 + 窗口已过仍无 ack → 人工补投；受保护发起方恒为 `seen=n/a`（`ackUnavailable`）。
+
+**闭环后追加（pull，不是 push）**：
+
+```text
+1) 结论写进提案文件： <提案> 的 `## 闭环后追加（<date>）`
+2) collab_followup { bid:"b_…", confirm:true }        # 只有本单 claim.by 能调；done/blocked 才行
+3) 发起方下次 context 注入看到一行只读提示： - b_xxx 已闭环，提案 <path> 有追加结论（<ts>），请读取文件
+```
+
+记录里只存 `{ bid, issuePath, at, by }`（**不存正文**，每单 ≤3 条），路径必须是该记录 workspace 下
+`docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。**不投递、不改 state/receipt、不重开 bid**——
+想补内容就写文件，不要试图再 collab_send 进受保护会话。
 
 ## 二、同工作区（local）
 

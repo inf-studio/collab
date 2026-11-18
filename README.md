@@ -1,6 +1,6 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：十一个原生 `collab_*` 工具（含缺陷上报）+ thread/inbox 协议 + 一条
+多会话（含跨工作区）协作插件：十二个原生 `collab_*` 工具（含缺陷上报与闭环后追加）+ thread/inbox 协议 + 一条
 「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
@@ -26,6 +26,7 @@
 | `collab_grant`     | 给**一个会话**追加 5 条 `collab_*` 会话级权限（`revoke` 还原快照）         | **写会话权限**    |
 | `collab_promote`   | 把一个会话的 agent 切到 `build`/`plan`（`revert` 还原）                    | **写会话 agent**  |
 | `collab_report`    | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方，不改协作状态）              | 写本地证据        |
+| `collab_followup`  | 闭环后追加指针（**仅本单领取人**；只写 `{bid,issuePath,at,by}`，提案文件由调用方自己写） | 写追加记录        |
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
@@ -111,7 +112,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/
 pnpm install
 pnpm typecheck
-pnpm test          # build + 375 项 harness + 12 项只读默认
+pnpm test          # build + 456 项 harness + 12 项只读默认
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -120,10 +121,12 @@ pnpm test          # build + 375 项 harness + 12 项只读默认
   以及 S72–S80 缺陷上报：证据白名单/脱敏/1h 限流、`report.to` 投递与 protected 只落盘、
   `collab_report` 预览与幂等、三类挂起提醒去重、`collab-triage` 的 `--dry-run`/幂等/`--since`/`--notify`、
   `collab_wait` 宿主 5xx 上报（超时不报）与缺目录 triage（复核 F1–F4）。
+  0.1.6 追加 S83–S85：两级 ack（`admitted`/`seen`）、受限重发（busy 永不重发、同 cid 幂等、
+  `unacked` 可见）、闭环后追加（结构指针 + 受保护发起方一行只读提示 + 路径校验）。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起）、`src/tools`（十一个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起）、`src/tools`（十二个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/index.ts`（`Plugin.define` 等价装配）、
 `scripts/collab-triage.mjs`（维护方 triage，零依赖）。
 

@@ -1,5 +1,6 @@
 import { isAbsolute, basename } from 'node:path';
 import { ACKED_EXTRACT_MS, BCAST_DONE_STATES, BOOTSTRAP_TITLE_RE } from '../constants.ts';
+import { deliveryLine, deliveryOf, deliveryVisible, unackedDue } from '../core/ack.ts';
 import { allBroadcasts, leaseVerdict } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
@@ -123,13 +124,22 @@ export function listTool(kit: ToolKit): ToolDefinition {
             record.state === 'acked' && claimAt && now - claimAt > ACKED_EXTRACT_MS
               ? ` 静默=${Math.floor((now - claimAt) / 3_600_000)}h 可自动提取`
               : '';
+          // R3 (0.1.6): delivery visibility — `admitted / seen / queue-age`.
+          const delivery = deliveryVisible(record, now) ? `  ${deliveryLine(record, now)}` : '';
           return (
             `- ${record.bid} ${record.state}${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''
-            }`
+            }${delivery}`
           );
         });
+
+      // R3 (0.1.6): an unacked hand-off gets its own line — the only action a
+      // human has left is to deliver it by hand (the plugin already tried twice).
+      const unacked = records
+        .filter(record => (directory ? record.workspace === directory : true))
+        .filter(record => deliveryVisible(record, now) && (deliveryOf(record).unacked || unackedDue(record, now)))
+        .map(record => `- ${record.bid} 未确认送达（${deliveryLine(record, now)}）→ 可人工补投：collab_send 或直接提醒对端`);
 
       // R6: hang-up classes, once per (session, class, bid); R9.2: one passive
       // "未处理上报 N 条" line when a backlog exists.
@@ -149,6 +159,13 @@ export function listTool(kit: ToolKit): ToolDefinition {
                 ...broadcasts,
                 'lease=expired 只表示「按快照看租约已过」——本命令不改状态、不删锁、不推进顺延；',
                 '真正的顺延发生在下一次 collab_accept / 广播 / context 注入时。'
+              ]
+            : []),
+          ...(unacked.length
+            ? [
+                '未确认送达（admitted 了但没收到 seen，已用满重发预算）:',
+                ...unacked,
+                'ack 只表示「收方插件把它送到了模型面前」；busy 目标不会被重发（等即可），受保护发起方 ack 不可用。'
               ]
             : []),
           ...(stale.length ? ['挂起提醒（每类每单只出现一次）:', ...formatStale(stale)] : []),

@@ -248,18 +248,24 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 验证：`opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"` → 无 `failed`，且含 `collab`。
 
-> ⚠ **版本与重载**：npm 包插件**不会**把新版本热重载到已运行会话（只有 `.opencode/plugins/*.js` 这类本地文件插件会）。
-> 升级 `@inf-studio/collab` 后需**重启 OpenCode 或新开会话**；`opencode plugin list` 显示的是*已安装*版本，
-> 不等于当前会话的*运行时*版本。诊断方法：`collab_report` 预览会打印「版本: x.y.z」——那是运行时真实版本。
+> ⚠ **版本与重载（2026-11-18 实测）**：升级 npm 包插件的正确顺序是
+> `opencode plugin add @inf-studio/collab@<ver>` → **`opencode reload`**。
+> 实测（0.1.5）reload 后当前会话的 `collab_*` 工具即切换到新版本，**无需重启服务**；
+> 证据（2026-11-18 实测 0.1.5）：`opencode plugin add @inf-studio/collab@0.1.5` + `opencode reload` 后，
+> 在同一**已运行**会话里调 `collab_report {confirm:false}`，预览里的
+> 「分类: manual  工具: collab_report  版本: 0.1.5」显示运行时版本已是 0.1.5。
+> 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
+> `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 五个工具（+ 协作链路五个 + 缺陷上报一个）
+### 11.2 十二个工具（协作链路五个 + 权限/上报/追加各一个）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
-| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接。`directory` 只看一个工作区（省略 = 旧行为） |
-| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4） |
+| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）。`directory` 只看一个工作区（省略 = 旧行为） |
+| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**） |
 | `collab_reply` | `{ threadID, text, bid?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定） |
-| `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标 |
+| `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须 realpath 落在该记录 workspace 的 `docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
+| `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
@@ -329,6 +335,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 `request` / `note` / `steer`、旁观会话、其它 `bid`、「目标受保护但不是这单发起方」，以及**已闭环的单**
 （`done` / `blocked` / `expired` —— 没什么可回执了）一律仍然 fail-closed；
 `BUILTIN_PROTECT` 与血缘判定不变。放行只影响投递，**不改**广播记录状态（闭环仍由回执解析负责）。
+闭环后的追加结论走**拉取**而不是推送：承接方 `collab_followup` + 写提案文件，发起方下次注入看到一行只读提示
+（§11.9.3）；插件**不再**为闭环后的单开放任何 push 窗口（0.1.6 起，评审裁定：常设注入面与 protect 目的冲突）。
 
 受保护线需要结果时还有 §11.4.1 的 pull 模式：它发起的广播不要求推送回执，结果由它自己只读提取
 （`claimed` 走 5 分钟租约到期，`acked` 走静默 2h，见 §12.5 #12），
@@ -349,8 +357,12 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 三处文案（接管请求注入 / 叫醒 prompt / `collab_broadcast` 结果）与 `collab_accept` 的输出保持同一套说法。
 
-> ⚠ 提醒可达性：受保护会话自己**没有** `context` 注入（`injectionFor` 对 protect 线直接返回空），
-> 所以上面那条 pull 的「未闭环提醒」在真实宿主里**用户看不到**——它是防御性代码（只有非保护但被标
+> ⚠ 提醒可达性：`injectionFor` 的**外部**提醒对受保护会话是白名单化的——只有一条只读的
+> 「提案有闭环后追加」提示（§11.9.3；条件：它是该单发起方且存在未提示的 `followUps`），
+> 接管请求 / 群组广播 / 未闭环提醒都不会注入。
+> 另一路 `injectStale` 是**本地**「与本人相关的挂起记录」提醒（`involves(record, sessionID)`：
+> 本人发起、本人领取或正在问询本人），不含任何他人正文、不含任何指令，因此对受保护会话照常生效。
+> 所以上表那条 pull 的「未闭环提醒」在真实宿主里**用户看不到**——它是防御性代码（只有非保护但被标
 > `receiptMode:"pull"` 的记录才会命中）。真正发生收口的时机是**发起方自己下一次** `collab_broadcast`
 > （幂等分支）或 `collab_handoff` 触发的那次 `refresh`；受保护会话不会因为「等」而自动收口。
 
@@ -521,6 +533,69 @@ cron 由 owner 决定是否安装（脚本本身不自动跑）：
 **边界**：不上传网络（除 `report.to` 的单条 `note`）；不新增依赖；不改 `BUILTIN_PROTECT`；
 不自动关闭挂起单（只提示/上报）。回滚 = 删 `collab-reports/`、配置去掉 `report`、`git restore -- src/`。
 
+### 11.9 送达确认（ack）、受限重发、闭环后追加（0.1.6）
+
+**为什么需要**：本机 50 个会话、900h+ 常驻，单轮可达数十分钟，单个会话 token 可到 5774 万。
+「对方这一轮跑完 = 送达」既太晚也不可靠，而盲目重投会把同一件事排两次队。所以送达拆成两级，
+重发严格受限，闭环后的补充结论改为**拉取**。
+
+#### 11.9.1 两级 ack
+
+| 级别 | 谁记录 | 含义 |
+| --- | --- | --- |
+| `admitted` | 发方（记录 `delivery.messageId` / `admittedAt`） | 宿主收下了这条消息：`session.prompt` 返回了 `message.id`，或接管请求已写进记录、等收方下一次 `context` 注入 |
+| `seen` | 收方（回执 `[ack] <cid> seen`） | 收方插件**第一次**把它送到模型面前（`context` 注入或 `collab_inbox` 读到），`kind=note`、`queue`、旁路发送 |
+
+- 收方视角：注入/`collab_inbox` 里出现的消息即视为已见 → 回 `[ack] <cid> seen`（同一个 `cid` 只回一次）。
+  发 ack 失败只记日志，**不影响收方任何流程**。
+- 发方视角：事件流解析 `[ack] <cid>` → `record.delivery.seenAt = now`。只有 `delivery.to` 指向的那个会话能确认，
+  旁观会话伪造的 `[ack]` 会被忽略。
+- 防环：`[ack]` 消息自己不会再产生 ack；`collab_inbox` 把它标成 `system-ack`，`context` 注入**不展示**它。
+- **受保护发起方（R4）**：往受保护会话投递本就受限，`seen` 不可能回来 → 记录直接标
+  `delivery.ackUnavailable=true`，**不重试、不报错**，回执走 pull / 提案文件（§11.4.1）。
+
+#### 11.9.2 受限重发（最多 1 次）
+
+只有**发方自己**下一次 `context` 注入时会评估（`resendIfDue`，`actor === record.from.sid`）：
+
+```
+delivery.cid 存在 && !seenAt && resends < 1
+&& (admitted 失败（failedAt） 或 now - admittedAt > 2h)
+&& 目标当前 idle && !ackUnavailable
+→ 重新 prompt（同一个 cid、queue），resends++
+```
+
+- **busy 目标永不重发**：它已经握着这条消息，只是还没开下一轮；再投只会堆队列。
+- 同 `cid` 幂等：收方 `extractInbound` 按 `cid` 去重，重发不会变成第二条消息。
+- 预算用满、窗口又过、仍然没有 `seen` → `delivery.unacked=true`；
+  `collab_list` 会单列一行「未确认送达（…）→ 可人工补投」。
+- 旧记录（≤0.1.5 写入、没有 `delivery`）一律视为「admitted、没有 ack 能力」，**永不重发**。
+
+#### 11.9.3 闭环后追加 = 写提案文件 + pull hint
+
+闭环（`done`/`blocked`）**不是**再往对方输入流里塞内容的许可：
+
+```text
+① 承接方把结论写进提案文件（单一真源）：  <提案> 里的 `## 闭环后追加（<date>）`
+② 承接方登记指针：                       collab_followup { bid:"b_…", confirm:true }
+   → record.followUps[] += { bid, issuePath, at, by }（只存结构，不存正文；每单上限 3 条）
+③ 发起方（含受保护线）下一次 context 注入看到一行只读提示：
+   - b_xxx 已闭环，提案 docs/issues/xxx.md 有追加结论（09:53:43），请读取文件
+```
+
+- **只存结构**：`followUps[] = { bid, issuePath, at, by }`。任何自由文本都不落记录、不进注入——
+  否则任何会话都能借这条通道往 protect 会话的 context 塞话。
+- **路径校验（写入与渲染各一次）**：必须 realpath 落在该记录 workspace 的 `docs/issues/<name>.md`；
+  拒绝 `..`、绝对路径、非 `docs/issues/`、非 `.md`、软链；控制字符/换行一律剔除、上限 200 字。
+  校验失败 → **整行不渲染**（不做降级拼接），写入口直接拒绝并给出原因。
+- **权限**：只有该单 `claim.by` 能登记；发起方与旁观会话一律拒绝；`expired` 也不接受（需人工接手）。
+- **不投递、不改 state、不改 receipt、不重开 bid**：记录只是多了一个「有追加」的指针。
+- **去重粒度是 `(sid, bid, followUp.at)`**：同一单的第二条追加会在下一次注入里再提示一次；
+  每次注入最多 1 行；路径不可校验的条目会被静默记住（不再每次 stat）。
+- **protect 的窄化白名单**：受保护会话的 `injectionFor` 仍然**只**返回这一类只读提示行
+  （条件：`record.from.sid === 自己` 且存在未提示的 followUps）；不是「放开注入」，而是单独的
+  一个函数产出、单独的返回分支，其它任何提醒都不进受保护线。
+
 ## 12. 协作链路（handoff chain：local + peer）
 
 把「发现需求 → 找到人 → 交出去 → 收结果」串成一条链路；协议细节与打分口径的唯一真源是
@@ -547,6 +622,10 @@ cron 由 owner 决定是否安装（脚本本身不自动跑）：
 `receipt: { from, at, note, auto? }` 是闭环凭据：手动回执没有 `auto` 字段；`auto:true` 表示「**发起方**只读提取对端结论」自动写入
 （`claimed` 是租约到期后、`acked` 是静默超 `ACKED_EXTRACT_MS`=2h 后；摘要 ≤200 字，不落盘正文）。
 `ACKED_EXTRACT_MS` 的失败路径只写 `staleNoticedAt`（本窗口已查过，状态仍 `acked`）。`COLLAB_BROADCAST_DIR` 可覆盖目录（harness / 沙箱用）。
+
+`delivery: { cid, to, messageId?, admittedAt?, failedAt?, lastAttemptAt?, seenAt?, ackSentAt?, ackSentBy?, resends, unacked?, ackUnavailable? }`
+是**送达账本**（0.1.6，§11.9）：`cid` 一条接管消息一个（重发复用），`seenAt` 由收方 `[ack]` 回填；
+`followUps: [{ bid, issuePath, at, by }]` 是**闭环后追加**的结构指针（不存正文，§11.9.3）。两者都只增。
 
 `collab-grants/<sid>.json` 是**会话级权限 + agent** 台账（`collab_grant` + spawn 自动授权 + `collab_promote` 共用一份文件）：
 `before` = 首次授权前的 `permissions` 原样快照、`added` = 追加过的动作名、`reason: spawn|grant`；
@@ -604,7 +683,15 @@ cron 由 owner 决定是否安装（脚本本身不自动跑）：
                一律不判定；摘要位残留**任意** `<…>` 占位符也不算回执（整行照抄 R1 命令留下的
                `", confirm:true}`、反引号、`（以上是示例）`、`【<原因>】` 都属此列）；旁观会话 / 其它工作区的刷新不读对端正文、不闭环。
                未闭环项在其下一次请求的 context 注入里提醒一次（`done`/`blocked` 不再提醒）
+
+⑦ 追加         闭环后仍有结论：结论写提案文件 + `collab_followup { bid, confirm:true }` 登记指针；
+                发起方下次 context 注入看到一行只读提示（不投递、不重开 bid，§11.9.3）
 ```
+
+> 送达状态（0.1.6）：接管请求/回执的投递记 `delivery`，收方注入或 `collab_inbox` 读到后回
+> `[ack] <cid> seen` → 发方 `seenAt`。`collab_list` 每条单显示 `admitted=/seen=/queue-age=/resend=/unacked=`；
+> 只有「admission 失败」或「2h 无 seen 且目标 idle」会补投 1 次，busy 目标永不重发（§11.9）。
+
 
 ### 12.4 同工作区（local）
 
@@ -654,9 +741,21 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
     承接方 protected 不读；`actor !== from.sid` 不读；`done` / `blocked` / `expired` 不处理。
     `collab_list` 对这类单标 `静默=Nh 可自动提取`。
 
-13. **闭环后不再放行回执（刻意设计）**：`done` / `blocked` / `expired` 的单，限界 reply 白名单**关闭**——
+13. **闭环后只拉不推（0.1.6 起）**：`done` / `blocked` / `expired` 的单，限界 reply 白名单**关闭**——
     任何会话都不得再向受保护发起方投递回执（`collab_reply` 与 `collab_send { kind:"reply", bid }` 均拒）。
-    闭环后的**追加结论 / 复查回写**请写进提案文件（单一真源），由受保护发起方下次读取；
+    闭环后的**追加结论**有两条路，都不属于「投递」：
+    1. 承接方写进**提案文件**（单一真源），并 `collab_followup { bid }` 登记一个结构指针
+       （`record.followUps[] = {bid, issuePath, at, by}`，每单 ≤3 条，不存正文）；
+    2. 发起方（含受保护线）在**自己的** `context` 注入里看到一行只读提示
+       「`- b_xxx 已闭环，提案 <path> 有追加结论（<ts>），请读取文件`」，每次注入 ≤1 行，
+       按 `(sid, bid, at)` 去重，所以第二条追加会再提示一次。
+    `note` / `steer` / 任何自由文本都进不去这条路；路径必须 realpath 落在该记录 workspace 的
+    `docs/issues/*.md`（拒绝 `..`、绝对路径、软链），校验失败整行不渲染。
     护栏按**目标**判定，其它会话「中转」同样不可达（不存在绕过路径）。
+
+14. **ack 只是「送到了模型面前」，不是「处理完成」**：`seen=…` 表示收方插件把它注入了上下文/被
+    `collab_inbox` 读到；它**不**代表对方已经开始处理。目标 busy 时不会重发、也不会被判「未送达」
+    （`unacked` 只在使用满 1 次重发预算 + 2h 窗口之后才出现）。受保护发起方永远是 `seen=n/a`
+    （`ackUnavailable`）。
     注意：受保护发起方没有 `context` 注入，收口发生在其下一次 `collab_broadcast` / `collab_handoff` 刷新时。
 

@@ -14,6 +14,7 @@ import {
 import { errCode, errText, log } from '../log.ts';
 import type { BroadcastRecord, JsonObject } from '../types.ts';
 import { asObject, dedupe, randToken, readJsonFile } from '../util.ts';
+import { sanitizePathText } from './followup.ts';
 
 export function isValidBid(value: unknown): boolean {
   return /^b_[0-9a-f]{8,32}$/.test(String(value ?? '').trim());
@@ -36,6 +37,7 @@ export function readBroadcast(bid: string | undefined): BroadcastRecord | undefi
 
 export function normalizeBroadcast(record: JsonObject): BroadcastRecord {
   const asked = asObject(record.asked);
+  const delivery = asObject(record.delivery);
   return {
     ...record,
     bid: String(record.bid),
@@ -58,8 +60,47 @@ export function normalizeBroadcast(record: JsonObject): BroadcastRecord {
     attempts: Number(record.attempts) || 0,
     // R8: retry stamp of the `acked` extraction (absent on old records).
     staleNoticedAt: Number(record.staleNoticedAt) || undefined,
+    // R1/R2 (0.1.6): delivery + ack bookkeeping. Absent on ≤0.1.5 records, which
+    // is exactly the "already admitted, no ack capability" state (never resent).
+    delivery: normalizeDelivery(delivery),
+    // R5 (0.1.6): post-closure appends — **structure only**
+    // (`{bid, issuePath, at, by}`); free text never enters this array (see
+    // `core/followup.ts`: it would be a channel into a protected session).
+    followUps: Array.isArray(record.followUps)
+      ? record.followUps
+          .filter((entry: unknown) => Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
+          .map((entry: JsonObject) => ({
+            bid: String(entry.bid ?? record.bid ?? ''),
+            issuePath: sanitizePathText(entry.issuePath),
+            at: Number(entry.at) || 0,
+            by: String(entry.by ?? '')
+          }))
+          .filter((entry: JsonObject) => Boolean(entry.at))
+      : [],
     createdAt: Number(record.createdAt) || 0,
     updatedAt: Number(record.updatedAt) || 0
+  };
+}
+
+/** Number/string fields of `delivery`, tolerant of hand-written records. */
+function normalizeDelivery(raw: JsonObject): JsonObject | undefined {
+  if (!raw.cid && !raw.to) return undefined;
+  const num = (value: unknown): number | undefined => (Number(value) ? Number(value) : undefined);
+  const str = (value: unknown): string | undefined => (value ? String(value) : undefined);
+  return {
+    ...raw,
+    cid: str(raw.cid),
+    to: str(raw.to),
+    messageId: str(raw.messageId),
+    admittedAt: num(raw.admittedAt),
+    failedAt: num(raw.failedAt),
+    lastAttemptAt: num(raw.lastAttemptAt),
+    seenAt: num(raw.seenAt),
+    ackSentAt: num(raw.ackSentAt),
+    ackSentBy: str(raw.ackSentBy),
+    resends: Number(raw.resends) || 0,
+    unacked: raw.unacked === true,
+    ackUnavailable: raw.ackUnavailable === true
   };
 }
 
@@ -277,10 +318,30 @@ export function claimLock(bid: string, claim: JsonObject): ClaimResult {
 }
 
 /**
+ * R1 (0.1.6): merge fields into the **current** `delivery` of a record.
+ *
+ * Always re-reads first. A write built from a snapshot taken *before* an
+ * `await` — a `session.prompt` admission, a protect check, a `sessionInfo` read
+ * — silently drops whatever another plugin instance wrote meanwhile. The one
+ * that matters is `delivery.seenAt`: the receiving side's `[ack]` can land while
+ * the sender is still awaiting its own ack prompt, and overwriting it recreates
+ * exactly the "2h later an extra resend, then `unacked`" false positive this
+ * task removes (review F1).
+ *
+ * Only the named delivery fields are touched: `state` / `receipt` / `followUps`
+ * and any other concurrent write stay exactly as they are on disk. A record
+ * that disappeared (7-day prune) is **not** resurrected — the merge is a no-op.
+ */
+export function mergeDelivery(bid: string, patch: JsonObject): BroadcastRecord | undefined {
+  const fresh = readBroadcast(bid);
+  if (!fresh) return undefined;
+  return writeBroadcast({ ...fresh, delivery: { ...asObject(fresh.delivery), ...patch } });
+}
+
+/**
  * Persist a record that `refreshBroadcast` mutated (lease expiry, attempts,
  * `expired`), so the next reader — a different location — sees the same state.
- */
-export function persistRefresh(before: BroadcastRecord, after: BroadcastRecord | undefined): BroadcastRecord;
+ */export function persistRefresh(before: BroadcastRecord, after: BroadcastRecord | undefined): BroadcastRecord;
 export function persistRefresh(
   before: BroadcastRecord | undefined,
   after: BroadcastRecord | undefined

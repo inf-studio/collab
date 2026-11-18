@@ -1,6 +1,6 @@
 import { DeliveryError, invalid, statusOf } from '../core/errors.ts';
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
-import type { ToolDefinition } from '../types.ts';
+import type { ToolDefinition, ToolResult } from '../types.ts';
 import { clamp, withTimeout } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
@@ -11,8 +11,15 @@ import type { ToolKit } from './shared.ts';
  * interrupts anyone.
  */
 export function waitTool(kit: ToolKit): ToolDefinition {
-  const { deps, resolveTarget, waitForReply } = kit;
+  const { deps, resolveTarget, waitForReply, deliveryStatus } = kit;
   const { ctx } = deps;
+
+  /** R3 (0.1.6): append the read-only delivery state, when there is one. */
+  const withDelivery = (result: ToolResult, input: { threadID?: string; target?: string }): ToolResult => {
+    const lines = deliveryStatus(input);
+    if (!lines.length) return result;
+    return { ...result, content: [result.content, '交付状态（admitted/seen/queue-age）:', ...lines].join('\n') };
+  };
 
   return {
     name: 'collab_wait',
@@ -50,7 +57,7 @@ export function waitTool(kit: ToolKit): ToolDefinition {
             `threadID 格式不合法："${threadID}"（期望 t_<base36ts>_<rand>，从 collab_inbox 或请求正文里取）`
           );
         }
-        return waitForReply(threadID, timeoutMs, context);
+        return withDelivery(await waitForReply(threadID, timeoutMs, context), { threadID });
       }
       if (!input?.target) {
         throw invalid('collab_wait 需要 threadID（等回执）或 target（等空闲）之一');
@@ -80,7 +87,7 @@ export function waitTool(kit: ToolKit): ToolDefinition {
         throw new Error(message, { cause: error });
       }
 
-      return { content: `目标已空闲：${label}（耗时 ${Date.now() - started}ms）` };
+      return withDelivery({ content: `目标已空闲：${label}（耗时 ${Date.now() - started}ms）` }, { target: sessionID });
     }
   };
 }
