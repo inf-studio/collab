@@ -31,18 +31,39 @@ GUI 插件只有这些槽位，**没有左侧应用侧栏**：
 - 轮询 key **必须包含路由会话 id**（0.5.1 修正）：
 
   ```ts
-  createKeyed(
-    () => {
-      if (pageHidden() || ctx.sessions.list().length === 0) return false;
-      return ctx.sessions.current()?.id ?? '';
-    },
-    () => { void store.load(); const timer = setInterval(() => void store.load(), POLL_MS); ... }
-  )
+  // 轮询按会话 keyed（切会话立即重载），可见性用显式 start/stop，不要放进 key。
+  const startPolling = () => {
+    // 三个门：已有定时器 / 窗口隐藏 / 没有会话——少一个都会多出请求。
+    if (timer || pageHidden() || ctx.sessions.list().length === 0) return;
+    void store.load();
+    timer = setInterval(() => void store.load(), POLL_MS);
+  };
+  const stopPolling = () => {
+    if (timer === undefined) return;
+    clearInterval(timer);
+    timer = undefined;
+  };
+  createKeyed(() => ctx.sessions.current()?.id ?? '', () => {
+    stopPolling();
+    startPolling();
+    onCleanup(stopPolling);
+  });
+  // 必须成对反注册：宿主 dispose 插件时靠 onCleanup 停表、摘监听。
+  document.addEventListener('visibilitychange', onChange);
+  onCleanup(() => {
+    document.removeEventListener('visibilitychange', onChange);
+    stopPolling();
+  });
   ```
+
+  `onCleanup` 里的反注册不是可选项：没有它，插件被停用后监听仍挂在 `document` 上，旧 store 会被
+  可见性事件唤醒（本项目 0.5.2 的测试就是靠 `createRoot` + `dispose` 专门盯这条）。
 
   只写「有会话 = true」时，切会话后 `queue`（按 requester 计算）会拿上一会话的结果最多 2 s——
   这是**错数**，不是慢数。`collab.state.snapshot` 调用的 `session` 参数同样必须传当前会话。
-- 页面隐藏（`pageHidden()`）时停轮询；面板打开与否不影响这一次轮询（侧栏/计数条也要数）。
+- **`document.hidden` 不是响应式的**：写进 key 只会「启动时判一次」——隐藏后定时器照跑，隐藏时挂载的窗口
+  永不启动（0.5.1 的真实 bug，0.5.2 修）。必须监听 `visibilitychange` 显式 start/stop。
+- 页面隐藏时停轮询；面板打开与否不影响这一次轮询（侧栏/计数条也要数）。
 
 ## 3. 只读是硬约束
 

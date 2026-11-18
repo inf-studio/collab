@@ -723,7 +723,7 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
-### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1，experimental）
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2，experimental）
 
 > GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
 > `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
@@ -771,9 +771,10 @@ ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabSta
 | --- | --- |
 | 命令 `collab.open`（0.5.1） | 命令面板与 **Settings → Shortcuts** 可见；默认键 `mod+shift+l`（与 TUI 的 `ctrl+shift+l` 同义），`/collab` 也可触发；`enabled` 跟随当前路由到的会话，仅在会话里可用；执行 = `ctx.layout.open("collab:main", session)`。**只有打开面板这一个动作** |
 | 会话头计数条（0.5.1，`session.header` 槽位） | `锁 N · 交接 M · 队列 K`（与面板**同一个 store / 同一次 2 s 轮询**），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。0.5.1 起这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空、`队列` 会是个结构性的假 0 |
+| 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本与 platform）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
 | 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
-| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时暂停**（`pageHidden()`），恢复可见后继续；面板、pill、计数条共用一个轮询与一份 store |
+| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时停止**、恢复可见后立即以当前会话继续（监听 `visibilitychange`，0.5.2 起；以前读 `document.hidden` 不是响应式的，隐藏不真停、隐藏时挂载的窗口也永不启动）；面板、pill、计数条、标题栏 pill 共用一个轮询与一份 store。0.5.2（R-7）：本轮请求发出后会记住目标会话，回包时若路由会话已经变了（且未隐藏 / 未 dispose）就**补排一次**——切换瞬间恰好有请求在飞也不会把新会话的 `queue` 压到下一个 tick；`inFlight` 仍然防并发，未切换不补排 |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
 
 **TUI UI**（0.4.2 / 0.5.1）：
@@ -787,8 +788,9 @@ ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabSta
 | 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
 
 **只读**：GUI 面板与 TUI 面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
-（以及 `skills/collab-coordination` 的规程）；TUI 面板只有渲染，没有写路径。0.5.1 新增的两个桌面入口
-（命令、会话头计数条）与 TUI 的展开行同样只有一个动作：**打开面板**。
+（以及 `skills/collab-coordination` 的规程）；TUI 面板只有渲染，没有写路径。0.5.1 的两个桌面入口
+（命令、会话头计数条）与 TUI 的展开行同样只有一个动作：**打开面板**；0.5.2 的标题栏 pill 只有
+`layout.open` 与 `toast.show` 两个调用（后者仅在**没有路由会话**时，用来自证加载）。
 
 **构建**：
 
@@ -827,7 +829,7 @@ list: input => (input.open.includes(PANEL_TAB) ? [tab] : [])                    
 
 #### 11.11.2 排查：看不到侧栏 / 面板
 
-按顺序三步，每步都能独立判定：
+按顺序四步，每步都能独立判定：
 
 ```text
 1) 插件是否真的加载了？   opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"
@@ -835,13 +837,15 @@ list: input => (input.open.includes(PANEL_TAB) ? [tab] : [])                    
 2) 开关是否打开？         Desktop: Settings → Extensions → Plugins → collab 的 GUI 开关
    → 关掉只影响 GUI/TUI 的视图，server 工具仍在（也可在 opencode.json 里 autoOpen:false 验证）
 3) 入口在哪？
-   Desktop：命令面板搜「collab」/ mod+shift+l / 会话头计数条 / 会话右侧栏的「+」菜单 →「打开协作面板」
+   Desktop：命令面板搜「collab」/ mod+shift+l / 会话头计数条 / 标题栏 collab pill / 会话右侧栏的「+」菜单
    TUI    ：/collab（或 ctrl+shift+l），或点侧栏摘要行展开；再不行用 collab_locks / collab_list 的文本视图
+4) Desktop 远端窗口：插件行没有 GUI 开关时，用标题栏 pill 自证是否加载（0.5.2）——见 §11.11.4
 ```
 
 远端部署（Desktop 连 Linux server）时，GUI bundle 由 server 提供：
 `GET /api/plugin/gui?id=collab` 返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 → 是 §11.11.1
-的入口判定问题；这条请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。
+的入口判定问题；这条请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。裸调这个端点得到 **401**
+不说明任何事（它只接受 app 主进程的凭据）；「远端窗口到底有没有加载 GUI」用 §11.11.4 的 pill 自证。
 
 #### 11.11.3 入口（0.5.1）：命令、会话头计数条、侧栏折叠
 
@@ -868,6 +872,46 @@ TUI 的 `sidebar.content` 只是一行静态 `<text>`，没有点击/展开。0.
 的显示条件与 0.4.2 完全一致；快照契约（§11.11 开头）**没有新增字段**，也没有新增轮询——计数条与展开行
 都从已有 store / 已有快照派生。
 
+
+#### 11.11.4 Desktop 排查（0.5.2）：插件行没有 GUI 开关 / 界面里没有 collab
+
+**现象**：Desktop 连的是远端服务器（`vhost-remote`）。Settings → Extensions → Plugins 里 `collab` 一行
+**没有 GUI 开关**（按宿主文档，带 `./gui-experimental` 出口的插件应有这个开关），窗口里也没有 collab 的
+任何部件。
+
+**已确认的**：
+
+- 包里有 `dist/gui-experimental.cjs`（`exports["./gui-experimental"]`），发布内容包含它；
+- server 侧插件列表里 `features.gui=true`，没有 `failed`；
+- 裸调 `GET /api/plugin/gui?id=collab` 返回 **401**——这个端点只接受 app 主进程持有的凭据，拿它当
+  「远端有没有加载 GUI」的探针是不成立的（401 是鉴权，不是 404）。
+
+**尚未确认的**：**远端服务器是否加载 GUI，目前尚未确认。** 官方文档说 GUI 从「桌面应用自己的后台
+服务器」加载；远端窗口这条链路是否真的去取本插件的 bundle，没有被证实。因此本节**不下平台缺陷的结论**，
+只提供四步自证。
+
+| 步骤 | 看什么 | 说明 |
+| --- | --- | --- |
+| ① | Settings → Extensions → Plugins → **collab** 一行有没有 GUI 开关 | 有：关掉只影响视图，工具仍在；**没有**：不代表没加载，先做 ②–④ |
+| ② | 命令面板搜「collab」 | 能看到 `collab.open`「打开协作面板」= `Command` 已注册（0.5.1 起） |
+| ③ | 标题栏有没有 **`collab` pill** | 0.5.2 新增、常驻，不需要先打开任何面板；无数据时就是 `collab`（不显示 `0`），有数据时 `collab N` |
+| ④ | **没有打开会话**时点 pill（或 `/collab` / `mod+shift+l`） | 弹「Collab GUI 已加载」toast = **GUI 确实加载了**，问题只是「当前没有会话可开面板」；什么都不弹 = 这个窗口没加载本插件的 GUI |
+
+判定：
+
+- **①、②、③ 都不成立** → 这个窗口的插件列表里没有本插件的 GUI 部件，先查 server 侧是否加载插件
+  （`opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"`，列表里应有 `collab` 且没有 `failed`），
+  再查桌面端到服务器的这条链路（这属于「尚未确认」的部分，本节不下结论）。
+- **能看到 ③ 的 pill，但点它没反应、也没有 toast** → 注册成功但点击路径没被派发，记录 app 版本与
+  platform（toast 里本来就有），作为上游问题另提。
+- **④ 弹了 toast** → 本插件 GUI 端到端可用；面板打不开只可能是「当前没有路由会话」。此时进入任意会话，
+  pill 的点击就会变成 `layout.open("collab:main", session)`。
+
+toast 的文案是 `ctx.t('probe.title')` + `ctx.t('probe.description')`，`variant:'success'`，例如
+`插件 v0.5.2 · id=collab · panel=collab:main · app=2.5.0(desktop)`——插件版本、面板 key、app 版本与
+platform 都在里面，排查时直接抄这一行即可（`test/gui-entry.mjs` 断言这三处版本号一致）。
+
+上游 issue 与本版解耦：本版只提供探针，不改桌面客户端，也不做远端 GUI 兼容层。
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

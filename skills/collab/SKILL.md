@@ -47,6 +47,11 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 >
 > 入口（0.5.1，全部只读）：Desktop 用命令面板的 `collab.open` / `mod+shift+l` / `/collab`，或点会话头部的
 > `锁 N · 交接 M · 队列 K` 计数条；TUI 用 `/collab`（`ctrl+shift+l`），或点侧栏摘要行展开明细、再点明细行开面板。
+>
+> 0.5.2 探针：Desktop 标题栏常驻一个 **`collab` pill**（无数据时就是 `collab`，有数据 `collab N`）。
+> 有会话时点它开面板；**没有会话时点它会弹「Collab GUI 已加载」toast**——看到 toast 就说明这个窗口确实
+> 加载了本插件的 GUI（面板打不开只是当前没有路由会话），看不到就说明没加载。插件行没有 GUI 开关时用这个
+> 自证，**不要据此断定平台缺陷**（远端是否加载 GUI 尚未确认，见 `docs/collab.md` §11.11.4）。
 
 ## 一点五、送达与闭环后追加（0.1.6）
 

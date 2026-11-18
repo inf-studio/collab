@@ -19,6 +19,11 @@
  *     "server 不可达" instead of a blank pane (R4).
  *   - **Failure is local**: a throw inside a contribution fails only that
  *     contribution; the server plugin (tools, context hook) is untouched (R6).
+ *   - **A probe, not a guess** (0.5.2): a titlebar pill labelled `collab` is
+ *     always there, and clicking it with no routed session shows a toast naming
+ *     the plugin, version, panel key and app/platform. That is the one piece of
+ *     evidence a window can give that the GUI actually loaded — see README
+ *     "Desktop 排查".
  */
 import { For, Show, createMemo, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
@@ -30,6 +35,7 @@ import {
   Plugin,
   Slot,
   Style,
+  TitlebarItem,
   createKeyed,
   usePlugin,
   type ComposerPillView,
@@ -43,6 +49,15 @@ import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotSession } from '.
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
 const POLL_MS = 2000;
 const PANEL_TAB = 'main';
+
+/**
+ * 0.5.2: the same version as `PLUGIN_VERSION` in `src/constants.ts` (and
+ * `package.json`), restated rather than imported — `constants.ts` reads
+ * `node:os` / `node:path` when it loads, and this bundle runs inside a window,
+ * where neither exists. It appears in exactly one place (the probe toast's
+ * description); `test/gui-entry.mjs` asserts all three agree.
+ */
+const PLUGIN_VERSION = '0.5.2';
 
 /* ------------------------------------------------------------------ formatting */
 
@@ -111,9 +126,19 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
   let inFlight = false;
   let disposed = false;
 
+  /** The routed session, as the queue in a snapshot is keyed on it. */
+  const currentSessionID = (): string => ctx.sessions.current()?.id ?? '';
+
   const load = async (): Promise<void> => {
     if (disposed || inFlight) return;
     inFlight = true;
+    // 0.5.2 (R-7): remember *which* session this request is for. `inFlight`
+    // still drops concurrent calls (one request per tick, never a pile-up), but
+    // a call dropped only because a request was in flight can now be honoured:
+    // if the routed session changed while the request was out, the reply that
+    // lands belongs to the old session and the new one's `queue` would be
+    // another tick (2 s) away.
+    const wanted = currentSessionID();
     try {
       // Read `ctx.client` here, not when the store is built: the desktop app
       // replaces it when its server restarts.
@@ -123,8 +148,7 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
       // empty list without a `session` — i.e. it would look like "0" forever.
       // It narrows only `queue`; sessions / leases / hand-offs are unchanged,
       // and it is the same single call, not a second stream.
-      const current = ctx.sessions.current();
-      const reply = await ctx.client.rpc(CollabState).snapshot(current ? { session: current.id } : {});
+      const reply = await ctx.client.rpc(CollabState).snapshot(wanted ? { session: wanted } : {});
       if (disposed) return;
       const next = reply as Snapshot | undefined;
       if (!next || typeof next !== 'object') throw new Error('empty snapshot');
@@ -136,6 +160,11 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
       setState({ error: describe(error), loading: false });
     } finally {
       inFlight = false;
+      // One re-run, not a loop: the next `load` records its own `wanted`, so a
+      // second change queues a second run and an unchanged session queues none.
+      // A hidden window queues nothing (the poller is not running while the
+      // window is hidden) and a disposed store is silent.
+      if (!disposed && !pageHidden() && currentSessionID() !== wanted) void load();
     }
   };
 
@@ -151,6 +180,8 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
 let sharedStore: SnapshotStore | undefined;
 
 function storeFor(ctx: Context): SnapshotStore {
+  // `setup` always assigns `sharedStore` before a contribution can render; the
+  // fallback only exists for the type checker.
   sharedStore ??= createSnapshotStore(ctx);
   return sharedStore;
 }
@@ -418,7 +449,10 @@ export default Plugin.define({
       'command.group': 'Collab',
       'header.counts': '{{locks}} locks · {{handoffs}} hand-offs · {{queue}} queue',
       'header.title': 'Collab status — open the panel',
-      'header.unreachable': 'collab: n/a'
+      'header.unreachable': 'collab: n/a',
+      'titlebar.title': 'Collab status — open the panel',
+      'probe.title': 'Collab GUI loaded',
+      'probe.description': 'plugin v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}})'
     },
     zh: {
       'panel.title': '协作',
@@ -447,35 +481,87 @@ export default Plugin.define({
       'command.group': 'Collab',
       'header.counts': '锁 {{locks}} · 交接 {{handoffs}} · 队列 {{queue}}',
       'header.title': '协作状态 — 打开面板',
-      'header.unreachable': 'collab: n/a'
+      'header.unreachable': 'collab: n/a',
+      'titlebar.title': '协作状态 — 打开面板',
+      'probe.title': 'Collab GUI 已加载',
+      'probe.description': '插件 v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}})'
     }
   },
 
   setup(ctx) {
     ctx.add(Style, CSS);
+
     // One store per window (and per plugin load): the panel and the pill read it.
     const store = (sharedStore = createSnapshotStore(ctx));
     onCleanup(() => store.dispose());
 
-    // One poller for the whole window. It follows "a session is mounted", which
-    // is exactly when a composer — and so the pill — exists and when the panel
-    // can be on screen; `pageHidden()` skips polling when the panel mounts in a hidden window (no
-    // background. `createKeyed` gives the run an owner, so the timer ends when
-    // the condition stops holding and when the plugin goes away.
+    // 0.5.2 (R2): the visibility probe. With no routed session there is nothing
+    // to open, so the click answers the question the panel cannot: *did this
+    // window load the plugin at all?* A toast means yes (and the problem is only
+    // "nothing to open yet"); no toast means the GUI never loaded. Read-only —
+    // it shows a toast and nothing else (R4).
+    const probeToast = (): void => {
+      ctx.toast.show({
+        title: ctx.t('probe.title'),
+        description: ctx.t('probe.description', {
+          version: PLUGIN_VERSION,
+          id: ctx.id,
+          panel: `${ctx.id}:${PANEL_TAB}`,
+          app: ctx.app.version,
+          platform: ctx.app.platform
+        }),
+        variant: 'success'
+      });
+    };
+
+    // One poller for the whole window, run by hand instead of keyed on
+    // `document.hidden`: that read is not reactive, so a window that mounted
+    // hidden never started and a hidden window kept its timer alive. `start`
+    // loads at once and then ticks; `stop` only clears the timer.
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const startedPolling = (): boolean => timer !== undefined;
+    const startPolling = (): void => {
+      if (timer || pageHidden() || ctx.sessions.list().length === 0) return;
+      void store.load();
+      timer = setInterval(() => void store.load(), POLL_MS);
+    };
+    const stopPolling = (): void => {
+      if (timer === undefined) return;
+      clearInterval(timer);
+      timer = undefined;
+    };
+
+    // Keyed on the routed session only: `queue` is per-requester, so switching
+    // sessions must reload at once instead of showing the previous session's
+    // queue until the next tick.
     createKeyed(
       () => {
-        // Keying on the routed session, not just "a session exists": `queue` is
-        // per-requester, so switching sessions must reload at once instead of
-        // showing the previous session's queue until the next tick.
-        if (pageHidden() || ctx.sessions.list().length === 0) return false;
+        if (ctx.sessions.list().length === 0) return false;
         return ctx.sessions.current()?.id ?? '';
       },
       () => {
-        void store.load();
-        const timer = setInterval(() => void store.load(), POLL_MS);
-        onCleanup(() => clearInterval(timer));
+        stopPolling();
+        startPolling();
+        onCleanup(stopPolling);
       }
     );
+
+    // Visibility: hide stops the poll, show resumes it with whatever session is
+    // routed now. Registered on `document`; a window without one is always
+    // "visible" (the plugin still works in a test host).
+    {
+      const doc = (globalThis as { document?: { addEventListener?: unknown; removeEventListener?: unknown } })
+        .document;
+      const listen = doc?.addEventListener as ((...args: unknown[]) => void) | undefined;
+      const unlisten = doc?.removeEventListener as ((...args: unknown[]) => void) | undefined;
+      const onChange = (): void => {
+        if (pageHidden()) stopPolling();
+        else if (!startedPolling()) startPolling();
+      };
+      listen?.call(doc, 'visibilitychange', onChange);
+      onCleanup(() => unlisten?.call(doc, 'visibilitychange', onChange));
+    }
+    onCleanup(stopPolling);
 
     const tab: PanelTab = {
       id: PANEL_TAB,
@@ -544,9 +630,39 @@ export default Plugin.define({
       enabled: !!ctx.sessions.current(),
       run: () => {
         const session = ctx.sessions.current();
-        if (session) ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, session);
+        if (session) {
+          ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, session);
+          return;
+        }
+        // R3 (0.5.2): the palette can still race the router (no session yet, or
+        // the last one just closed). Same probe toast as the titlebar pill, so
+        // the two entry points can never drift apart.
+        probeToast();
       }
     }));
+
+    // R2 (0.5.2): a permanent pill in the titlebar — visible before any panel is
+    // opened, and also in a window with no session routed (where the header slot
+    // has no place to render). No snapshot yet reads `collab`, never `collab 0`:
+    // "not asked yet" is not "nothing is held".
+    ctx.add(TitlebarItem, (): TitlebarItem => {
+      const data = store.state.data;
+      const counts = data ? data.locks.length + data.handoffs.length + (data.queue?.length ?? 0) : 0;
+      return {
+        id: 'status',
+        label: data ? `collab ${counts}` : 'collab',
+        title: ctx.t('titlebar.title'),
+        icon: 'lock',
+        run: () => {
+          const session = ctx.sessions.current();
+          if (session) {
+            ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, session);
+            return;
+          }
+          probeToast();
+        }
+      };
+    });
 
     // R2 (0.5.1): a permanent, quiet presence in the session header. It shares
     // the panel's store (one poll for the whole window) and only ever opens the

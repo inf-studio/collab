@@ -58,7 +58,7 @@
 
 | 客户端 | 入口 | 说明 |
 | --- | --- | --- |
-| **Desktop**（图形窗口） | ① 命令面板里的 **`collab.open`**「打开协作面板」（默认键 `mod+shift+l`，`/collab`）；② 会话头部**常驻计数条** `锁 N · 交接 M · 队列 K`（点一下开面板）；③ 侧栏 `collab` 标签 / 侧栏 **+** 菜单 | `./gui-experimental` 的 GUI 部件。`options.autoOpen:false` 可关掉侧栏标签自启（命令、计数条与 **+** 菜单仍在） |
+| **Desktop**（图形窗口） | ① 命令面板里的 **`collab.open`**「打开协作面板」（默认键 `mod+shift+l`，`/collab`）；② 会话头部**常驻计数条** `锁 N · 交接 M · 队列 K`（点一下开面板）；③ 标题栏 **`collab` pill**（常驻；有会话点开面板，无会话弹「已加载」toast）；④ 侧栏 `collab` 标签 / 侧栏 **+** 菜单 | `./gui-experimental` 的 GUI 部件。`options.autoOpen:false` 可关掉侧栏标签自启（命令、计数条、pill 与 **+** 菜单仍在） |
 | **TUI**（终端） | `/collab`（快捷键 `ctrl+shift+l`，也在命令面板里）；侧栏摘要行**点击**展开 | `./tui` 部件。打开 `session.panel` 里的 `collab.status` 面板；侧栏一行 `锁 N · 交接 M · 队列 K`，点 `▸`/`▾` 行展开最多 4 行明细，点明细行开面板 |
 | Web / 其它客户端 | 没有视图 | 用 `collab_locks` / `collab_list` 的文本视图 |
 
@@ -67,32 +67,48 @@
 | GUI 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age） |
 | GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
 | GUI 会话头计数条 | `锁 N · 交接 M · 队列 K`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点 |
+| GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本与 platform）——这是「窗口到底加载了 GUI 没有」的自证 |
 | TUI `collab.status` 面板 | 三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
 | TUI 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`（`▸` 折叠 / `▾` 展开）；RPC 不可达时 `collab: n/a`。展开最多 4 行明细（锁 → 交接 → 队列）+ `+N`，明细行点击开面板 |
 | 刷新 | GUI：有会话挂载时每 2 s 一次（面板、pill、计数条共用**同一个**轮询与 store）。TUI：面板打开时每 2 s 一次，**关闭即停**；侧栏展开/折叠只渲染已有快照，**不新增轮询** |
 | 不可达 | GUI / TUI 都显示「不可达：<原因>」并保留上一份快照；TUI 一份快照都没有时退化为「宿主会话列表 + 仅显示本地会话」——不白屏也不崩 |
 
 - **只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
-  两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。0.5.1 新增的命令与计数条
-  同样只有一个动作：**打开面板**。
+  两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。0.5.1 的命令与计数条、
+  0.5.2 的标题栏 pill 同样只有一个动作：**打开面板**（pill 在无会话时还多一个 **toast**，仍是只读）。
 - **鼠标不可用时 TUI 仍能进**：`/collab` 与 `ctrl+shift+l` 始终有效；宿主把侧栏固定成一行高度时展开内容
   会被裁掉（不崩溃），此时就是靠这两个入口。见 `docs/collab.md` §11.11.3。
 - **可关闭**：Settings → Extensions → Plugins 里本插件的开关；关掉视图不影响 server 部分的工具。
 - TUI 部件依赖宿主的 `@opentui/core` / `@opentui/solid` / `solid-js`（`peerDependencies`，optional）；
   老宿主不加载 `./tui` 时 server 与 GUI 都不受影响。
 
-### 看不到侧栏 / 面板？三步排查
+### Desktop 看不到 collab？四步排查
+
+结论先行：**远端服务器是否加载 GUI 目前尚未确认**。「插件行没有 GUI 开关 / 界面里没有 collab」可能是
+远端窗口没加载 GUI bundle，也可能是平台侧的显示差异——下面四步只负责把「加载了没有」问清楚，
+不是平台缺陷的结论。
 
 ```text
-1) opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"   # 插件列表里应有 collab，且没有 failed
-2) Settings → Extensions → Plugins → collab 的 GUI 开关          # 关掉只影响视图，工具仍在
-3) 入口：Desktop 命令面板搜「collab」/ mod+shift+l / 会话头计数条 / 侧栏「+」菜单；TUI 输入 /collab
+1) 插件行有没有 GUI 开关？   Settings → Extensions → Plugins → collab
+   → 有开关：关掉只影响视图，工具仍在；没有开关：先按 2)–4) 自证是否加载
+2) 命令面板搜「collab」      → 有 collab.open「打开协作面板」说明命令已注册
+3) 标题栏有没有 `collab` pill？（0.5.2 新增，常驻；无数据时就是 `collab`，不显示 0）
+4) 点 pill（或 /collab、mod+shift+l）而当前没有打开会话
+   → 弹「Collab GUI 已加载」toast = GUI 确实加载了（问题只是「没有会话可开面板」）
+   → 什么都不弹 = 这个窗口没加载本插件的 GUI
+```
+
+先确认 server 侧没问题的命令：
+
+```text
+opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"   # 列表里应有 collab，且没有 failed
 ```
 
 远端部署（Desktop 连 Linux server）时 GUI bundle 由 server 提供：`GET /api/plugin/gui?id=collab`
 返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 = 0.4.1 及更早的**入口判定死锁**
 （`undefined !== 'closed'` 被当成「已打开」，于是既无标签也无 + 菜单入口），0.4.2 已修；
-请求本身 404/500 = 插件没加载或产物缺失，先修 server 侧。
+请求本身 404/500 = 插件没加载或产物缺失，先修 server 侧。它 200 且第 4 步的 toast 也弹了 = 本插件的
+GUI 端到端可用，剩下的差异在窗口/客户端侧，需要另行确认（见 `docs/collab.md` §11.11.4）。
 
 ## 安装
 
@@ -163,7 +179,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.5.1` | `2.3.x`  | `>=22.18` | 只加**只读入口**：Desktop 的 `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header` 槽位）；TUI 侧栏摘要点击展开/折叠、点明细行开面板。契约 / 工具 / RPC 形状不变 |
+| `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
 | `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
@@ -186,7 +202,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照/产物 + 29 项 TUI 渲染 + 21 项 GUI 入口
+pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照/产物 + 29 项 TUI 渲染 + 39 项 GUI 入口
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -233,12 +249,16 @@ pnpm test          # build + 638 项 harness + 12 项只读默认 + 35 项快照
   加载期注册 Solid 的事件委托）——`Panel` / `MenuItem` / `ComposerPill` 未回退，`Command` 的
   id / `mod+shift+l` / `/collab` / `navigation` / `enabled` / `run → layout.open("collab:main")`，
   `Slot(session.header)` 的 `at` 与渲染函数，两个 locale 的 `command.*` / `header.*` 键，
-  以及「严格 context」证明入口只用 `add/t/layout/sessions/client`（无写路径、注册时零 RPC）；
+  以及「严格 context」证明入口只用 `add/t/layout/app/toast/sessions/client`（无写路径、注册时零 RPC）；
   打开会话后仍只有 **1 次**轮询且带 `session`（`队列` 不是契约默认的空数组 0）。
+  0.5.2 追加：标题栏 pill（无快照 `collab` / 有快照 `collab 6` / 有会话点开面板 / 无会话只弹 toast、
+  `layout.open` 0 次）、命令与 pill 共用**同一条** toast 文案、三处版本号一致（`package.json` /
+  `PLUGIN_VERSION` / toast），以及 R-7 的慢 RPC（250 ms）三例：请求在飞时切会话→旧包落库后**立即**
+  补一次且 `session` 为新会话；未切换仍每 tick 1 次；`document.hidden` 期间不补排。
 
 源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（十七个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
-`src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill + 命令 + `session.header` 计数条，只在 `setup` 里跑）、
+`src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill + 命令 + `session.header` 计数条 + 标题栏 pill 探针，只在 `setup` 里跑）、
 `src/tui.tsx`（`./tui`：`collab.status` 面板 + 可展开的侧栏摘要 + `/collab` 命令，只读）、
 `src/index.ts`（`Plugin.define` 等价装配 + `ctx.rpc.register`）、
 `scripts/collab-triage.mjs`（维护方 triage，零依赖）。

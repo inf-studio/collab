@@ -3,6 +3,80 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.2] - 2026-11-18
+
+> 两件事，都在 `src/gui.tsx`，都**只读**：① 修 R-7——切换会话的瞬间若恰有一次快照请求在飞，那次「立即
+> 重载」被 `inFlight` 守卫丢掉，`queue`（按 requester 计算）会停在**旧会话**的数字直到下一个 tick（最长
+> 2 s）；② 给 Desktop 一个「我加载了」的常驻证据——用户的 Desktop 连远端服务器 `vhost-remote` 时，
+> Settings → 扩展 → 插件里 `collab` 一行**没有 GUI 开关**、界面里也没有 collab，而**远端服务器是否加载
+> GUI 尚未确认**（包内有 `dist/gui-experimental.cjs`、server `features.gui=true`、裸调
+> `/api/plugin/gui` 只是 401——401 是鉴权，不是「没加载」）。本版不做远端兼容层，也不改桌面客户端。
+
+### Fixed
+
+- **R-7 会话切换时的迟到快照（`src/gui.tsx` `createSnapshotStore.load`）**：请求开始时记下
+  `wanted = ctx.sessions.current()?.id ?? ''`，`finally` 里在 `inFlight = false` 之后判断
+  `!disposed && !pageHidden() && currentSessionID() !== wanted` → `void load()` 补排一次。
+  `inFlight` **保留**（仍是一 tick 一请求，不会打爆 server）；补排只有一层（新请求重新记 `wanted`，
+  再变才再补），未切换时**零**额外请求，隐藏窗口与 dispose 之后都不补排。提案
+  `docs/issues/bugs-gui-poll-inflight-stale-session.md`。
+- 行为差异：以前「慢 RPC（250 ms）+ 请求在飞时切会话」要等到下一个 tick（约 2 s）才拿到新会话的
+  `queue`；现在旧包落库后**立即**再发一次，且 `session` 就是新会话。
+- **可见性改成事件驱动（复核发现，0.5.1 既有行为与文档不符）**：原来 `pageHidden()` 在轮询 key 里读
+  `document.hidden`，但它**不是响应式的**——窗口隐藏后定时器照跑（文档写「隐藏暂停」），而**隐藏状态下挂载的
+  窗口永远不会开始轮询**。现在 `startPolling` / `stopPolling` 显式成对，监听 `visibilitychange`：
+  隐藏即停、可见即以当前会话恢复；`createKeyed` 只管会话切换。三条断言做过变异验证（去掉监听 → 3 条失败）。
+
+### Added
+
+- **R2 标题栏 pill 探针（`ctx.add(TitlebarItem)`，`id:"status"`）**：常驻、零配置（不需要改
+  `opencode.json`）。无快照时 label 就是 `collab`（**不显示 `0`**），有快照时 `collab N`
+  （N = 租约 + 未闭环交接 + 本会话队列，与面板／计数条读**同一个** `sharedStore`，不新增 RPC 流、
+  不新增轮询）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** →
+  `ctx.toast.show({ variant:"success" })`，标题「Collab GUI 已加载」，描述含插件版本、`id`、
+  面板 key、`ctx.app.version` 与 `ctx.app.platform`。看到 toast = 这个窗口确实加载了 GUI；
+  看不到 = 没加载——这是给远端部署用的一手证据。
+- **R3 命令兜底**：`collab.open` 的 `enabled` 语义不变（无会话仍不可用），`run` 在拿不到会话时调用
+  **同一个** `probeToast()`（与 pill 共用一处实现，避免两条文案漂移）。
+- i18n（en + zh）新增 `titlebar.title` / `probe.title` / `probe.description`。
+
+### 只读（R4）
+
+新增代码只调用 `ctx.layout.open` / `ctx.toast.show`；没有 rpc 写方法、没有归档、没有锁操作，
+`src/rpc.ts` 契约不变。GUI bundle 不 import `src/constants.ts`（它读 `node:os`/`node:path`），
+版本在 `src/gui.tsx` 里以 `PLUGIN_VERSION` 常量重述一次，由 `test/gui-entry.mjs` 断言
+`package.json` / `src/constants.ts` / toast 三处一致。
+
+### 测试
+
+- `test/gui-entry.mjs` **21 → 39 项**：harness 补 `toast.show`（只记录）、`app`（`2.5.0` / `desktop`）、
+  可选 `delayMs`（可控慢回包）与「重新执行工厂」的能力（宿主的 pill 是响应式的）。新增：pill 的
+  `id`/`icon`/`title`；无快照 `collab`（不含 `0`）；有快照 `collab 6`（2 锁 + 1 交接 + 3 队列）；
+  有会话点击 → `layout.open("collab:main", ses_probe)` 且 0 次 toast；无会话点击 → 1 条 toast、
+  0 次 open、标题含「已加载」、描述含版本 / id / panel / app(platform)；命令与 pill 的 toast
+  **逐字段相同**；三处版本号一致。
+- R-7 三例：250 ms 慢 RPC + 80 ms 处切会话 → `1 → 2` 次请求且第二次 `session==="ses_other"`；
+  未切换（等 600 ms，跨过一整次慢回包）→ 仍 1 次；隐藏期间切会话 → 不补排。
+- 可见性四例：隐藏后跨 >1 tick **零请求**；隐藏期间切会话零请求；可见后**立即**以当前会话恢复；
+  **隐藏时挂载**的窗口 0 请求、可见后启动。dispose 两例：停表（不再有请求、不被可见性事件唤醒）+
+  `visibilitychange` 监听摘除（`createRoot` + `dispose` 模拟宿主停用插件；没有 `realpathSync` 的单实例
+  映射时这两条根本跑不到 `onCleanup`）。
+- **变异验证**（两次，均先改 `src/gui.tsx` 再只重建 GUI 产物）：把补排改成永不执行 →
+  `R7 switching while a request is in flight…` 唯一失败（`1 → 1`）；把 `probeToast()` 改成直接
+  `return` → 5 条 probe 断言失败（命令兜底、pill toast、toast 内容、版本一致、两处共用文案），
+  其余全绿。
+- 既有 `638 + 12 + 35 + 29` 全绿（现为 **638 + 12 + 35 + 29 + 39**）；`node scripts/check-skill.mjs` 通过。
+
+### 文档
+
+- README「状态视图」：入口表补标题栏 pill，位置表新增 pill 一行；「三步排查」改为
+  **「Desktop 看不到 collab？四步排查」**（① 插件行有无 GUI 开关 ② 命令面板搜 collab ③ 标题栏 pill
+  是否出现 ④ 无会话点 pill/命令是否弹「已加载」toast），并写明**远端服务器是否加载 GUI 尚未确认**，
+  不断言平台缺陷。版本兼容表与 `pnpm test` 计数同步。
+- `docs/collab.md` §11.11：GUI UI 表补 pill、刷新行补 R-7 语义；§11.11.2 改为四步并说明 401 不代表
+  没加载；新增 **§11.11.4「Desktop 排查（0.5.2）」**——已确认 / 尚未确认分开写，附判定表。
+- `skills/collab/SKILL.md`：一句「pill 是什么、看到/看不到分别说明什么」。
+
 ## [0.5.1] - 2026-11-18
 
 > 现象（0.5.0）：侧栏方案仍有两次「存在但看不见」。**Desktop** 只注册了 `Panel` + `MenuItem` +
