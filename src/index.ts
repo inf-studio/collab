@@ -5,6 +5,7 @@ import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
 import { allBroadcasts } from './core/claim.ts';
 import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
+import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { CollabState } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
@@ -146,7 +147,10 @@ const plugin: Plugin.Plugin = {
     const snapshotter = createSnapshotReader({
       sessions: input => chain.listSessions(input),
       locks: allLocks,
-      handoffs: allBroadcasts
+      handoffs: allBroadcasts,
+      // 0.4.2: the requester's own owner-queue items, for the TUI panel's third
+      // block. Read-only, and only for the session the caller names.
+      queue: from => mineFor(from)
     });
     const rpcDomain = (host as { rpc?: Plugin.Context['rpc'] }).rpc;
     const rpcRegistration = rpcDomain

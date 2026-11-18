@@ -20,7 +20,15 @@
  *   5. `{ workspace }` narrows sessions and hand-offs;
  *   6. the RPC definition is portable (`id` + one method, no events) and the
  *      GUI bundle `./gui-experimental` exists and requires only the modules the
- *      desktop app provides (no bundled copy of Solid or the SDK).
+ *      desktop app provides (no bundled copy of Solid or the SDK);
+ *   7. 0.4.2: `{ session }` adds that session's own owner-queue items (oldest
+ *      first, revoked items out, nobody else's in) and names no session → the
+ *      block is empty instead of a scan of every target;
+ *   8. 0.4.2: the GUI panel is visible on a first visit (`opened` is an explicit
+ *      "open", `list` returns the tab unless `autoOpen:false`) — the deadlock
+ *      that hid the sidebar;
+ *   9. 0.4.2: `dist/tui.js` exists, imports only host-provided modules, keeps
+ *      the panel/slash names, and the package exports `./tui` with OpenTUI peers.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -120,7 +128,54 @@ const source = {
   sessions: async input =>
     sessions.filter(session => (input?.directory ? session.location.directory === input.directory : true)),
   locks: () => records,
-  handoffs: () => broadcasts
+  handoffs: () => broadcasts,
+  queue: from =>
+    [
+      {
+        id: 'q_1_aaaa',
+        target: 'ses_p1',
+        from: 'ses_a1',
+        at: now - 30_000,
+        summary: '请复核这条提案',
+        issuePath: 'docs/issues/bugs-x.md',
+        bid: null,
+        revokedAt: null,
+        seenAt: null
+      },
+      {
+        id: 'q_2_bbbb',
+        target: 'ses_p2',
+        from: 'ses_a1',
+        at: now - 600_000,
+        summary: '目标已经读到的那条',
+        issuePath: null,
+        bid: 'b_00000000a1',
+        revokedAt: null,
+        seenAt: now - 100_000
+      },
+      {
+        id: 'q_3_cccc',
+        target: 'ses_p1',
+        from: 'ses_other',
+        at: now - 1_000,
+        summary: '别人的请求',
+        issuePath: null,
+        bid: null,
+        revokedAt: null,
+        seenAt: null
+      },
+      {
+        id: 'q_4_dddd',
+        target: 'ses_p1',
+        from: 'ses_a1',
+        at: now - 5_000,
+        summary: '已撤回的那条',
+        issuePath: null,
+        bid: null,
+        revokedAt: now - 4_000,
+        seenAt: null
+      }
+    ].filter(item => item.from === from)
 };
 
 /* ---------------------------------------------------------------- 1. payload */
@@ -131,6 +186,11 @@ expect('C2 snapshot is reachable and stamped', snapshot.reachable === true && sn
 expect(
   'C2 snapshot has sessions / locks / handoffs arrays',
   Array.isArray(snapshot.sessions) && Array.isArray(snapshot.locks) && Array.isArray(snapshot.handoffs)
+);
+expect(
+  'C2 nothing is listed as "my queue" when the caller names no session',
+  Array.isArray(snapshot.queue) && snapshot.queue.length === 0,
+  JSON.stringify(snapshot.queue)
 );
 expect(
   'C2 archived sessions are left out, sub-agents keep their parent',
@@ -195,7 +255,37 @@ expect(
   `${onlyBeta.sessions.length} sessions / ${onlyBeta.handoffs.length} hand-offs`
 );
 
-/* ---------------------------------------------------------------- 5. contract */
+/* ----------------------------------------------------------------- 5. queue */
+
+const mine = await buildSnapshot(source, { session: 'ses_a1' }, now);
+expect(
+  'C2 { session } lists only my own owner-queue items (revoked out, oldest first)',
+  mine.queue.length === 2 && mine.queue[0].queueId === 'q_2_bbbb' && mine.queue[1].queueId === 'q_1_aaaa',
+  JSON.stringify(mine.queue.map(item => item.queueId))
+);
+expect(
+  'C2 a queue row carries queueId / target / age / summary and the seen flag',
+  mine.queue[0].target === 'ses_p2' &&
+    mine.queue[0].ageMs === 600_000 &&
+    mine.queue[0].seen === true &&
+    mine.queue[0].bid === 'b_00000000a1' &&
+    mine.queue[1].seen === false &&
+    mine.queue[1].issuePath === 'docs/issues/bugs-x.md' &&
+    mine.queue[1].ageMs === 30_000,
+  JSON.stringify(mine.queue)
+);
+expect(
+  'C2 somebody else\'s request never appears in my queue',
+  mine.queue.every(item => item.target !== 'ses_p1' || item.queueId !== 'q_3_cccc')
+);
+const noQueue = { sessions: source.sessions, locks: source.locks, handoffs: source.handoffs };
+const withoutQueueSource = await buildSnapshot(noQueue, { session: 'ses_a1' }, now);
+expect(
+  'C2 a source without a queue reader answers an empty queue (older host, no crash)',
+  Array.isArray(withoutQueueSource.queue) && withoutQueueSource.queue.length === 0
+);
+
+/* ---------------------------------------------------------------- 6. contract */
 
 expect(
   'C2 the RPC definition is portable: one snapshot method, no events',
@@ -206,12 +296,24 @@ expect(
 const output = CollabState?.methods?.snapshot?.output ?? {};
 expect(
   'C2 the output schema declares every field the panel reads',
-  ['at', 'reachable', 'sessions', 'locks', 'handoffs'].every(
+  ['at', 'reachable', 'sessions', 'locks', 'handoffs', 'queue'].every(
     key => output.required?.includes(key) && Boolean(output.properties?.[key])
   ) && Boolean(output.properties?.locks?.items?.properties?.waiting)
 );
+expect(
+  'C2 the input schema accepts a session to scope the queue block',
+  Boolean(CollabState?.methods?.snapshot?.input?.properties?.session) &&
+    !CollabState?.methods?.snapshot?.input?.required?.includes('session'),
+  JSON.stringify(CollabState?.methods?.snapshot?.input)
+);
+expect(
+  'C2 a queue row declares queueId / target / ageMs / summary / seen',
+  ['queueId', 'target', 'ageMs', 'summary', 'seen'].every(key =>
+    output.properties?.queue?.items?.required?.includes(key)
+  )
+);
 
-/* ------------------------------------------------------------- 6. GUI bundle */
+/* ------------------------------------------------------------- 7. GUI bundle */
 
 const guiEntry = resolve(import.meta.dirname, '../dist/gui-experimental.cjs');
 const hasGui = existsSync(guiEntry);
@@ -234,6 +336,60 @@ if (hasGui) {
     'C2 package exports ./gui-experimental and ships dist',
     pkg.exports?.['./gui-experimental'] === './dist/gui-experimental.cjs' && pkg.files?.includes('dist'),
     JSON.stringify(pkg.exports)
+  );
+  expect(
+    'C2 the GUI bundle carries the default-visible rule (not the old open-only one)',
+    /autoOpen/.test(bundle)
+  );
+}
+
+/* --------------------------------------------- 8. GUI first-visit deadlock */
+
+// Static, because the window half needs a desktop app: the two rules that hid
+// the panel were "undefined counts as open" and "only list an already-open tab".
+const guiSource = readFileSync(resolve(import.meta.dirname, '../src/gui.tsx'), 'utf8');
+expect(
+  'C2 GUI treats only an explicit "open" as open (a first visit is not open)',
+  guiSource.includes("=== 'open'") && !guiSource.includes("!== 'closed'")
+);
+expect(
+  'C2 GUI lists the panel by default, and autoOpen:false restores the + menu only',
+  /autoOpen\s*!==\s*false/.test(guiSource) && /autoOpen \|\| input\.open\.includes\(PANEL_TAB\)/.test(guiSource)
+);
+
+/* ---------------------------------------------------------------- 9. TUI half */
+
+const tuiEntry = resolve(import.meta.dirname, '../dist/tui.js');
+const hasTui = existsSync(tuiEntry);
+expect('C2 dist/tui.js exists', hasTui, tuiEntry);
+if (hasTui) {
+  const bundle = readFileSync(tuiEntry, 'utf8');
+  const imported = [...bundle.matchAll(/from\s+"([^"]+)"/g)].map(match => match[1]);
+  expect(
+    'C2 the TUI bundle imports only modules the host provides',
+    imported.length > 0 && imported.every(name => /^(@opencode\/|@opentui\/|solid-js(\/|$))/.test(name)),
+    imported.join(', ')
+  );
+  expect(
+    'C2 the TUI bundle declares the panel, the slash command and both slots',
+    bundle.includes('collab.status') &&
+      bundle.includes('collab.tui') &&
+      bundle.includes('session.panel') &&
+      bundle.includes('sidebar.content') &&
+      bundle.includes('ctrl+shift+l')
+  );
+  expect(
+    'C2 the TUI bundle has no write path (no lock/unlock/prompt call)',
+    !/collab_unlock|session\.prompt|\.prompt\(/.test(bundle)
+  );
+  const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf8'));
+  expect(
+    'C2 package exports ./tui and lists the OpenTUI peers',
+    pkg.exports?.['./tui'] === './dist/tui.js' &&
+      Boolean(pkg.peerDependencies?.['@opentui/core']) &&
+      Boolean(pkg.peerDependencies?.['@opentui/solid']) &&
+      Boolean(pkg.peerDependencies?.['solid-js']),
+    JSON.stringify(pkg.peerDependencies)
   );
 }
 

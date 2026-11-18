@@ -417,6 +417,13 @@ export default Plugin.define({
       fallback: true
     };
 
+    // 0.4.2 (R2): the side panel is visible by default — `list` returns the tab
+    // even before anything was opened. Before this, the first `layout.state`
+    // read `undefined`, `list` saw "not open" and the + menu saw "already open"
+    // (see `opened` below): no tab, no entry, the panel could never be opened.
+    // `autoOpen:false` restores the old opt-in behaviour (only the + menu).
+    const autoOpen = ctx.options?.autoOpen !== false;
+
     ctx.add(Panel, {
       id: 'collab',
       region: 'side',
@@ -429,12 +436,13 @@ export default Plugin.define({
         kind: 'menu',
         icon: 'lock'
       },
-      list: input => (input.open.includes(PANEL_TAB) ? [tab] : []),
+      list: input => (autoOpen || input.open.includes(PANEL_TAB) ? [tab] : []),
       render: props => <PanelView session={props.session} />
     });
 
     // Discovery: the + menu's launcher, so the panel can be opened by hand and
-    // reappears after it was closed.
+    // reappears after it was closed. `opened` must be an explicit "open": a
+    // first visit has no state (`undefined`), which is *not* the same as open.
     ctx.add(MenuItem, (): MenuItem => {
       const session = ctx.sessions.current();
       return {
@@ -442,7 +450,7 @@ export default Plugin.define({
         id: 'open',
         title: ctx.t('panel.open'),
         icon: 'lock',
-        opened: !!session && ctx.layout.state(`${ctx.id}:${PANEL_TAB}`, session) !== 'closed',
+        opened: !!session && ctx.layout.state(`${ctx.id}:${PANEL_TAB}`, session) === 'open',
         run: () => {
           const current = ctx.sessions.current();
           if (current) ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, current, { background: true });

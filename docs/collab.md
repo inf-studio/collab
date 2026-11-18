@@ -716,21 +716,25 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
-### 11.11 桌面侧栏（0.3.0，仅 Desktop，experimental）
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2，experimental）
 
-> 只在 **OpenCode Desktop** 里出现。TUI / Web 没有侧栏，文本视图（`collab_locks` / `collab_list`）不变。
-> 宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
+> GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
+> `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
 
-侧栏回答的是「现在全局在发生什么」：谁持有资源、谁在排队、哪些交接还没闭环。
-数据来自插件 **server 部分**自己，不经过第三方端口：
+侧栏/TUI 回答的是「现在全局在发生什么」：谁持有资源、谁在排队、哪些交接还没闭环、我给受保护会话
+排了哪些请求。数据来自插件 **server 部分**自己，不经过第三方端口：
 
 ```text
 src/index.ts (server part)  ── ctx.rpc.register(CollabState, { snapshot }) ──▶  HTTP RPC
-        │                            collab.state.snapshot({ workspace? })
+        │                       collab.state.snapshot({ workspace?, session? })
         │                                        │
-        └── stateOf(allLocks) + allBroadcasts ───┘        （与 collab_locks / collab_list 同一读取层）
-                                                     │
-src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({}) ──┘
+        └── stateOf(allLocks) + allBroadcasts + mineFor(session) ──────────────┘
+                                                 │        （与 collab_locks / collab_list 同一读取层）
+        ┌────────────────────────────────────────┴───────────────────────┐
+        │                                                                │
+src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
+ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabState).snapshot({ session })
+桌面窗口里画侧栏 + composer pill                         TUI 里画 collab.status 面板 + 侧栏一行摘要
 ```
 
 **契约**（`src/rpc.ts`，一个只读方法、无事件）：
@@ -741,36 +745,94 @@ src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({})
   reachable: true,                         // server 真的回答了
   sessions: [{ sid, title, agent, busy, workspace, parent? }],
   locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, reason? }],
-  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title }]
+  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title }],
+  queue:    [{ queueId, target, ageMs, summary, issuePath?, bid?, seen }]   // 0.4.2：{ session } 限定
 }
 ```
 
 - `waiters` 是队列长度，`waiting` 是排队会话 id（FIFO 顺序）——只有长度无法判断「**我**是否在排队」，
   而 composer pill 需要这一点。
+- `queue` 是**调用方自己**提交给受保护会话的请求（`mineFor(session)`，与 `collab_list` 同一来源）；
+  不传 `session` 就是空数组——绝不扫全表，也不会把别人的请求列出来。`revokedAt` 的条目不出现。
 - **不新造状态**：`locks` 由 `stateOf()` 渲染（过期的在视图里就是 `free`，不落盘、不回收）；
   `handoffs` 只取未决的（`done` / `blocked` / `expired` 不算「未闭环」）。
 - 空记录（无人持有、无人排队）不出现；归档会话不列。
 
-**UI**：
+**GUI UI**：
 
 | 位置 | 内容 |
 | --- | --- |
 | 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
-| 刷新 | 有会话挂载时每 2 s 一次（面板在屏幕上时；窗口隐藏仍会轮询，开销很小）；面板与 pill **共用一个轮询**与一份 store |
+| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时暂停**（`pageHidden()`），恢复可见后继续；面板与 pill 共用一个轮询与一份 store |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
 
-**只读**：面板上没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
-（以及 `skills/collab-coordination` 的规程）。
+**TUI UI**（0.4.2）：
 
-**构建**：`dist/gui-experimental.cjs`（单文件 CJS，`exports["./gui-experimental"]`）。
-`vite.gui.config.ts` 用宿主的 `gui()` preset：编译 Solid JSX、内联所有动态 `import()`、
-把宿主提供的模块（`effect` / `@opencode/plugin/gui` / `@opencode/plugin/rpc` / `solid-js` …）
-留作 external——所以产物只有 13 KB，不含第二份 Solid。`pnpm build` 先跑 `vp pack`（server）
-再跑 `vp build -c vite.gui.config.ts`（GUI）；**GUI 构建失败不会影响 server 产物**。
+| 位置 | 内容 |
+| --- | --- |
+| `/collab`（`ctrl+shift+l`，也在命令面板里） | 打开 `session.panel` 里的 **`collab.status`** 面板；没有打开的会话时提示「先打开一个会话」 |
+| 面板 | 三块等宽表格：`资源租约`（resource / mode / holders / 剩余 TTL / waiters）、`未闭环交接`（bid / state / age / from）、`受保护目标队列`（queueId / target / age / status）。窄终端（<48 列）每个条目拆成两行 |
+| 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`；RPC 不可达时 `collab: n/a`（不假装 0） |
+| 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染） |
+| 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
+
+**只读**：GUI 面板与 TUI 面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
+（以及 `skills/collab-coordination` 的规程）；TUI 面板只有渲染，没有写路径。
+
+**构建**：
+
+| 产物 | 出口 | 构建 |
+| --- | --- | --- |
+| `dist/gui-experimental.cjs` | `exports["./gui-experimental"]` | `vite.gui.config.ts`（宿主的 `gui()` preset：编译 Solid JSX、内联动态 `import()`、宿主模块留 external） |
+| `dist/tui.js` | `exports["./tui"]` | `vite.tui.config.ts`：`generate:'universal'` + `moduleName:'@opentui/solid'`，把 `@opencode/*`、`@opentui/*`、`solid-js` 全部 external |
+
+`pnpm build` = `vp pack`（server）→ GUI → TUI。**任一副产物构建失败都不影响 `dist/index.js`**（server 零依赖、
+工具与注入不变）。宿主侧的 TUI peer（`@opentui/core` / `@opentui/solid` / `solid-js`）由 OpenCode 自己提供，
+本包只在 `peerDependencies` 里声明（optional）。
 
 **关闭**：Settings → Extensions → Plugins 里关掉本插件的 GUI 开关；`opencode.json(c)` 里移除插件
-则连 server 一起停。
+则连 server 一起停。TUI 是宿主自己加载的部件，`cli.json` 里移除 TUI-only 条目或禁用插件即消失。
+
+#### 11.11.1 GUI 首启看不到侧栏（0.4.2 修复）
+
+0.3.0–0.4.1 的判定是「**不是 `closed` 就算打开**」：
+
+```ts
+opened: !!session && ctx.layout.state(`${ctx.id}:${PANEL_TAB}`, session) !== 'closed'   // 旧
+list: input => (input.open.includes(PANEL_TAB) ? [tab] : [])                           // 旧
+```
+
+首次进入某个会话时 `layout.state` 是 `undefined` → `!!= 'closed'` 为真 → **「+」菜单认为面板已打开**、
+不再提供入口；而 `list` 只在「已经打开」时返回标签 → **既没有标签，也没有入口**，面板永远打不开
+（远端 `GET /api/plugin/gui?id=collab` 明明能返回 bundle，所以不是 server 侧问题）。
+
+0.4.2 起：
+
+| 规则 | 行为 |
+| --- | --- |
+| **R1 入口判定** | `opened` 改为 `layout.state(...) === 'open'`；`undefined` / `closed` 都算未打开 → 「+」菜单重新提供「打开协作面板」 |
+| **R2 默认可见** | `list` 在 `options.autoOpen !== false`（默认 `true`）时**恒返回** `collab` 标签；置 `autoOpen:false` 则回到「只从 + 菜单打开」 |
+| **R3 不可达** | 默认展示 + RPC 被 reject 时显示「server 不可达：<原因>」，保留上一份快照，不崩 |
+
+#### 11.11.2 排查：看不到侧栏 / 面板
+
+按顺序三步，每步都能独立判定：
+
+```text
+1) 插件是否真的加载了？   opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"
+   → 列表里应有 collab 且没有 failed（failed 会带原因）
+2) 开关是否打开？         Desktop: Settings → Extensions → Plugins → collab 的 GUI 开关
+   → 关掉只影响 GUI/TUI 的视图，server 工具仍在（也可在 opencode.json 里 autoOpen:false 验证）
+3) 入口在哪？
+   Desktop：会话右侧栏的「+」菜单 →「打开协作面板」（0.4.2 起首次进入会自动出现；关掉后可从这里找回）
+   TUI    ：/collab（或 ctrl+shift+l），再不行用 collab_locks / collab_list 的文本视图
+```
+
+远端部署（Desktop 连 Linux server）时，GUI bundle 由 server 提供：
+`GET /api/plugin/gui?id=collab` 返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 → 是 §11.11.1
+的入口判定问题；这条请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。
+
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

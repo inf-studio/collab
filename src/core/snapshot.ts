@@ -2,18 +2,19 @@
  * C2 (0.3.0): assemble the sidebar's read-only snapshot.
  *
  * Everything here is a *view*: `allLocks()` + `stateOf()` (the same pair
- * `collab_locks` renders) and `allBroadcasts()` (the same records `collab_list`
- * lists as "未闭环交接"). Nothing is written, no lease is reaped on disk, no
- * waiter is woken, no hand-off is advanced — a sidebar poll must never move the
- * state it displays.
+ * `collab_locks` renders), `allBroadcasts()` (the same records `collab_list`
+ * lists as "未闭环交接") and `mineFor()` (the same owner-queue items
+ * `collab_list` lists as "我提交给受保护会话的请求"). Nothing is written, no
+ * lease is reaped on disk, no waiter is woken, no hand-off is advanced, no
+ * queue item is stamped — a sidebar poll must never move the state it displays.
  *
  * The readers are injected (`SnapshotSource`) rather than imported directly, so
  * the assembly is unit-testable without a host or a real `~/.config` directory
  * (`test/snapshot-shape.mjs`), and `index.ts` binds the real ones.
  */
 import { BCAST_DONE_STATES } from '../constants.ts';
-import type { BroadcastRecord, LockRecord, SessionInfoLike } from '../types.ts';
-import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotSession } from '../rpc.ts';
+import type { BroadcastRecord, LockRecord, OwnerQueueItem, SessionInfoLike } from '../types.ts';
+import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from '../rpc.ts';
 import { asObject, sessionState, truncate, withTimeout } from '../util.ts';
 import { stateOf } from './locks.ts';
 
@@ -27,6 +28,12 @@ export interface SnapshotSource {
   locks(): LockRecord[];
   /** Every hand-off record on disk (`allBroadcasts`, read-only). */
   handoffs(): BroadcastRecord[];
+  /**
+   * Owner-queue items one session submitted (`mineFor`, read-only). Optional:
+   * a host / test that does not need the `queue` block simply omits it, and the
+   * block stays empty — it is never an error.
+   */
+  queue?(from: string): OwnerQueueItem[];
 }
 
 export interface SnapshotReader {
@@ -40,6 +47,18 @@ export function readWorkspace(input: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const workspace = raw.trim();
   return workspace || undefined;
+}
+
+/**
+ * The session whose owner queue the caller wants (`{ session }`). Deliberately
+ * a plain string: the RPC handler never resolves it against the host, so a
+ * wrong id yields an empty `queue` block, not a failed snapshot.
+ */
+export function readSession(input: unknown): string | undefined {
+  const raw = asObject(input).session;
+  if (typeof raw !== 'string') return undefined;
+  const session = raw.trim();
+  return session || undefined;
 }
 
 function toSession(info: SessionInfoLike, workspace: string | undefined): SnapshotSession | undefined {
@@ -93,6 +112,25 @@ function toHandoff(record: BroadcastRecord, now: number): SnapshotHandoff | unde
 }
 
 /**
+ * One queue item as the panel reads it. `revokedAt` items are left out (revoke
+ * deletes the file; the field only survives tampered / legacy records), and a
+ * `seen` item stays — the owner read it, the request is still pending a reply.
+ */
+function toQueueItem(item: OwnerQueueItem, now: number): SnapshotQueueItem | undefined {
+  const queueId = String(item.id ?? '');
+  if (!queueId || item.revokedAt) return undefined;
+  return {
+    queueId,
+    target: String(item.target ?? ''),
+    ageMs: Math.max(0, now - (Number(item.at) || now)),
+    summary: truncate(item.summary ?? '', 80),
+    ...(item.issuePath ? { issuePath: String(item.issuePath) } : {}),
+    ...(item.bid ? { bid: String(item.bid) } : {}),
+    seen: Boolean(item.seenAt)
+  };
+}
+
+/**
  * Build one snapshot. Read-only, and the only await is the session list (with a
  * 3 s cap): a 2 s poll touches the same files the tools read, never a write.
  */
@@ -133,7 +171,18 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
     .filter(handoff => (workspace ? handoff.workspace === workspace : true))
     .sort((left, right) => right.ageMs - left.ageMs || left.bid.localeCompare(right.bid));
 
-  return { at: now, sessions, locks: leases, handoffs, reachable: true };
+  // The queue is *the caller's own*: no session named → no scan of every
+  // target's directory, and no row that belongs to somebody else.
+  const from = readSession(input);
+  const queue = from && typeof source.queue === 'function'
+    ? source
+        .queue(from)
+        .map(item => toQueueItem(item, now))
+        .filter((item): item is SnapshotQueueItem => Boolean(item))
+        .sort((left, right) => right.ageMs - left.ageMs || left.queueId.localeCompare(right.queueId))
+    : [];
+
+  return { at: now, sessions, locks: leases, handoffs, queue, reachable: true };
 }
 
 export function createSnapshotReader(source: SnapshotSource): SnapshotReader {

@@ -3,6 +3,64 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.2] - 2026-11-18
+
+> 现象：Desktop（远程连 Linux server）看不到 `collab` 侧栏；TUI 完全没有状态视图。
+> 远端 `GET /api/plugin/gui?id=collab` 实测能返回 `dist/gui-experimental.cjs`，所以 server 侧能力齐备——
+> 问题在 GUI 的**首启判定死锁**：首次进入会话时 `layout.state` 是 `undefined`，
+> `undefined !== 'closed'` 为真 → 「+」菜单认为面板已打开、不再列入，而 `list` 只在打开时返回标签
+> → **没有标签、没有入口**，面板永远打不开。本版只改视图层（+ 快照多一个只读 `queue` 字段），
+> 工具语义、存储结构、权限模型全部不变。
+
+### Fixed
+
+- **R1 GUI 入口判定**：`opened` 由 `layout.state(...) !== 'closed'` 改为 `=== 'open'`
+  （`undefined` / `closed` 都算未打开），「+」菜单重新提供「打开协作面板」。
+- **R2 GUI 默认可见**：`list` 在 `options.autoOpen !== false`（默认 `true`）时恒返回 `collab` 标签，
+  首次进入会话就能看到；`autoOpen:false` 回到「只从 + 菜单打开」的旧行为。
+- **R3 GUI 不可达占位**：默认展示 + RPC 被 reject 时显示「server 不可达：<原因>」并保留上一份快照
+  （既有行为，本版补回归）。
+
+### Added
+
+- **R4–R7 TUI 状态视图（`./tui` → `dist/tui.js`）**：`Plugin.define({ id:'collab.tui' })`。
+  `/collab`（快捷键 `ctrl+shift+l`，命令面板同样可见）打开 `session.panel` 里的 `collab.status` 面板：
+  资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、
+  受保护目标队列（queueId / target / age / status），窄终端每项拆两行；`sidebar.content` 追加一行
+  `锁 N · 交接 M · 队列 K`。
+  - 数据只走 `collab.state.snapshot`（TUI `ctx.client` 可连远端 server），与 `collab_locks` / `collab_list`
+    同一读取层；2s 轮询**只在本插件的面板是打开的那个时**运行（切走/关闭即停），一句 `onCleanup` 清定时器。
+  - RPC 不可用：有旧快照 → 横幅 + 旧数据；一份都没有 → 横幅 + 「仅显示本地会话列表」+ 宿主会话列表，
+    不白屏、不崩。
+  - **只读**：面板没有任何写路径（无加锁/释放/撤回按钮）。
+  - 打包：`exports["./tui"] = "./dist/tui.js"`，`peerDependencies` 增
+    `@opentui/core >=0.6.6`、`@opentui/solid >=0.6.6`、`solid-js >=1.9.0`（均 optional）；
+    `vite.tui.config.ts` 用 `generate:'universal'` + `moduleName:'@opentui/solid'`，把
+    `@opencode/*` / `@opentui/*` / `solid-js` 全部 external。
+- **RPC `queue` 字段（快照的只读扩展）**：`collab.state.snapshot({ workspace?, session? })` 新增
+  `queue: [{ queueId, target, ageMs, summary, issuePath?, bid?, seen }]`，来源 `mineFor(session)`——
+  就是 `collab_list` 里「我提交给受保护会话的请求」那一块。不传 `session` 返回空数组（不扫全表）。
+  旧客户端忽略该字段；旧 server 不返回时客户端按空数组处理。
+
+### 文档
+
+- README：侧栏章节改为「状态视图（Desktop 侧栏 / TUI）」——GUI 仅图形客户端、TUI 用 `/collab`、
+  远端 GUI 由 `GET /api/plugin/gui?id=<plugin>` 提供；新增「看不到侧栏 / 面板？三步排查」。
+- `docs/collab.md` §11.11 重写：契约加 `queue`、GUI/TUI 两张 UI 表、两个产物的构建规则、
+  §11.11.1「GUI 首启看不到侧栏（0.4.2 修复）」、§11.11.2 排查三步（插件列表 → 开关 → 入口）。
+
+### 回归
+
+- `test/snapshot-shape.mjs` **18 → 33 项**：`{ session }` 只列本人排队项（撤回/别人的不出现、`seen` 标记、
+  最旧优先）、无 queue reader 的 source 返回空数组、input 的 `session`、schema 的 `queue` 与行字段、
+  `dist/tui.js` 存在且只 import 宿主模块、TUI 无写路径、`exports["./tui"]` 与 peers、
+  GUI 首启判定（源码 + 产物）。
+- 新增 `test/tui-render.mjs` **17 项**：`@opentui/solid` 的无头 `testRender` + 假宿主 context
+  （`node --conditions=browser`，否则 solid-js 解析到 SSR 构建、effect 是 no-op）——
+  `/collab` 注册、三块表格内容、不可达时的横幅 + 宿主会话列表、切到别的插件面板**不轮询**、
+  轮询开启/停止/恢复、侧栏摘要一行、不可达摘要 `collab: n/a`。
+- `pnpm test` 现在 = **608 + 12 + 33 + 17**。
+
 ## [0.4.1] - 2026-11-18
 
 > 来源：std-ui 承接方对 0.2.0 的实测（`t_mwls3zbk_9ac9`）——同一提案既可用 `collab_followup`

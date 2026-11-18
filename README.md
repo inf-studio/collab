@@ -10,8 +10,9 @@ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」�
   （不猜端口、不读 token）。宿主契约按用到的字段本地声明，入口用 `@opencode/plugin` 的
   `Plugin.Plugin` 做一次签名对齐（type-only，构建后即可移除）。
 - 构建产物：`dist/index.js`（ESM）+ `dist/index.d.ts`，可被 `opencode plugin add` 识别。
-- 另有一个**可选**的桌面壳：`dist/gui-experimental.cjs`（`./gui-experimental` 出口），
-  把同一份只读状态画进 OpenCode Desktop 的侧栏；server 部分完全不依赖它。
+- 另有**可选**的两个只读视图（server 部分完全不依赖它们）：
+  `dist/gui-experimental.cjs`（`./gui-experimental`，Desktop 侧栏 + composer pill）与
+  `dist/tui.js`（`./tui`，TUI 的 `collab.status` 面板 + 侧栏摘要）。
 
 ## 能力范围
 
@@ -43,24 +44,45 @@ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」�
 > 判断回执）、可以**向其它会话投递消息**（即以该实例的身份说话）、在 `allowWrite:true`
 > 时可以**修改某个会话的 permissions / agent**。默认 `allowWrite:false`，后两项写入能力关闭。
 
-## 侧边栏（仅 Desktop，experimental）
+## 状态视图（Desktop 侧栏 / TUI，experimental）
 
-`./gui-experimental` 是给 OpenCode Desktop 的**只读**视图：打开侧栏就能看到「谁持有资源 /
-谁在排队 / 哪些交接没闭环」，不用再 `ps` 或轮询 `collab_list`。API 属于 experimental
-（宿主侧标注），版本区间见下表。
+两个**只读**视图，问的是同一件事：「谁持有资源 / 谁在排队 / 哪些交接没闭环 / 我给受保护会话排了哪些请求」。
+数据都来自插件 server 部分的 `collab.state.snapshot`（RPC），与 `collab_locks` / `collab_list`
+**同一读取层**，没有第二份状态。
+
+| 客户端 | 入口 | 说明 |
+| --- | --- | --- |
+| **Desktop**（图形窗口） | 侧栏出现 `collab` 标签；关掉后用侧栏 **+** 菜单的「打开协作面板」找回 | `./gui-experimental` 的 GUI 部件。`options.autoOpen:false` 可关掉自动出现（只留 **+** 菜单入口） |
+| **TUI**（终端） | `/collab`（快捷键 `ctrl+shift+l`，也在命令面板里） | `./tui` 部件。打开 `session.panel` 里的 `collab.status` 面板；另在侧栏加一行 `锁 N · 交接 M · 队列 K` |
+| Web / 其它客户端 | 没有视图 | 用 `collab_locks` / `collab_list` 的文本视图 |
 
 | 位置 | 内容 |
 | --- | --- |
-| 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age）。从侧栏 **+** 菜单的「打开协作面板」打开；关掉后同样用这个入口找回（首次需从 **+** 菜单打开；`fallback` 只在已有 tab 列表时参与选择） |
-| composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
-| 数据来源 | `collab.state.snapshot`（RPC）→ `stateOf()` + `allBroadcasts()`，与 `collab_locks` / `collab_list` 同一读取层；**没有第二份状态** |
-| 刷新 | 有会话挂载时每 2 s 拉一次（面板在屏幕上时），面板与 pill 共用一个轮询 |
-| 不可达 | server 停掉 / 插件被禁用时显示「server 不可达：…」，保留上一份快照，不空白也不崩 |
+| GUI 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age） |
+| GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
+| TUI `collab.status` 面板 | 三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
+| TUI 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`；RPC 不可达时 `collab: n/a` |
+| 刷新 | GUI：有会话挂载时每 2 s 一次（面板与 pill 共用一个轮询）。TUI：面板打开时每 2 s 一次，**关闭即停** |
+| 不可达 | GUI / TUI 都显示「不可达：<原因>」并保留上一份快照；TUI 一份快照都没有时退化为「宿主会话列表 + 仅显示本地会话」——不白屏也不崩 |
 
-- **只读**：面板没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
+- **只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
   两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。
-- **可关闭**：Settings → Extensions → Plugins 里本插件的开关；关掉 GUI 不影响 server 部分的工具。
-- TUI / Web 没有侧栏，`collab_locks` / `collab_list` 的文本视图仍在。
+- **可关闭**：Settings → Extensions → Plugins 里本插件的开关；关掉视图不影响 server 部分的工具。
+- TUI 部件依赖宿主的 `@opentui/core` / `@opentui/solid` / `solid-js`（`peerDependencies`，optional）；
+  老宿主不加载 `./tui` 时 server 与 GUI 都不受影响。
+
+### 看不到侧栏 / 面板？三步排查
+
+```text
+1) opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"   # 插件列表里应有 collab，且没有 failed
+2) Settings → Extensions → Plugins → collab 的 GUI 开关          # 关掉只影响视图，工具仍在
+3) 入口：Desktop 侧栏「+」菜单 →「打开协作面板」；TUI 输入 /collab
+```
+
+远端部署（Desktop 连 Linux server）时 GUI bundle 由 server 提供：`GET /api/plugin/gui?id=collab`
+返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 = 0.4.1 及更早的**入口判定死锁**
+（`undefined !== 'closed'` 被当成「已打开」，于是既无标签也无 + 菜单入口），0.4.2 已修；
+请求本身 404/500 = 插件没加载或产物缺失，先修 server 侧。
 
 ## 安装
 
@@ -127,26 +149,29 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条） |
+| `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
 | `0.1.x` | `2.3.x`  | `>=22.18` | 与单文件版行为等价；`@opencode/plugin` 由宿主提供 |
 
 宿主插件契约（`ctx.location / storage / session / tool / event / rpc`）只按用到的字段声明，
 老宿主缺 `session.update` / `switchAgent` 时对应能力报可读错误而不是崩（也可配
-`COLLAB_SERVER_URL` 走 HTTP fallback，默认不猜端口）。构建需要 `pnpm-workspace.yaml` 的 `allowBuilds: esbuild`（pnpm 12 的构建脚本白名单）。`ctx.rpc` 缺失时只跳过侧栏注册
+`COLLAB_SERVER_URL` 走 HTTP fallback，默认不猜端口）。构建需要 `pnpm-workspace.yaml` 的
+`allowBuilds: esbuild`（pnpm 12 的构建脚本白名单）。宿主的 `ctx.rpc` 缺失时只跳过视图注册
 （日志 `rpc skipped`），工具照常工作。
 
-> 侧栏用的是宿主 **experimental** GUI API（`@opencode/plugin/gui`）。`vite.gui.config.ts`
-> 与三个 GUI devDependencies 只在构建时需要；server 产物 `dist/index.js` 仍然零运行时依赖。
+> 两个视图用的都是宿主 **experimental** API：GUI 走 `@opencode/plugin/gui`（`vite.gui.config.ts`），
+> TUI 走 `@opencode/plugin/tui` + `@opentui/solid`（`vite.tui.config.ts`）。
+> `@opentui/core` / `@opentui/solid` / `solid-js` 只是 **optional peer**（宿主自己提供，构建时用
+> 本地 devDependency）；server 产物 `dist/index.js` 仍然零运行时依赖。
 
 ## 开发
 
 ```bash
-pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 vp build -c vite.gui.config.ts → dist/gui-experimental.cjs
+pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 598 项 harness + 12 项只读默认 + 18 项侧栏快照
+pnpm test          # build + 608 项 harness + 12 项只读默认 + 33 项快照/产物 + 17 项 TUI 渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -176,11 +201,17 @@ pnpm test          # build + 598 项 harness + 12 项只读默认 + 18 项侧栏
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
   过期租约在视图里是 `free` 且不落盘、无人的空记录不出现、已决交接不算「未闭环」、
-  `{ workspace }` 过滤、RPC 契约为 portable、`dist/gui-experimental.cjs` 只 require 宿主提供的模块。
+  `{ workspace }` 过滤、`{ session }` 只列本人排队项（撤回/别人的不出现）、RPC 契约为 portable、
+  两个产物的构建规则（GUI 只 require 宿主模块；TUI 只 import 宿主模块、无写路径）、
+  GUI 首启判定与 `autoOpen` 规则。
+- `test/tui-render.mjs`：TUI 部件**无头渲染**（`@opentui/solid` 的 `testRender` + 假宿主 context，
+  需 `node --conditions=browser`，否则 solid-js 解析到 SSR 构建）——`/collab` 注册、三块表格内容、
+  不可达时的横幅 + 宿主会话列表、切到别的插件面板不轮询、轮询开启/停止/恢复、侧栏摘要一行。
 
 源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/侧栏快照）、`src/tools`（十六个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill，只在 `setup` 里跑）、
+`src/tui.tsx`（`./tui`：`collab.status` 面板 + 侧栏摘要 + `/collab` 命令，只读）、
 `src/index.ts`（`Plugin.define` 等价装配 + `ctx.rpc.register`）、
 `scripts/collab-triage.mjs`（维护方 triage，零依赖）。
 

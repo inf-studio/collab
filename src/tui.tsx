@@ -1,0 +1,514 @@
+/** @jsxImportSource @opentui/solid */
+/**
+ * 0.4.2 (R4–R7): the **TUI** half of the read-only status view.
+ *
+ * The same three questions the desktop sidebar answers — who holds a resource,
+ * which hand-offs are open, what did *I* queue for a protected session — asked
+ * from the terminal. Two surfaces, both contributions to the host's slot tree:
+ *
+ *   - `session.panel` → the `collab.status` panel (`/collab`, `ctrl+shift+l`);
+ *   - `sidebar.content` → one summary line, `锁 N · 交接 M · 队列 K`.
+ *
+ * Deliberate choices:
+ *   - **No state of its own**: every number comes from `collab.state.snapshot`
+ *     (the RPC in `src/rpc.ts`, implemented in `src/index.ts`), which reads what
+ *     `collab_locks` / `collab_list` read. The TUI client can reach a *remote*
+ *     server, so the panel still works when the terminal is not the server.
+ *   - **No write path** (R7): no lock/release button, no queue action. The panel
+ *     renders rows; changing collaboration state stays with the tools.
+ *   - **Poll only while open** (R7): the 2 s timer is created inside the effect
+ *     that reads `panel.name`, so the host's own dispose (panel closed, another
+ *     plugin's panel selected, plugin disabled) clears it. The sidebar line
+ *     refreshes once per mount instead of keeping a second timer alive.
+ *   - **Failure is local** (R6): a rejected RPC keeps the last snapshot and adds
+ *     a banner; with no snapshot at all the panel falls back to the host's own
+ *     session list plus an explicit "unreachable" line — never a blank pane, and
+ *     never a crash of the TUI.
+ *   - **Lines, not nested slots**: OpenTUI's reconciler throws on a bare text
+ *     node inside a `box` ("Orphan text error"), and Solid's universal renderer
+ *     turns `undefined` (an empty `<Show>`) into exactly that `""`. So the body
+ *     is one flat list of `<text>` lines and conditionals are lists, not
+ *     `<Show>`: an empty list inserts nothing at all.
+ */
+import { For, createEffect, createMemo, onCleanup } from 'solid-js';
+import { createStore } from 'solid-js/store';
+import { Plugin, usePlugin } from '@opencode/plugin/tui';
+import type { Context, PanelInput } from '@opencode/plugin/tui/context';
+import { CollabState } from './rpc.ts';
+import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from './rpc.ts';
+
+/** Two seconds: a lease list changes on human timescales, and this is cheap. */
+const POLL_MS = 2000;
+/** The panel name this plugin owns (`collab.status`, plugin-prefixed per the API). */
+const PANEL = 'collab.status';
+/** Fallback width when a host does not report the panel width. */
+const FALLBACK_WIDTH = 80;
+
+/* ------------------------------------------------------------------ formatting */
+
+function fmtAge(ms: number): string {
+  const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes < 60) return seconds ? `${minutes}m${seconds}s` : `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+function fmtClock(ms: number): string {
+  if (!ms) return '--:--:--';
+  const date = new Date(ms);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+/** `ses_2f7b…d0e` — long enough to match a `collab_list` line, short enough for a row. */
+function shortSid(sid: string): string {
+  const value = String(sid ?? '');
+  return value.startsWith('ses_') && value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value || '-';
+}
+
+function describe(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error ?? '');
+  return text.length > 160 ? `${text.slice(0, 159)}…` : text || 'unknown error';
+}
+
+/* ---------------------------------------------------------------------- table */
+
+type Tone = 'base' | 'muted' | 'success' | 'warning' | 'danger';
+
+/** One rendered line: the panel body is a flat list of these (see the header). */
+interface Line {
+  text: string;
+  tone: Tone;
+}
+
+/** One cell: cut to `width`, with an ellipsis when it had to be cut. */
+function clip(value: string, width: number): string {
+  const text = String(value ?? '');
+  if (width <= 1) return '';
+  return text.length > width ? `${text.slice(0, width - 1)}…` : text;
+}
+
+function pad(value: string, width: number): string {
+  const text = clip(value, width);
+  return `${text}${' '.repeat(Math.max(0, width - text.length))}`;
+}
+
+/**
+ * Rows are plain monospace text, padded by code: the panel is a status view, and
+ * a table whose columns hold still is worth more than nested layout boxes that
+ * change shape with the host's renderer version.
+ */
+function tableRow(cells: Array<[value: string, width: number]>): string {
+  return cells.map(([value, width]) => pad(value, width)).join(' ').trimEnd();
+}
+
+/* --------------------------------------------------------------------- colours */
+
+/**
+ * Theme tokens from `context.theme` (`@opencode/theme/tui`): `text.base`,
+ * `text.muted` and the `text.feedback.*` pair. Read defensively — a host whose
+ * theme is older or thinner falls back to plain text instead of throwing inside
+ * a slot render (which would take the panel down with it).
+ */
+function color(ctx: Context, tone: Tone): any {
+  const text = (ctx as { theme?: any }).theme?.text;
+  const feedback = text?.feedback;
+  if (tone === 'success') return feedback?.success?.base ?? text?.base;
+  if (tone === 'warning') return feedback?.warning?.base ?? text?.base;
+  if (tone === 'danger') return feedback?.error?.base ?? text?.base;
+  if (tone === 'muted') return text?.muted ?? text?.base;
+  return text?.base;
+}
+
+/* -------------------------------------------------------------------- snapshot */
+
+interface TuiState {
+  at: number;
+  data?: Snapshot;
+  error?: string;
+  loading: boolean;
+}
+
+interface SnapshotStore {
+  readonly state: TuiState;
+  /** Point the queue filter at a session (the panel's / sidebar's session). */
+  watch(sessionId?: string): void;
+  load(): Promise<void>;
+  dispose(): void;
+}
+
+function arrayOf<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/**
+ * Tolerate an older server: a snapshot without `queue` (0.4.1) is still a
+ * usable snapshot, so the blocks are defaulted here instead of crashing `For`.
+ */
+function normalize(reply: unknown, now: number): Snapshot {
+  const value = (reply ?? {}) as Partial<Snapshot>;
+  if (!value || typeof value !== 'object') throw new Error('empty snapshot');
+  return {
+    at: Number(value.at) || now,
+    sessions: arrayOf<SnapshotSession>(value.sessions),
+    locks: arrayOf<SnapshotLock>(value.locks),
+    handoffs: arrayOf<SnapshotHandoff>(value.handoffs),
+    queue: arrayOf<SnapshotQueueItem>(value.queue),
+    reachable: true
+  };
+}
+
+/** `context.client.rpc(definition)` — absent on a host without the typed client. */
+function rpcDomain(ctx: Context): { snapshot?: (input: unknown) => Promise<unknown> } {
+  const client = ctx.client as unknown as {
+    rpc?: (definition: unknown) => { snapshot?: (input: unknown) => Promise<unknown> };
+  };
+  if (!client || typeof client.rpc !== 'function') throw new Error('host client has no rpc()');
+  const domain = client.rpc(CollabState);
+  if (!domain || typeof domain.snapshot !== 'function') throw new Error('collab.state.snapshot is not available');
+  return domain;
+}
+
+function createSnapshotStore(getCtx: () => Context): SnapshotStore {
+  const [state, setState] = createStore<TuiState>({ at: 0, loading: true });
+  let inFlight = false;
+  let disposed = false;
+  // Plain variable, not store state: `load` runs from effects and timers, and a
+  // tracked read here would make the caller's effect re-run on every set.
+  let me: string | undefined;
+
+  const load = async (): Promise<void> => {
+    if (disposed || inFlight) return;
+    inFlight = true;
+    try {
+      // Read `ctx` here, not when the store is built: the TUI replaces its
+      // client when the server restarts, and the location can change.
+      const ctx = getCtx();
+      const input: Record<string, string> = {};
+      const workspace = String((ctx.location as { directory?: string } | undefined)?.directory ?? '').trim();
+      if (workspace) input.workspace = workspace;
+      if (me) input.session = me;
+      const reply = await rpcDomain(ctx).snapshot!(input);
+      if (disposed) return;
+      const next = normalize(reply, Date.now());
+      setState({ at: next.at, data: next, error: undefined, loading: false });
+    } catch (error) {
+      if (disposed) return;
+      // Keep the last snapshot: a blip shows the stale rows *and* the banner,
+      // which is more honest than replacing data with an error screen.
+      setState({ error: describe(error), loading: false });
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  return {
+    state,
+    watch(sessionId) {
+      const next = String(sessionId ?? '').trim();
+      if (next) me = next;
+    },
+    load,
+    dispose() {
+      disposed = true;
+    }
+  };
+}
+
+let sharedStore: SnapshotStore | undefined;
+
+function storeFor(ctx: Context): SnapshotStore {
+  sharedStore ??= createSnapshotStore(() => ctx);
+  return sharedStore;
+}
+
+/* ------------------------------------------------------- fallback: session list */
+
+interface FallbackSession {
+  sid: string;
+  title: string;
+  agent: string;
+  busy: boolean;
+}
+
+/**
+ * R6 fallback: the host's own session list, which the TUI already caches, so an
+ * unreachable server still shows *something* real (who is running) instead of an
+ * empty pane. Never throws — a host without the API simply lists nothing.
+ */
+function fallbackSessions(ctx: Context): FallbackSession[] {
+  let listed: unknown[] = [];
+  try {
+    listed = arrayOf<unknown>(ctx.data.session.list());
+  } catch {
+    return [];
+  }
+  const out: FallbackSession[] = [];
+  for (const entry of listed) {
+    const info = (entry ?? {}) as Record<string, any>;
+    const sid = String(info.id ?? '');
+    if (!sid) continue;
+    let busy = false;
+    try {
+      busy = ctx.data.session.status(sid) === 'running';
+    } catch {
+      busy = false;
+    }
+    out.push({ sid, title: String(info.title ?? '(untitled)'), agent: String(info.agent ?? '?'), busy });
+  }
+  return out.sort((left, right) => Number(right.busy) - Number(left.busy) || left.sid.localeCompare(right.sid));
+}
+
+/* ------------------------------------------------------------------ panel body */
+
+function leaseTone(lock: SnapshotLock, me: string): Tone {
+  if (lock.holders.includes(me) || lock.waiting.includes(me)) return 'success';
+  if (!lock.holders.length) return lock.waiters > 0 ? 'warning' : 'muted';
+  return lock.mode === 'shared' ? 'warning' : 'danger';
+}
+
+function leaseLines(locks: SnapshotLock[], width: number, me: string): Line[] {
+  const narrow = width < 48;
+  const header = narrow
+    ? 'RESOURCE'
+    : tableRow([
+        ['RESOURCE', Math.max(10, width - 30)],
+        ['MODE', 9],
+        ['HOLDERS', 12],
+        ['TTL', 7],
+        ['WAIT', 4]
+      ]);
+  const out: Line[] = [{ text: header, tone: 'muted' }];
+  for (const lock of locks) {
+    const holders = lock.holders.length ? lock.holders.map(shortSid).join(',') : 'free';
+    const ttl = lock.expiresInMs ? fmtAge(lock.expiresInMs) : '-';
+    const wait = String(lock.waiters || 0);
+    const text = narrow
+      ? `${clip(lock.resource, width)}\n  ${clip(`${lock.mode} ${holders} · ${ttl} · 排队 ${wait}`, width - 2)}`
+      : tableRow([
+          [lock.resource, Math.max(10, width - 30)],
+          [lock.mode, 9],
+          [holders, 12],
+          [ttl, 7],
+          [wait, 4]
+        ]);
+    out.push({ text, tone: leaseTone(lock, me) });
+  }
+  return out;
+}
+
+function handoffLines(handoffs: SnapshotHandoff[], width: number): Line[] {
+  const narrow = width < 48;
+  const header = narrow
+    ? 'BID'
+    : tableRow([
+        ['BID', 16],
+        ['STATE', 9],
+        ['AGE', 8],
+        ['FROM', Math.max(6, width - 35)]
+      ]);
+  const out: Line[] = [{ text: header, tone: 'muted' }];
+  for (const handoff of handoffs) {
+    const from = shortSid(handoff.from);
+    const age = fmtAge(handoff.ageMs);
+    const text = narrow
+      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}`, width - 2)}`
+      : tableRow([
+          [handoff.bid, 16],
+          [handoff.state, 9],
+          [age, 8],
+          [from, Math.max(6, width - 35)]
+        ]);
+    // `open` = nobody has taken it yet; that is the row worth noticing.
+    out.push({ text, tone: handoff.state === 'open' ? 'warning' : 'base' });
+  }
+  return out;
+}
+
+function queueLines(queue: SnapshotQueueItem[], width: number): Line[] {
+  const narrow = width < 48;
+  const header = narrow
+    ? 'QUEUE'
+    : tableRow([
+        ['QUEUEID', 18],
+        ['TARGET', 20],
+        ['AGE', 8],
+        ['STATUS', Math.max(6, width - 48)]
+      ]);
+  const out: Line[] = [{ text: header, tone: 'muted' }];
+  for (const item of queue) {
+    const target = shortSid(item.target);
+    const age = fmtAge(item.ageMs);
+    const status = item.seen ? 'seen' : 'pending';
+    const text = narrow
+      ? `${clip(item.queueId, width)}\n  ${clip(`${target} · ${age} · ${status}`, width - 2)}`
+      : tableRow([
+          [item.queueId, 18],
+          [target, 20],
+          [age, 8],
+          [status, Math.max(6, width - 48)]
+        ]);
+    out.push({ text, tone: item.seen ? 'muted' : 'base' });
+  }
+  return out;
+}
+
+/**
+ * The whole panel as lines. Reading `panel.name` here (and in the caller's memo)
+ * keeps it reactive: switching to another plugin's panel empties the list, and
+ * the effect that owns the poll is cleaned up in the same pass.
+ */
+function panelLines(state: TuiState, panel: PanelInput, sessions: FallbackSession[]): Line[] {
+  if (panel.name !== PANEL) return [];
+  const width = Math.max(24, Number(panel.width) || FALLBACK_WIDTH);
+  const data = state.data;
+  const out: Line[] = [];
+  const push = (text: string, tone: Tone = 'base') => out.push({ text, tone });
+  const pending = (label: string) => `  ${data ? label : state.loading ? '加载中…' : '（不可达）'}`;
+
+  push(`Collab · ${shortSid(panel.sessionID)} · ${fmtClock(state.at)}`);
+  if (state.error) {
+    push(`RPC 不可达：${state.error}`, 'danger');
+    push(data ? '（显示上一份快照）' : '（仅显示本地会话列表）', 'muted');
+  }
+
+  push(`资源租约 (${data?.locks.length ?? 0})`, 'muted');
+  if (data && data.locks.length) out.push(...leaseLines(data.locks, width, panel.sessionID));
+  else push(pending('（无租约）'), 'muted');
+
+  push(`未闭环交接 (${data?.handoffs.length ?? 0})`, 'muted');
+  if (data && data.handoffs.length) out.push(...handoffLines(data.handoffs, width));
+  else push(pending('（无交接）'), 'muted');
+
+  push(`受保护目标队列 (${data?.queue.length ?? 0})`, 'muted');
+  if (data && data.queue.length) out.push(...queueLines(data.queue, width));
+  else push(pending('（无排队）'), 'muted');
+
+  // R6: no snapshot at all → the host's own session list, clearly labelled.
+  if (!data && state.error) {
+    push(`会话 (${sessions.length})`, 'muted');
+    for (const session of sessions) {
+      const title = clip(session.title, Math.max(8, width - 26));
+      push(`  ${session.busy ? '●' : '○'} ${shortSid(session.sid)} ${session.agent} ${title}`, session.busy ? 'success' : 'base');
+    }
+  }
+
+  push(`只读 · 每 ${POLL_MS / 1000}s 刷新 · /collab`, 'muted');
+  return out;
+}
+
+/* ----------------------------------------------------------------------- panel */
+
+function StatusPanel(props: { panel: PanelInput }) {
+  const ctx = usePlugin();
+  const store = storeFor(ctx);
+
+  // R7: the poll belongs to "this plugin's panel is the open one". Reading
+  // `panel.name` / `panel.sessionID` makes the effect re-run when either
+  // changes; its cleanup clears the previous timer, so a closed (or someone
+  // else's) panel stops polling immediately.
+  createEffect(() => {
+    if (props.panel.name !== PANEL) return;
+    store.watch(props.panel.sessionID);
+    void store.load();
+    const timer = setInterval(() => void store.load(), POLL_MS);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  const lines = createMemo(() => panelLines(store.state, props.panel, fallbackSessions(ctx)));
+
+  return (
+    <box flexDirection="column">
+      <For each={lines()}>{line => <text fg={color(ctx, line.tone)}>{line.text}</text>}</For>
+    </box>
+  );
+}
+
+/* --------------------------------------------------------------------- sidebar */
+
+/**
+ * R5: one line in the sidebar — `锁 N · 交接 M · 队列 K`. It refreshes once per
+ * mount (the panel owns the timer); unreachable reads `collab: n/a` rather than
+ * a stale `0`, which would look like "nothing is happening".
+ */
+function SidebarSummary(props: { sessionID: string }) {
+  const ctx = usePlugin();
+  const store = storeFor(ctx);
+
+  createEffect(() => {
+    store.watch(props.sessionID);
+    void store.load();
+  });
+
+  const line = () => {
+    const data = store.state.data;
+    if (!data) return store.state.loading ? 'collab: …' : 'collab: n/a';
+    return `锁 ${data.locks.length} · 交接 ${data.handoffs.length} · 队列 ${data.queue.length}`;
+  };
+
+  return <text fg={color(ctx, store.state.error ? 'danger' : 'muted')}>{line()}</text>;
+}
+
+/* ---------------------------------------------------------------------- plugin */
+
+export default Plugin.define({
+  id: 'collab.tui',
+
+  setup(ctx) {
+    const store = (sharedStore = createSnapshotStore(() => ctx));
+    const cleanups: Array<() => void> = [];
+    let disposed = false;
+
+    // R4/R5: the panel content and the one-line summary. Both are ordinary slot
+    // claims; the host disposes them when the plugin is disabled.
+    cleanups.push(
+      ctx.ui.slot({
+        append: 'session.panel',
+        render: (panel: PanelInput) => <StatusPanel panel={panel} />
+      })
+    );
+    cleanups.push(
+      ctx.ui.slot({
+        append: 'sidebar.content',
+        render: input => <SidebarSummary sessionID={input.sessionID} />
+      })
+    );
+
+    // R4: `/collab`, `ctrl+shift+l`, and the command palette all open the same
+    // panel. The host owns the layer's lifetime (removed on deactivate).
+    ctx.keymap.layer(() => ({
+      mode: 'global',
+      commands: [
+        {
+          id: 'collab.status',
+          title: 'Collab 状态面板',
+          description: '只读：资源租约 / 未闭环交接 / 受保护目标队列',
+          group: 'Collab',
+          bind: 'ctrl+shift+l',
+          slash: { name: 'collab', aliases: ['collab-status'] },
+          palette: true,
+          run: () => {
+            if (!ctx.ui.panel.open(PANEL)) {
+              ctx.ui.toast.show({ message: '先打开一个会话，再看 collab 状态', variant: 'warning' });
+            }
+          }
+        }
+      ]
+    }));
+
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      for (const cleanup of cleanups) {
+        try {
+          cleanup();
+        } catch {
+          // A slot already removed by the host is not an error here.
+        }
+      }
+      store.dispose();
+    };
+  }
+});

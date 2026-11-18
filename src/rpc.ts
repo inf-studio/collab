@@ -65,12 +65,38 @@ export interface SnapshotHandoff {
   title: string;
 }
 
+/**
+ * One owner-queue item that the **asking** session submitted to a protected
+ * target (`mineFor(session)` — the same list `collab_list` prints). 0.4.2:
+ * without it the TUI panel could show leases and hand-offs but not the queue it
+ * is also expected to show, and would have to read `~/.config` from the client.
+ *
+ * `queueId` / `target` / `ageMs` are the panel's three columns; `summary` is
+ * the sender's own sanitised text (`collab_list` shows it too).
+ */
+export interface SnapshotQueueItem {
+  queueId: string;
+  target: string;
+  /** Now − `at`, clamped at 0 (oldest first, like the hand-offs). */
+  ageMs: number;
+  summary: string;
+  issuePath?: string;
+  bid?: string;
+  /** The target's `context` hook already showed it (`seenAt`). */
+  seen: boolean;
+}
+
 /** The whole read-only picture. */
 export interface Snapshot {
   at: number;
   sessions: SnapshotSession[];
   locks: SnapshotLock[];
   handoffs: SnapshotHandoff[];
+  /**
+   * Items this session queued for protected targets. Empty when the caller did
+   * not name a session (no "me" to filter by) — never a scan of every queue.
+   */
+  queue: SnapshotQueueItem[];
   /** The server answered. A rejected call never produces a snapshot at all. */
   reachable: true;
 }
@@ -88,12 +114,16 @@ const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
 /**
  * `collab.state` — one method, no events. The id is under the plugin id
  * (`collab`), which is the namespace the host reserves for this plugin.
+ *
+ * Input is `{ workspace?, session? }`: `workspace` narrows sessions/ hand-offs
+ * to one directory, `session` selects whose owner-queue items `queue` holds
+ * (the TUI panel passes the session the panel is open in; omitted = empty).
  */
 export const CollabState = {
   id: 'collab.state',
   methods: {
     snapshot: {
-      input: obj({ workspace: str }),
+      input: obj({ workspace: str, session: str }),
       output: obj(
         {
           at: num,
@@ -135,9 +165,24 @@ export const CollabState = {
               },
               ['bid', 'state', 'ageMs', 'from', 'title']
             )
+          },
+          queue: {
+            type: 'array',
+            items: obj(
+              {
+                queueId: str,
+                target: str,
+                ageMs: num,
+                summary: str,
+                issuePath: str,
+                bid: str,
+                seen: bool
+              },
+              ['queueId', 'target', 'ageMs', 'summary', 'seen']
+            )
           }
         },
-        ['at', 'reachable', 'sessions', 'locks', 'handoffs']
+        ['at', 'reachable', 'sessions', 'locks', 'handoffs', 'queue']
       )
     }
   },
