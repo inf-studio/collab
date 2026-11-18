@@ -133,6 +133,7 @@ pnpm test          # build + 456 项 harness + 12 项只读默认
 ## Skill（给 agent 的操作手册）
 
 `skills/collab/SKILL.md` — 按需加载：工具速查、交接模板、权限/升级、排障清单。
+`skills/collab-coordination/SKILL.md` — 同工作区共享资源（测试窗口/同文件/构建）的锁与让行规程。
 本机安装：`ln -s "$PWD/skills/collab" ~/.config/opencode/skills/collab`。
 
 ## 遇到异常（缺陷上报）

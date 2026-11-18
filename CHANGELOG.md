@@ -3,6 +3,13 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.7] - 2026-11-18
+
+### Added
+
+- `skills/collab-coordination/SKILL.md`：同工作区共享资源（测试窗口 / 同一文件 / 全量构建）的「查看占用 → 申请 → 等待或让行 → 释放 → 超时升级」规程，含死锁避免与 `collab_*` 不可用时的降级路径。
+  来源：排钟专题与「加载全部未实施 issues」两个会话为 pytest 窗口反复协商的实证。
+
 ## [0.1.6] - 2026-11-18
 
 > 数据驱动：本机 50 会话、5 忙；常驻会话 900h+，单轮可达数十分钟，单会话 token 峰值 5774 万。
