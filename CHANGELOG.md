@@ -3,6 +3,16 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.5] - 2026-11-18
+
+> **0.1.4 在 OpenCode CLI 2.3.x 上无法安装**（`No matching version found for @opencode/util@2.3.2`），
+> 请直接使用 0.1.5；若已升级到 0.1.4 导致 `collab_*` 工具消失，把配置改回 `0.1.3` 并 `opencode reload` 即可恢复。
+
+### Fixed
+
+- `@opencode/plugin` 仅用于 `import type`，从 `dependencies` 移到 `devDependencies`：
+  发布包不再在安装期解析 `@opencode/*` 运行依赖。
+
 ## [0.1.4] - 2026-11-18
 
 > **升级顺序（重要）**：显式 `kind:"note"/"request"` 不再由正文触发状态迁移（R7）。混版本期间，

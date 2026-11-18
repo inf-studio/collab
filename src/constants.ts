@@ -184,5 +184,5 @@ export const STALE_ACKED_MS = ACKED_EXTRACT_MS;
 export const STALE_SEEN_LIMIT = 200;
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.1.4';
+export const PLUGIN_VERSION = '0.1.5';
 
