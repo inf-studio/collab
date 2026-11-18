@@ -218,3 +218,160 @@ $ node scripts/check-skill.mjs → ✓ skills/collab/SKILL.md / ✓ skills/colla
 9 项必查均通过；构建、类型检查、638 + 12 + 35 + 29 + 20 全部绿，`check-skill` 通过；
 范围与版本一致，无写路径、无新依赖、无契约变更。变异实验证明新增断言（尤其 TUI 折叠/展开/跳面板/
 不新增轮询、GUI 命令 enabled/run）确实会失败。**可提交**；上述 R1–R6 建议留作验收注意项或后续 patch。
+> 增量复核（`044f89f`，轮询 key + GUI 21 项）见文末「## 增量复核（轮询 key）」；上文的 `29 + 20` 是当时快照。
+
+## 增量复核（轮询 key）
+
+> 复核对象：`044f89f`（相对 `4546818` 的全部改动；本轮 delta = `src/gui.tsx` 轮询 key、`test/gui-entry.mjs` 第 21 项、
+> `CHANGELOG.md` / `README.md` 计数、新增 `.trellis/spec/frontend/opencode-plugin-ui.md`）。
+> 只审不改：未改实现/测试/文档，未 add/commit/push。
+
+**结论：需修（仅 1 行文档；代码与测试无阻塞）**
+
+- 代码：轮询 key 的三态语义正确；切换会话立即 `load()`；`pageHidden`/空列表时停止；**无切换后双定时器**；
+  无隐藏时轮询路径（单实例探针实测）。
+- 测试：新增第 21 项是真断言——把 key 改回布尔后**恰好这 1 项失败**，且 120+120 ms 的窗口远小于 2 s，
+  不是靠定时器误判通过。
+- 文档：`CHANGELOG.md:56` 仍写 **638 + 12 + 35 + 29 + 20**，与同文件 `:42`（21 项）、`README.md:189`（21 项）
+  及实际 `21/21` 不一致。**这是本轮唯一需要修改的地方（20 → 21）**。
+- 另一条非阻塞残余：`load()` 的 `inFlight` 守卫可能吞掉切会话时的“立即重载”（见风险 R-7，实测可复现但窗口窄）。
+
+### 1. key 语义与三种状态切换 —— 通过
+
+代码（`src/gui.tsx:465-478`）：
+
+```ts
+createKeyed(
+  () => {
+    if (pageHidden() || ctx.sessions.list().length === 0) return false;
+    return ctx.sessions.current()?.id ?? '';
+  },
+  () => { void store.load(); const timer = setInterval(() => void store.load(), POLL_MS);
+          onCleanup(() => clearInterval(timer)); }
+);
+```
+
+SDK 语义（`node_modules/@opencode/plugin/dist/gui/reactive.js:31-73`）：plain accessor 的 key 为
+`undefined/null/false` 时视为 inactive（有 `otherwise` 才跑）；每个 key 一个独立 `createRoot`，key 变化时
+effect 的 cleanup **先** `scope.dispose()`（清掉上一轮的 `onCleanup`）**再**跑新一次 `fn`。
+
+我用一个**单 instance** 的探针（见 §2 的说明：默认 Node 加载会得到两份 solid-js，必须注入同一命名空间，
+才等价于生产）记录每次 snapshot 调用与 `setInterval/clearInterval`：
+
+```
+--- switch（id A → id B，200 ms 时切换）
+before 1 total 4
+1ms:ses_probe, 302ms:ses_other, 2303ms:ses_other, 4305ms:ses_other
+timers: set:1@1ms, clear@302ms, set:2@302ms
+```
+
+- `false`（无列表 / 隐藏）：`stop` 场景 —— 列表清空后**不再有调用**（`total` 停在 1，2 s tick 未发生），
+  恢复列表后立即 `load()` 并重新起表：
+  ```
+  before-empty 1 total 1
+  1ms:ses_probe
+  after-restore 2 1ms:ses_probe, 2614ms:ses_probe
+  ```
+- `''`（有列表、无当前会话）：`home` 场景 —— `'' → id` 与 `id → ''` 都立即重载且**各自只有一枚定时器**：
+  ```
+  home total 4 1ms:-, 302ms:ses_probe, 503ms:-, 2504ms:-
+  timers: set:1@1ms, clear@302ms, set:2@302ms, clear@503ms, set:3@503ms
+  ```
+- hidden 初始（`document.hidden = true`）：`hidden total 0`（没有起表）。
+- **无隐藏时轮询**、**无双定时器**：`switch`/`home` 的 timer 日志都是 `set → clear → set`，没有并存的两枚；
+  4.3 s 内调用次数与新表 tick 对齐（旧表 tick 的 2.0/4.0 s 位置没有出现）。
+
+补充：`pageHidden()` 是**非响应式**读取，`document.hidden` 变化本身不会触发 key 重算（依赖
+`sessions.list()` 等其他响应式源推动）。这是 0.4.2 起就有的读法，本次 delta 未引入；见风险 R-8。
+
+### 2. 第 21 项断言真实性（独立变异）—— 通过
+
+把**构建产物** `dist/gui-experimental.cjs` 里的 key 改回旧布尔形式（源码不动），同一条命令：
+
+```
+$ node --conditions=browser test/gui-entry.mjs
+  ✓ R2 the one poll names the routed session (the queue number is real, not a default 0) — {"session":"ses_probe"}
+  ✗ R2 switching the routed session reloads at once (no 2s window with the old queue) — 1 → 1: {"session":"ses_probe"}
+=== 20/21 checks passed
+FAIL: R2 switching the routed session reloads at once (no 2s window with the old queue)
+```
+
+还原后 md5 与备份一致（`fc09580952c259f8b49c5228c651d3de`）。判定：
+
+- 断言只失败这一项，说明它确实锁的是“key 含会话 id”这一改动；
+- 测试窗口 = 首次 120 ms + 切换后 120 ms（共 240 ms ≪ `POLL_MS=2000`），旧表不可能在窗口内 tick，
+  所以通过时只可能来自 key 变化触发的 `load()`；单实例探针也显示立即重载发生在 ~302 ms（而非 ~2000 ms）；
+- 测试快照是**立即 resolve** 的，不覆盖“切换时恰有一次请求在飞”的情形（风险 R-7）。
+
+### 3. 无回归 —— 通过
+
+```
+$ pnpm build        → exit 0
+$ pnpm typecheck    → $ tsc --noEmit，exit 0
+$ pnpm test         → exit 0
+  === 638/638 checks passed
+  === 12/12 checks passed
+  === 35/35 checks passed
+  === 29/29 checks passed
+  === 21/21 checks passed
+$ node scripts/check-skill.mjs → skills ok
+```
+
+与要求一致：**638 + 12 + 35 + 29 + 21**；TUI 17→29 未回退，GUI 20→21。
+
+### 4. spec 文档与实现 —— 一致（除 CHANGELOG 计数）
+
+- 新增 `.trellis/spec/frontend/opencode-plugin-ui.md`：
+  - §1 槽位表写“**没有左侧应用侧栏**”，与 `docs/collab.md` §11.11.3、实现一致（不伪造左栏）；
+  - §2 的 key 代码片段与 `src/gui.tsx:465-478` 一致（含 `pageHidden()`、`list().length===0 → false`、
+    `current()?.id ?? ''`），并写明 `snapshot({session})` 必须传当前会话（`:126-127`）；
+  - §3 只读硬约束与实现一致（只有 `layout.open` / `panel.open` / toast）；
+  - §4 TUI 约定（默认一行、`onMouseDown`、局部 signal、`wrapMode="none"`、展开不 `load()`）与
+    `src/tui.tsx:495-553` 一致；
+  - §5 测试约定（真实鼠标、require 产物 + 严格 Proxy + `--conditions=browser` + `document` 垫片、变异验证）
+    与 `test/tui-render.mjs` / `test/gui-entry.mjs` 现状一致。
+- `.trellis/spec/frontend/index.md` 新增一行指向该文档。
+- **唯一不一致**：`CHANGELOG.md:56` 仍写 `… + 29 + 20`，应为 `… + 29 + 21`
+  （同文件 `:42` 已写 21 项，`README.md:189` 已写 21 项）。属文档计数漏改，不影响代码。
+- spec §2 的“页面隐藏时停轮询”与实现的关系同 §1 末尾的 R-8（非响应式读取，继承既有行为，不矛盾但有时机差）。
+
+### 5. 提交范围 —— 通过
+
+`git show --stat 044f89f` 共 20 个文件，全部在允许/声明范围内：
+
+- 实现：`src/gui.tsx`、`src/tui.tsx`
+- 测试：`test/gui-entry.mjs`（新，299 行）、`test/tui-render.mjs`
+- 文档/版本：`README.md`、`docs/collab.md`、`CHANGELOG.md`、`skills/collab/SKILL.md`、
+  `package.json`（仅 `version` + `test` 脚本）、`src/constants.ts`
+- Trellis 工作流：`.trellis/spec/frontend/{index.md,opencode-plugin-ui.md}`（delta 声明的新 spec）、
+  `.trellis/tasks/11-18-collab-entrypoints/**`（PRD/design/implement/研究记录，含上一轮 check-report）
+- **无** `pnpm-lock.yaml` / `dist/` / `node_modules/` / 无关源码；`git diff 4546818 044f89f -- package.json`
+  只有 version 与 test 脚本两处，无新依赖。
+
+### 本轮风险（均非代码阻塞）
+
+- **R-7（in-flight 竞态，残余）**：`load()` 在 `inFlight` 时直接 return（`src/gui.tsx:115`）。若切会话瞬间
+  恰有一次请求在飞，新 key 的“立即 load”被吞掉，旧会话的回包仍会落库，直到下一个 tick 才换：
+  ```
+  $ SLOW=1 node --conditions=browser <单实例探针> switch
+  before 1 total 3
+  1ms:ses_probe, 2303ms:ses_other, 4304ms:ses_other
+  timers: set:1@1ms, clear@301ms, set:2@301ms
+  ```
+  （快照人为延迟 500 ms；切换发生在 200 ms。）建议（可选）：在 `load()` 的 `finally` 里比较
+  “请求时的 session id != 当前 `sessions.current()?.id`”，若是则再排一次 `load()`。窗口窄、非本次验收项。
+- **R-8（pageHidden 非响应式，继承）**：见 §1 末尾；不是本次引入，若要“隐藏即停/可见即续”需把可见性
+  做成响应式源或监听 `visibilitychange`。
+- **R-9（测试加载保真度）**：`test/gui-entry.mjs` 里 bundle 的 `require('solid-js')` 解析到 `dist/solid.cjs`，
+  而测试自身 `import 'solid-js'` 解析到 `dist/solid.js`——**两份 Solid**。结果是 bundle 里的 `onCleanup`
+  在该 harness 中不生效：默认探针日志为 `set:1@1ms, set:2@302ms`（无 clear），只有把两者注入成同一命名空间后
+  才出现 `clear@302ms`。所以第 21 项能验证“立即重载”，但**这个 harness 无法用来断言定时器清理/双定时器**；
+  生产是单实例（否则 0.4.2 的 GUI 渲染也不成立），我用单实例探针补验了无双重定时器。无需改代码，
+  但后续若加“无重复定时器”断言，必须先统一 Solid 实例（例如用 `Module._load` 注入命名空间）。
+- **R-10（文档）**：`CHANGELOG.md:56` 计数 20 → 21。
+
+### 增量结论
+
+轮询 key 的语义、启停、切换重载均正确，第 21 项断言经变异验证有效，构建/类型/测试全绿且计数为
+**638 + 12 + 35 + 29 + 21**；提交范围干净、无新依赖、spec 与实现一致且未声称左侧栏。
+**需修 1 处文档计数（`CHANGELOG.md:56` 20 → 21）；代码可提交。** R-7/R-8/R-9 为记录在案的非阻塞风险。
