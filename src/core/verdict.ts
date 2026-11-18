@@ -259,12 +259,17 @@ export function takeoverBody({
     `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
     `影响面：${(record.affectedFiles ?? []).slice(0, 8).join(', ') || '(未标注)'}`,
     `期望：${record.expected}`,
+    // D3 (0.4.0): `research` is read-only investigation — say so before the
+    // three steps, so a `build` session does not start editing.
+    ...(record.expected === 'research'
+      ? ['（本次期望是「只读排查」：只读代码/提案并给出结论，不要改代码；要改代码需发起方另发 implement。）']
+      : []),
     // R1-2: full requester sid (no `collab_inbox` lookup needed to say no).
     `发起方：${requester || '(记录里没有发起方 sid，回执用 collab_inbox 查)'}`,
     '按顺序完成（三步都不要省略）：',
     // R1 (G1): accept → receipt → "analysing in-session is not done", with
     // copy-pasteable commands (full sid + bid).
-    ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode }),
+    ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode, expected: record.expected }),
     spawn
       ? receiptMode === 'pull'
         ? '确实做不了：在最后一条回复里写 BLOCKED 回执（不要 collab_send），不要静默挂起。'
@@ -293,15 +298,19 @@ export function handoffActions({
   requester,
   spawn = false,
   leaseMin = 5,
-  receiptMode = 'push'
+  receiptMode = 'push',
+  expected = 'implement'
 }: {
   bid: string;
   requester?: string;
   spawn?: boolean;
   leaseMin?: number;
   receiptMode?: 'push' | 'pull';
+  /** D3 (0.4.0): `research` swaps step ③ for read-only wording. */
+  expected?: string;
 }): string[] {
   const target = requester || 'ses_…';
+  const research = expected === 'research';
   const lines = [`① 领取（先做；领取即 acked）：collab_accept {bid:"${bid}", confirm:true}`];
   if (receiptMode === 'pull') {
     // R1 (pull): the requester is on the protect list, so a `collab_send` into
@@ -313,7 +322,9 @@ export function handoffActions({
         '发起方在租约到期后只读提取（这条回复就是回执）。',
       `   无法实施/判定无需处理: 同一行改成 \`[handoff] BLOCKED ${bid} <原因>\`。`,
       '   不要尝试 collab_send：发起方在 protect 名单内，投递会被拒绝。',
-      '③ 只分析、不调用工具 = 未完成：结论必须写在本会话最后一条回复里（含上面的 [handoff] 行）。'
+      research
+        ? '③ 本次是只读排查：不要改代码；结论（发现 / 建议 / 风险）连同上面的 [handoff] 行写在本会话最后一条回复里。'
+        : '③ 只分析、不调用工具 = 未完成：结论必须写在本会话最后一条回复里（含上面的 [handoff] 行）。'
     );
     if (!spawn) {
       lines.push(
@@ -325,8 +336,11 @@ export function handoffActions({
   lines.push(
     `② 回执（必发，二选一）: collab_send {target:"${target}", text:"[handoff] DONE ${bid} <摘要>", confirm:true}`,
     `   无法实施/判定无需处理: collab_send {target:"${target}", text:"[handoff] BLOCKED ${bid} <原因>", confirm:true}`,
-    '③ 只分析、不调用工具 = 未完成：结论必须用上面的 collab_send 真正发出。' +
-      '（② 里的文字只是格式示例——复述/回显它不算回执，也不会被自动闭环。）'
+    research
+      ? '③ 本次是只读排查：不要改代码；结论（发现 / 建议 / 风险）写进最后一条回复，并用 ② 的 collab_send 真正发出。' +
+        '（② 里的文字只是格式示例——复述/回显它不算回执，也不会被自动闭环。）'
+      : '③ 只分析、不调用工具 = 未完成：结论必须用上面的 collab_send 真正发出。' +
+        '（② 里的文字只是格式示例——复述/回显它不算回执，也不会被自动闭环。）'
   );
   if (!spawn) {
     lines.push(

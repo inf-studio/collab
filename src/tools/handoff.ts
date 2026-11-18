@@ -16,7 +16,7 @@ import type { Target, ToolKit } from './shared.ts';
  * `collab_broadcast` picks one candidate.
  */
 export function handoffTool(kit: ToolKit): ToolDefinition {
-  const { deps, resolveTarget, resolveMode, dispatch } = kit;
+  const { deps, resolveTarget, resolveMode, dispatch, capabilityNote } = kit;
   const { ctx, readConfig, chain } = deps;
 
   return {
@@ -39,7 +39,9 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         expected: {
           type: 'string',
           enum: EXPECTED,
-          description: 'implement (default) / review — only used when the plugin has to pick the target.'
+          description:
+            'implement (default) / review / research — the last one is read-only investigation + a conclusion; ' +
+            'it drives the ranking and is written into the record.'
         },
         confirm: {
           type: 'boolean',
@@ -135,6 +137,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
               `title="${truncate(target.info?.title ?? '(untitled)', 60)}"`,
             guard ? `拒绝提示: 目标在 protect 名单内（depth=${guard.depth}），确认后仍会被拒绝。` : '',
             `kind=request mode=${forced ? 'queue(forced)' : mode} thread=${threadID} bid=${bid}`,
+            ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
             ...notes.map(note => `注: ${note}`),
             ...(ranking
               ? [
@@ -201,6 +204,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         content: [
           delivered.content,
           `bid=${bid}  thread=${threadID}（local scope，回执用 collab_reply {threadID}）`,
+          ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
           `等结果: collab_wait {threadID:"${threadID}", timeoutMs:…}`
         ].join('\n')
       };

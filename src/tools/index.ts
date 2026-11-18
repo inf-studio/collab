@@ -7,6 +7,7 @@ import { handoffTool } from './handoff.ts';
 import { inboxTool } from './inbox.ts';
 import { listTool } from './list.ts';
 import { lockTool, locksTool, unlockTool } from './locks.ts';
+import { requestOwnerTool } from './owner-queue.ts';
 import { promoteTool } from './promote.ts';
 import { replyTool } from './reply.ts';
 import { reportTool } from './report.ts';
@@ -32,6 +33,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     listTool(kit),
     broadcastTool(kit),
     handoffTool(kit),
+    requestOwnerTool(kit),
     acceptTool(kit),
     sendTool(kit),
     replyTool(kit),

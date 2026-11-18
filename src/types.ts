@@ -318,6 +318,36 @@ export interface BroadcastRecord {
   [key: string]: any;
 }
 
+// ------------------------------------------------------- owner queue (0.4.0)
+
+/**
+ * One item of the protected-target review queue
+ * (`~/.config/opencode/collab-owner-queue/<targetSid>/<id>.json`).
+ *
+ * A **pull** note, never a delivery: no prompt, no inbox entry, no bid. The
+ * target session sees `summary` (its own sender's words, ≤500 chars, control
+ * characters stripped) as one read-only line in its own `context` injection.
+ */
+export interface OwnerQueueItem {
+  /** `q_<base36ts>_<rand4>`. */
+  id: string;
+  /** The `[protected]` / `[protected-child]` session this item is for. */
+  target: string;
+  /** The (non-protected) session that submitted it — the only one who may revoke. */
+  from: string;
+  at: number;
+  /** ≤500 chars, control characters stripped, whitespace collapsed. */
+  summary: string;
+  /** `docs/issues/<name>.md` (syntax-checked only) or `null`. */
+  issuePath?: string | null;
+  /** A bid the sender already talked about, if any — display only. */
+  bid?: string | null;
+  /** Kept for tolerant reads; `revoke` deletes the file. */
+  revokedAt?: number | null;
+  /** Written by the target's `context` hook **after** the block was pushed. */
+  seenAt?: number | null;
+}
+
 // ------------------------------------------------------------ resource leases
 
 /** `exclusive` (default) locks out everything; `shared` coexists with `shared`. */

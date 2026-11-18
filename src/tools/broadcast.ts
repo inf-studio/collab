@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, BROADCAST_DIR, EXPECTED } from '../constants.ts';
 import { invalid } from '../core/errors.ts';
 import { claimLock, persistRefresh, readBroadcast, releaseLock, updateLock, writeBroadcast } from '../core/claim.ts';
@@ -21,8 +21,33 @@ import type { ToolKit } from './shared.ts';
 
 /** `collab_broadcast` — cross-workspace (peer) hand-off: score, write, ask/spawn. */
 export function broadcastTool(kit: ToolKit): ToolDefinition {
-  const { deps, deliverAsk } = kit;
+  const { deps, deliverAsk, capabilityNote } = kit;
   const { ctx, chain, readConfig } = deps;
+
+  /**
+   * D4 (0.4.0): `collab_broadcast` is the **cross-workspace** tool. Pointed at
+   * the current workspace it produced a peer record for a target that should
+   * have been a local `collab_handoff` (a different protocol — thread + reply —
+   * and no global file). Compared on `realpath` so `./ws`, `ws/` and a symlink
+   * are the same workspace. Runs before anything is read/written.
+   */
+  function assertOtherWorkspace(workspace: string): void {
+    const current = String(ctx?.location?.directory ?? '').trim();
+    if (!current) return; // no location: nothing to compare against
+    const real = (value: string): string => {
+      try {
+        return realpathSync(value);
+      } catch {
+        return value;
+      }
+    };
+    if (real(workspace) !== real(current)) return;
+    throw invalid(
+      `拒绝广播：目标 workspace 就是当前工作区（${current}）。` +
+        '同仓请用 collab_handoff { text, expected?, confirm:true }（thread + reply 协议，不写全局广播记录）。' +
+        '未写入任何内容。'
+    );
+  }
 
   return {
     name: 'collab_broadcast',
@@ -40,7 +65,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       'the same to an existing session. ' +
       "when a spawned session lets its lease lapse, the requester reads that session's last answer " +
       'once and closes the hand-off itself when it carries a verdict (receipt.auto), never spawning again. ' +
-      'Idempotent: the same proposal content is the same bid. Requires confirm:true; otherwise it only previews.',
+      'Idempotent: the same proposal content is the same bid. Requires confirm:true; otherwise it only previews. ' +
+      'A workspace that resolves to the current one is refused (same-workspace work is collab_handoff).',
     input: jsonInput({
       properties: {
         workspace: {
@@ -54,7 +80,9 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         expected: {
           type: 'string',
           enum: EXPECTED,
-          description: 'implement (default) = the peer should change code; review = the peer should confirm.'
+          description:
+            'implement (default) = the peer should change code; review = the peer should confirm; ' +
+            'research = read-only investigation and a conclusion (the only honest expectation for a read-only agent).'
         },
         agent: {
           type: 'string',
@@ -76,6 +104,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
     async execute(input, context) {
       const me = context?.sessionID;
       const { workspace, issuePath, abs, mtimeMs } = resolveBroadcastTargets(input?.workspace, input?.issuePath);
+      // D4: refuse a same-workspace broadcast before any read / write.
+      assertOtherWorkspace(workspace);
       const expected = normalizeExpected(input?.expected);
       const agent = String(input?.agent ?? 'explore').trim() || 'explore';
       const content = readFileSync(abs, 'utf8');
@@ -99,7 +129,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       const receiptMode: 'push' | 'pull' = requesterProtected ? 'pull' : 'push';
       const head = [
         `bid=${bid}  scope=peer  workspace=${workspace}`,
-        `提案: ${issuePath}  标题: "${proposal.title}"  期望: ${expected}`,
+        `提案: ${issuePath}  标题: "${proposal.title}"  期望: ${expected}` +
+          (expected === 'research' ? '（只读排查：对端只读代码/提案并回结论，不改代码）' : ''),
         `影响面(${proposal.files.length}): ${proposal.files.slice(0, 8).join(', ') || '(未在提案里找到文件路径)'}`
       ];
 
@@ -154,6 +185,9 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       const ranked = ranking.candidates;
       const top = ranked.find(candidate => candidate.score >= BCAST_THRESHOLD);
       const plannedSpawn = !top;
+      // D3 (0.4.0): `expected:implement` against a read-only counterpart cannot
+      // end in code — say it before writing (preview) and in the result.
+      const mismatch = capabilityNote(top?.info?.agent ?? agent, expected);
 
       if (preview) {
         return {
@@ -176,7 +210,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
                   top.busyMinutes > 30
                     ? ` 已 busy ${Math.round(top.busyMinutes)}min → 确认后补发 1 条 queue prompt 叫醒`
                     : ' → 不投递任何 prompt（接管请求走它的下一轮 context 注入，0 调用）'
-                }；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE（回 \`DECLINE ${bid} <理由>\`）/ 5 分钟不答 → 顺延下一候选（attempts+1）`
+                }；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE（回 \`DECLINE ${bid} <理由>\`）/ 5 分钟不答 → 顺延下一候选（attempts+1）`,
+            ...(mismatch ? [mismatch] : [])
           ].join('\n')
         };
       }
@@ -309,7 +344,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
               : '新会话已创建，但接管请求投递失败（用 collab_send 补发；下次刷新会重试 1 次）。',
             // R1: the same three actions the new session was told, so the
             // requester can re-send them verbatim if delivery failed.
-            ...handoffActions({ bid, requester: me, spawn: true, receiptMode }),
+            ...handoffActions({ bid, requester: me, spawn: true, receiptMode, expected }),
+            ...(mismatch ? [mismatch] : []),
             `该会话不会被删除（collab_list 标 [bootstrap]）；对端不动作时，租约到期会只读提取它的结论并自动闭环。`
           ].join('\n')
         };
@@ -373,7 +409,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           // R1: the receiving side must accept *and* send a receipt; posting the
           // conclusion in its own session is explicitly not "done" (pilot G1).
           // In `pull` mode the receipt *is* the in-session conclusion instead.
-          ...handoffActions({ bid, requester: me, receiptMode }),
+          ...handoffActions({ bid, requester: me, receiptMode, expected }),
+          ...(mismatch ? [mismatch] : []),
           receiptMode === 'pull'
             ? `推辞: 不领取即可（5 分钟不答自动顺延下一候选；pull 模式没有推送，不需要 DECLINE 回执）`
             : `推辞: collab_send {target:"${me ?? 'ses_…'}", text:"DECLINE ${bid} <理由>", confirm:true}（由被问询的 top-1 发回；不带 bid 且同时有多个问询时不会被采纳）`

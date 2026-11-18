@@ -161,6 +161,13 @@ export interface ToolKit {
   resolveTarget(raw: unknown): Promise<Target>;
   senderLabel(sessionID: string | undefined): string;
   isReadonlyAgent(agent: unknown): boolean;
+  /**
+   * D3 (0.4.0): the visible capability-mismatch note — `expected:"implement"`
+   * against a read-only agent (`explore` / `plan`) cannot end in code, so the
+   * result says so and points at `expected:"research"` / `collab_promote`.
+   * `undefined` when the pair is fine (`research` is legal for any agent).
+   */
+  capabilityNote(agent: unknown, expected: unknown): string | undefined;
   resolveMode(requested: unknown, agent: unknown): DeliveryMode;
   dispatch(input: {
     context: ToolContext | undefined;
@@ -242,6 +249,22 @@ export function createToolKit(deps: ToolDeps): ToolKit {
   function isReadonlyAgent(agent: unknown): boolean {
     const id = String(agent ?? '').trim();
     return Boolean(id) && readConfig().readonlyAgents.includes(id);
+  }
+
+  /**
+   * D3 (0.4.0): the capability mismatch that used to be invisible. A hand-off
+   * whose `expected` is `implement` but whose counterpart is read-only can only
+   * end in `BLOCKED` (the pilot's D1a shape), so the result names it and gives
+   * the two ways out. `research` never warns — it is legal for every agent.
+   */
+  function capabilityNote(agent: unknown, expected: unknown): string | undefined {
+    if (String(expected ?? '') !== 'implement') return undefined;
+    if (!isReadonlyAgent(agent)) return undefined;
+    const id = String(agent ?? '').trim();
+    return (
+      `注: 承接方为只读 agent（${id}），implement 期望可能无法完成；建议 expected:"research"（只读排查 + 结论）` +
+      '或显式 collab_promote { target, confirm:true } 之后再交接。'
+    );
   }
 
   /**
@@ -601,6 +624,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     resolveTarget,
     senderLabel,
     isReadonlyAgent,
+    capabilityNote,
     resolveMode,
     dispatch,
     waitForReply,

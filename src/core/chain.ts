@@ -45,6 +45,7 @@ import {
 import { createGrants } from './grants.ts';
 import type { Grants } from './grants.ts';
 import { createLineage } from './lineage.ts';
+import { unseenHints } from './owner-queue.ts';
 import { pathsFromMessages, scoreCandidate } from './score.ts';
 import {
   assistantTexts,
@@ -69,6 +70,13 @@ export type { RankResult };
 export interface FollowUpHintResult {
   lines: string[];
   keys: string[];
+  /**
+   * D1 (0.4.0): `owner-queue` item ids (`q_…`) that the rendered lines belong
+   * to. Same contract as `keys`: the caller stamps `seenAt` only **after** the
+   * block was really pushed onto the request. Only a protected session ever
+   * carries this list (see `injectionFor`).
+   */
+  ownerQueue?: string[];
 }
 
 /**
@@ -723,6 +731,14 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * **nothing** from this function except `followUpHints` (a read-only
    * "proposal has an append, read the file" line). It is returned *before* the
    * protect guard, and nothing else is ever added to that list.
+   *
+   * D1 (0.4.0) extends that whitelist by exactly one read-only source: the
+   * **owner review queue** (`- [owner-queue] <from> @ <HH:MM>：<summary>（<path>）`,
+   * at most 3 per injection, oldest first). It is not a delivery — the item was
+   * written by another session, and the ids travel back so the hook stamps
+   * `seenAt` only after the block is pushed (same F1 rule as the follow-ups).
+   * A `[protected-child]` is not a group member and therefore returns early
+   * below; it still gets its queue hints (nothing can be delivered to it either).
    */
   async function injectionFor(
     sessionID: string | undefined,
@@ -731,12 +747,24 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     const now = Date.now();
     if (!sessionID || !directory) return { lines: [], keys: [] };
     const info = await sessionInfo(sessionID);
-    if (!info || info.parentID) return { lines: [], keys: [] }; // children are not group members
     const config = readConfig();
-    // R5 whitelist (computed for every session; the *only* output a protected
-    // one will ever get, and a one-shot hint for everybody else).
+    // R5/D1 whitelist input: computed once, for every session. Non-protected
+    // sessions can never be a queue target (`collab_request_owner` refuses
+    // them), so the directory read is skipped for them.
+    const guard = await createLineage(ctx).protectedAncestor(sessionID, config.protect);
+    const queue = guard ? unseenHints(sessionID) : { lines: [], ids: [] };
+    if (!info || info.parentID) {
+      // Children are not group members: they used to get nothing at all. A
+      // protected child is still a legal queue target, so its (read-only) queue
+      // lines are the one thing it may see.
+      return guard
+        ? { lines: queue.lines, keys: [], ownerQueue: queue.ids }
+        : { lines: [], keys: [] };
+    }
     const hints = await followUpHints(sessionID);
-    if (await createLineage(ctx).protectedAncestor(sessionID, config.protect)) return hints;
+    if (guard) {
+      return { lines: [...hints.lines, ...queue.lines], keys: hints.keys, ownerQueue: queue.ids };
+    }
 
     const lines: string[] = [];
     for (const raw of allBroadcasts()) {
@@ -788,7 +816,8 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
                 leaseMin,
                 // R1 (pull): a protected requester cannot receive a pushed
                 // receipt, so the ask line must not demand one.
-                receiptMode: record.receiptMode === 'pull' ? 'pull' : 'push'
+                receiptMode: record.receiptMode === 'pull' ? 'pull' : 'push',
+                expected: record.expected
               }).join(' ')}`
           );
           // F1 (same class): this write follows `resendIfDue`'s awaits, so merge

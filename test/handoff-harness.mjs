@@ -180,6 +180,27 @@
  *   F3  `./docs/issues/x.md` and `docs//issues/./x.md` normalise to the same file;
  *       `..`, absolute paths and symlinks stay refused
  *
+ * S90–S92 (`11-18-collab-owner-queue`, 0.4.0) cover the three defects of
+ * `d_6180f4ab4fb4368a` that were confirmed (D2 was disproved and is untouched):
+ *   S90  the owner review queue (`collab_request_owner`): the write is one JSON
+ *        file — 0 prompts, no bid, no thread, no record change; `confirm:false`
+ *        is a zero-write preview; only "non-protected → protected" is allowed
+ *        (a protected initiator is refused, an ordinary target gets a
+ *        `collab_handoff` pointer); summary ≤500 with control characters
+ *        stripped; `issuePath` is a syntax check only; a full queue (50
+ *        **unread**) refuses the newcomer and evicts nothing, while items the
+ *        owner already read neither count toward the cap nor live forever
+ *        (they are swept 7 days after `seenAt`)
+ *   S91  what the protected side sees: 1–3 read-only `- [owner-queue] …` lines
+ *        per injection (oldest first, each exactly once, `seenAt` written only
+ *        after `system.push` succeeded), the same for a `[protected-child]`,
+ *        plus the requester's own `collab_list` view and `revoke:true`
+ *        (initiator only, id-only form included)
+ *   S92  `expected:"research"` (enum + read-only takeover wording, legal for a
+ *        build counterpart) and the `explore` + `implement` capability-mismatch
+ *        note; a same-workspace `collab_broadcast` is refused on `realpath`
+ *        (symlink spelling included) and writes nothing
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -219,6 +240,11 @@ process.env.COLLAB_GRANT_DIR = grantDir;
 // plugin writes.
 const lockDir = join(dir, 'locks');
 process.env.COLLAB_LOCK_DIR = lockDir;
+
+// The owner review queue (0.4.0, S90–S92) is global too
+// (`~/.config/opencode/collab-owner-queue`): keep it inside the temp dir.
+const ownerQueueDir = join(dir, 'owner-queue');
+process.env.COLLAB_OWNER_QUEUE_DIR = ownerQueueDir;
 
 // Defect evidence (S72+) and the config file (`report.to` is written mid-run)
 // also stay inside the temp dir: a harness run must never add a real report to
@@ -1396,15 +1422,56 @@ await expectFail(
   /不存在/
 );
 
-// A broadcast in *this* plugin's own workspace, to prove the receiving side
-// sees it exactly once and children / protected lines never do.
-const s30 = await call(
-  'collab_broadcast',
-  { workspace: WS_A, issuePath: ISSUE_A, expected: 'implement', confirm: true },
-  { sessionID: 'ses_req', agent: 'build' }
+// D4 (0.4.0): a broadcast whose workspace *is* the current one is refused —
+// same-workspace work belongs to collab_handoff (thread + reply, no global
+// record). Nothing is written, not even a preview-stage record.
+const s30BidsBefore = bcBids().length;
+const s30Self = await expectFail(
+  'S30 a broadcast to the current workspace is refused (D4)',
+  () =>
+    call(
+      'collab_broadcast',
+      { workspace: WS_A, issuePath: ISSUE_A, expected: 'implement', confirm: true },
+      { sessionID: 'ses_req', agent: 'build' }
+    ),
+  /同仓|collab_handoff/
 );
-const bidA = bidOf(s30);
-out('S30 broadcast in own workspace', s30);
+expect(
+  'S30 … and the refusal wrote no broadcast record',
+  bcBids().length === s30BidsBefore && !s30Self.includes('bid='),
+  `${bcBids().length - s30BidsBefore} new record(s)`
+);
+
+// The receiving side of a group broadcast, to prove it is injected exactly once
+// and that children / protected lines never see it. The record is written
+// directly (a same-workspace broadcast is no longer possible, and the injection
+// rules are the same for a peer record of this workspace).
+const bidA = 'b_aaaa0000000000a1';
+writeFileSync(
+  bcFile(bidA),
+  JSON.stringify({
+    bid: bidA,
+    scope: 'peer',
+    workspace: WS_A,
+    issuePath: ISSUE_A,
+    title: 'S30 组内广播',
+    expected: 'implement',
+    affectedFiles: [],
+    candidates: [],
+    state: 'open',
+    attempts: 0,
+    skipped: [],
+    seenBy: [],
+    askSeen: [],
+    reminded: [],
+    replies: [],
+    from: { sid: 'ses_req' },
+    receiptMode: 'push',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  })
+);
+out('S30 broadcast record (written directly)', `bid=${bidA}`);
 const injected1 = contextEvent('ses_a_target');
 await hooks.context(injected1);
 const injected2 = contextEvent('ses_a_target');
@@ -6391,6 +6458,609 @@ expect(
   !s89List3.includes('followUp 因路径无效未渲染'),
   s89List3.split('\n').filter(line => line.includes('followUp 因路径无效')).join(' | ') || '(无)'
 );
+
+// ================== S90–S92 (0.4.0: owner queue / research / same-workspace)
+// The three defects of `d_6180f4ab4fb4368a` (D1/D3/D4; D2 was disproved):
+//   S90  the owner review queue — write / preview / direction / cap, and prove
+//        that a queue item is **not** a delivery (0 prompts, no bid, no thread)
+//   S91  the read-only hint a protected session sees (1–3 lines, once each,
+//        not stamped when the injection fails) + the requester's own view and
+//        `revoke:true` (initiator only)
+//   S92  `expected:"research"` (enum + takeover wording + capability mismatch)
+//        and a same-workspace `collab_broadcast` being refused with zero writes
+const S90_FROM = 'ses_s90from';
+const S90_BULK = 'ses_s90bulk';
+const S90_OWNER = 'ses_s90owner'; // [protected-child] of the schema line
+sessions[S90_FROM] = {
+  id: S90_FROM,
+  agent: 'build',
+  title: 'S90 发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_A }
+};
+sessions[S90_BULK] = {
+  id: S90_BULK,
+  agent: 'build',
+  title: 'S90 批量发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_A }
+};
+sessions[S90_OWNER] = {
+  id: S90_OWNER,
+  parentID: PROTECTED_REQ,
+  agent: 'build',
+  title: 'S90 受保护子会话',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_A }
+};
+
+const qdir = sid => join(ownerQueueDir, sid);
+const qFiles = sid => {
+  try {
+    return readdirSync(qdir(sid)).filter(name => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+};
+const qRead = (sid, id) => JSON.parse(readFileSync(join(qdir(sid), `${id}.json`), 'utf8'));
+const qids = text => [...String(text).matchAll(/\b(q_[0-9a-z]+_[0-9a-z]+)\b/g)].map(match => match[1]);
+const qLines = text => String(text).split('\n').filter(line => line.startsWith('- [owner-queue] '));
+const threadKeys = () => [...store.keys()].filter(key => key.startsWith('collab/threads/')).length;
+
+// --- S90a: `confirm:false` is a preview with **zero** side effects.
+const s90Preview = await call(
+  'collab_request_owner',
+  { target: S90_OWNER, text: 'schema 线：请复核并发行为', issuePath: 'docs/issues/x.md', confirm: false },
+  as(S90_FROM)
+);
+out('S90 preview (confirm:false)', s90Preview);
+expect(
+  'S90 preview writes nothing (no directory, no file)',
+  !existsSync(ownerQueueDir) && s90Preview.includes('未写入'),
+  `exists=${existsSync(ownerQueueDir)}`
+);
+expect(
+  'S90 preview names the target, the summary and the file it would write',
+  s90Preview.includes(S90_OWNER) &&
+    s90Preview.includes(`[protected-child depth=1]`) &&
+    s90Preview.includes('请复核并发行为') &&
+    s90Preview.includes(`${qdir(S90_OWNER)}/`),
+  s90Preview.split('\n')[1]
+);
+
+// --- S90b: the write is a queue file and nothing else (0 delivery).
+const s90PromptsBefore = prompts.length;
+const s90BidsBefore = bcBids().length;
+const s90ThreadsBefore = threadKeys();
+const s90Queued = await call(
+  'collab_request_owner',
+  {
+    target: S90_OWNER,
+    text: 'schema 线：请复核 packages/state/src/machine/worker/store.ts 的并发行为\u0007\n第二行（保留）',
+    issuePath: `./${ISSUE_A}`,
+    confirm: true
+  },
+  as(S90_FROM)
+);
+const s90Main = qids(s90Queued)[0];
+out('S90 enqueue', s90Queued);
+expect(
+  'S90 the queue item is written under <dir>/<targetSid>/<queueId>.json',
+  Boolean(s90Main) && qFiles(S90_OWNER).join(',') === `${s90Main}.json`,
+  qFiles(S90_OWNER).join(',')
+);
+const s90Item = qRead(S90_OWNER, s90Main);
+expect(
+  'S90 the item carries id/target/from/at/summary (bid/seenAt/revokedAt empty)',
+  s90Item.id === s90Main &&
+    s90Item.target === S90_OWNER &&
+    s90Item.from === S90_FROM &&
+    Number(s90Item.at) > 0 &&
+    s90Item.bid === null &&
+    s90Item.seenAt === null &&
+    s90Item.revokedAt === null,
+  JSON.stringify(s90Item)
+);
+expect(
+  'S90 summary is one line, control characters stripped, newline text kept as text',
+  !/[\u0000-\u001f\u007f]/.test(s90Item.summary) &&
+    s90Item.summary.includes('第二行（保留）') &&
+    s90Item.summary.split('\n').length === 1,
+  JSON.stringify(s90Item.summary)
+);
+expect(
+  'S90 issuePath is normalised to docs/issues/<name>.md (syntax check only)',
+  s90Item.issuePath === ISSUE_A,
+  String(s90Item.issuePath)
+);
+expect(
+  'S90 enqueue sends no prompt at all (not a delivery channel)',
+  prompts.length === s90PromptsBefore,
+  `+${prompts.length - s90PromptsBefore} prompt(s)`
+);
+expect(
+  'S90 … and creates no bid / thread / broadcast record',
+  bcBids().length === s90BidsBefore && threadKeys() === s90ThreadsBefore,
+  `${bcBids().length - s90BidsBefore} bid(s), +${threadKeys() - s90ThreadsBefore} thread(s)`
+);
+const s90Long = await call(
+  'collab_request_owner',
+  { target: S90_OWNER, text: '长'.repeat(600), confirm: true },
+  as(S90_FROM)
+);
+const s90LongItem = qRead(S90_OWNER, qids(s90Long)[0]);
+expect(
+  'S90 the summary is capped at 500 characters',
+  s90LongItem.summary.length === 500,
+  String(s90LongItem.summary.length)
+);
+await call('collab_request_owner', { id: qids(s90Long)[0], revoke: true, confirm: true }, as(S90_FROM));
+
+// --- S90c: direction + validation (all refusals write nothing).
+expect(
+  'S90 an ordinary (non-protected) target is refused with a collab_handoff pointer',
+  /collab_handoff/.test(
+    await expectFail(
+      'S90 … target ses_bbb (not protected)',
+      () => call('collab_request_owner', { target: 'ses_bbb', text: 'x', confirm: true }, as(S90_FROM)),
+      /protect 名单|collab_handoff/
+    )
+  ),
+  ''
+);
+await expectFail(
+  'S90 a protected initiator cannot queue (no protected → protected forwarding)',
+  () =>
+    call(
+      'collab_request_owner',
+      { target: PROTECTED_OTHER, text: 'protected → protected', confirm: true },
+      as(PROTECTED_REQ)
+    ),
+  /受保护/
+);
+await expectFail(
+  'S90 … its [protected-child] descendant is refused too',
+  () => call('collab_request_owner', { target: PROTECTED_REQ, text: 'child → protected', confirm: true }, as('ses_child')),
+  /受保护/
+);
+await expectFail(
+  'S90 an empty text is refused',
+  () => call('collab_request_owner', { target: S90_OWNER, text: '   ', confirm: true }, as(S90_FROM)),
+  /text 不能为空/
+);
+for (const [title, badPath, matcher] of [
+  ['.. traversal', '../docs/issues/x.md', /不能包含 \.\./],
+  ['absolute path', '/etc/passwd', /绝对路径/],
+  ['outside docs/issues', 'docs/x.md', /docs\/issues/]
+]) {
+  await expectFail(
+    `S90 a ${title} issuePath is refused (syntax only, no fs read)`,
+    () => call('collab_request_owner', { target: S90_OWNER, text: 'x', issuePath: badPath, confirm: true }, as(S90_FROM)),
+    matcher
+  );
+}
+await expectFail(
+  'S90 an unknown target alias is refused',
+  () => call('collab_request_owner', { target: 'no-such-alias', text: 'x', confirm: true }, as(S90_FROM)),
+  /未知目标/
+);
+await expectFail(
+  'S90 revoke without an id is refused',
+  () => call('collab_request_owner', { revoke: true, confirm: true }, as(S90_FROM)),
+  /需要 id/
+);
+await expectFail(
+  'S90 revoking an unknown item is refused',
+  () => call('collab_request_owner', { id: 'q_ghost_0000', revoke: true, confirm: true }, as(S90_FROM)),
+  /没有队列项/
+);
+expect(
+  'S90 no refused call wrote a queue item',
+  qFiles(S90_OWNER).join(',') === `${s90Main}.json` && qFiles(PROTECTED_OTHER).length === 0,
+  `${qFiles(S90_OWNER).length} / ${qFiles(PROTECTED_OTHER).length}`
+);
+
+// --- S90d: a full queue (50) refuses the newcomer and keeps every item.
+for (let index = 0; index < 50; index += 1) {
+  await call(
+    'collab_request_owner',
+    { target: PROTECTED_OTHER, text: `批量请求 ${index}`, confirm: true },
+    as(S90_BULK)
+  );
+}
+const s90Full = await call(
+  'collab_request_owner',
+  { target: PROTECTED_OTHER, text: '第 51 条', confirm: true },
+  as(S90_BULK)
+).catch(error => `拒绝写入：${error.message}`);
+out('S90 queue full', String(s90Full).split('\n')[0]);
+expect(
+  'S90 a 51st item is refused with a readable full-queue answer',
+  String(s90Full).includes('队列已满') && String(s90Full).includes('50'),
+  String(s90Full).slice(0, 120)
+);
+expect(
+  'S90 … and the existing 50 items are kept (nothing evicted)',
+  qFiles(PROTECTED_OTHER).length === 50,
+  String(qFiles(PROTECTED_OTHER).length)
+);
+// The cap counts **unread** items only: once the owner has read the backlog the
+// queue must accept a new request again. Counting every stored file would block
+// the channel forever — the permanent block this queue exists to remove.
+const s90Fill = qFiles(PROTECTED_OTHER);
+for (const name of s90Fill) {
+  const path = join(qdir(PROTECTED_OTHER), name);
+  const item = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(path, JSON.stringify({ ...item, seenAt: Date.now() }, null, 2));
+}
+const s90AfterSeen = await call(
+  'collab_request_owner',
+  { target: PROTECTED_OTHER, text: '读完之后再提交一条', confirm: true },
+  as(S90_BULK)
+);
+out('S90 after the owner read everything', String(s90AfterSeen).split('\n')[0]);
+expect(
+  'S90 a queue of already-read items no longer refuses a new one (the cap counts unread)',
+  new Set(qids(s90AfterSeen)).size === 1 && qFiles(PROTECTED_OTHER).length === 51,
+  `${new Set(qids(s90AfterSeen)).size} id(s) / ${qFiles(PROTECTED_OTHER).length} file(s)`
+);
+// Seen items are retained (for `collab_list`) but swept once they age out.
+const s90Old = s90Fill[0];
+const s90OldPath = join(qdir(PROTECTED_OTHER), s90Old);
+const s90OldItem = JSON.parse(readFileSync(s90OldPath, 'utf8'));
+writeFileSync(s90OldPath, JSON.stringify({ ...s90OldItem, seenAt: Date.now() - 8 * 24 * 60 * 60 * 1000 }, null, 2));
+const s90Swept = await call(
+  'collab_request_owner',
+  { target: PROTECTED_OTHER, text: '回收已读旧项', confirm: true },
+  as(S90_BULK)
+);
+out('S90 retention sweep', `old ${s90Old} exists=${existsSync(s90OldPath)} / files=${qFiles(PROTECTED_OTHER).length}`);
+expect(
+  'S90 a seen item older than 7 days is swept on the next write (bounded, nothing unread lost)',
+  !existsSync(s90OldPath) &&
+    qFiles(PROTECTED_OTHER).length === 51 &&
+    new Set(qids(s90Swept)).size === 1 &&
+    qRead(PROTECTED_OTHER, [...new Set(qids(s90Swept))][0]).seenAt === null,
+  `${qFiles(PROTECTED_OTHER).length} file(s), old exists=${existsSync(s90OldPath)}`
+);
+rmSync(qdir(PROTECTED_OTHER), { recursive: true, force: true });
+
+// ================== S91 (read-only hints + requester view + revoke)
+// --- S91a: the protected child sees exactly one read-only line, then never again.
+const s91Ctx1 = contextEvent(S90_OWNER);
+await hooks.context(s91Ctx1);
+const s91Text1 = textOf(s91Ctx1);
+out('S91 first injection (protected child)', s91Text1);
+const s91Lines1 = qLines(s91Text1);
+expect(
+  'S91 the protected child sees its owner-queue line',
+  s91Lines1.length === 1 && s91Lines1[0].includes('请复核'),
+  s91Lines1[0] ?? '(无)'
+);
+expect(
+  'S91 … rendered as `- [owner-queue] <from> @ <HH:MM>：<summary>（<issuePath>）`',
+  /^- \[owner-queue\] ses_s90f…from @ \d{2}:\d{2}：.*（docs\/issues\/fix-collab-self\.md）$/.test(s91Lines1[0]),
+  s91Lines1[0] ?? '(无)'
+);
+expect(
+  'S91 … with no instruction and no reply request in the block',
+  !/collab_(send|reply|accept|handoff|request_owner)/.test(s91Text1) &&
+    !s91Text1.includes('confirm:true') &&
+    !/请回|回复|务必|必须/.test(s91Text1),
+  s91Text1.replace(/\n/g, ' | ')
+);
+expect(
+  'S91 the item is stamped seenAt only after the block was pushed',
+  Number(qRead(S90_OWNER, s90Main).seenAt) > 0,
+  String(qRead(S90_OWNER, s90Main).seenAt)
+);
+const s91Ctx2 = contextEvent(S90_OWNER);
+await hooks.context(s91Ctx2);
+expect(
+  'S91 the same item is never shown twice',
+  qLines(textOf(s91Ctx2)).length === 0,
+  qLines(textOf(s91Ctx2)).join(' | ') || '(无)'
+);
+
+// --- S91b: at most 3 lines per injection, oldest first.
+const s91Ids = [];
+for (const index of [1, 2, 3, 4, 5]) {
+  const text = await call(
+    'collab_request_owner',
+    { target: S90_OWNER, text: `追加请求 ${index}`, confirm: true },
+    as(S90_FROM)
+  );
+  s91Ids.push(qids(text)[0]);
+}
+const s91Ctx3 = contextEvent(S90_OWNER);
+await hooks.context(s91Ctx3);
+const s91Ctx4 = contextEvent(S90_OWNER);
+await hooks.context(s91Ctx4);
+out('S91 batching', `${qLines(textOf(s91Ctx3)).length} + ${qLines(textOf(s91Ctx4)).length} lines`);
+expect(
+  'S91 at most 3 unread items are shown per injection',
+  qLines(textOf(s91Ctx3)).length === 3,
+  String(qLines(textOf(s91Ctx3)).length)
+);
+expect(
+  'S91 … oldest first, even for items written in the same millisecond (FIFO)',
+  qLines(textOf(s91Ctx3))
+    .map(line => /追加请求 (\d)/.exec(line)?.[1] ?? '?')
+    .join(',') === '1,2,3',
+  qLines(textOf(s91Ctx3))
+    .map(line => /追加请求 (\d)/.exec(line)?.[1] ?? '?')
+    .join(',')
+);
+expect(
+  'S91 … the rest arrive on the next request',
+  qLines(textOf(s91Ctx4)).length === 2,
+  String(qLines(textOf(s91Ctx4)).length)
+);
+expect(
+  'S91 … and every one of the 5 is stamped exactly once',
+  s91Ids.every(id => Number(qRead(S90_OWNER, id).seenAt) > 0),
+  JSON.stringify(s91Ids.map(id => Number(qRead(S90_OWNER, id).seenAt) > 0))
+);
+
+// --- S91c: a failed `system.push` does not stamp (the F1 rule, D1 path).
+const s91Retry = await call(
+  'collab_request_owner',
+  { target: S90_OWNER, text: '注入失败也要留到下一轮', confirm: true },
+  as(S90_FROM)
+);
+const s91RetryId = qids(s91Retry)[0];
+const s91Frozen = { sessionID: S90_OWNER, agent: 'build', messages: [], system: Object.freeze([]) };
+const s91ErrorBefore = console.error;
+console.error = () => {};
+await hooks.context(s91Frozen);
+console.error = s91ErrorBefore;
+expect(
+  'S91 a throwing injection does not stamp the queue item',
+  qRead(S90_OWNER, s91RetryId).seenAt === null,
+  String(qRead(S90_OWNER, s91RetryId).seenAt)
+);
+const s91RetryCtx = contextEvent(S90_OWNER);
+await hooks.context(s91RetryCtx);
+expect(
+  'S91 … the line is pending on the next request and is stamped then',
+  qLines(textOf(s91RetryCtx)).some(line => line.includes('注入失败也要留到下一轮')) &&
+    Number(qRead(S90_OWNER, s91RetryId).seenAt) > 0,
+  qLines(textOf(s91RetryCtx)).join(' | ') || '(无)'
+);
+
+// --- S91d: a `[protected]` line (not a child) gets its hint too.
+const s91ProtectedQueue = await call(
+  'collab_request_owner',
+  { target: PROTECTED_REQ, text: '受保护线：请确认 owner 队列这一条', confirm: true },
+  as(S90_FROM)
+);
+const s91ProtectedId = qids(s91ProtectedQueue)[0];
+const s91ProtectedCtx = contextEvent(PROTECTED_REQ);
+await hooks.context(s91ProtectedCtx);
+const s91ProtectedLines = qLines(textOf(s91ProtectedCtx));
+out('S91 protected line hint', s91ProtectedLines.join(' | ') || '(无)');
+expect(
+  'S91 a [protected] session gets the same read-only line',
+  s91ProtectedLines.length === 1 && s91ProtectedLines[0].includes('受保护线：请确认'),
+  s91ProtectedLines[0] ?? '(无)'
+);
+
+// --- S91e: the requester sees its own pending items in `collab_list`.
+const s91Pending = 7 + 1; // 1 main + 5 batch + 1 retry (S90_OWNER) + 1 protected
+const s91List = await call('collab_list', {}, as(S90_FROM));
+out(
+  'S91 collab_list owner queue',
+  s91List.split('\n').filter(line => line.includes('受保护会话') || line.startsWith('- q_')).join(' | ') || '(无)'
+);
+expect(
+  'S91 collab_list shows the pending count and the queue ids',
+  s91List.includes(`我提交给受保护会话的请求：${s91Pending} 条待处理`) &&
+    s91List.includes(s90Main) &&
+    s91Ids.some(id => s91List.includes(id)),
+  s91List.split('\n').find(line => line.includes('我提交给受保护会话')) ?? '(缺失)'
+);
+expect(
+  'S91 … at most 3 detail lines plus the remainder count',
+  s91List.split('\n').filter(line => /^- q_[0-9a-z]+_/.test(line)).length === 3 && s91List.includes('…还有 5 条'),
+  s91List.split('\n').filter(line => line.startsWith('- q_')).length + ' line(s)'
+);
+const s91OtherList = await call('collab_list', {}, as('ses_bbb'));
+expect(
+  'S91 another session sees none of them',
+  !s91OtherList.includes('我提交给受保护会话的请求'),
+  s91OtherList.split('\n').find(line => line.includes('受保护会话')) ?? '(无)'
+);
+
+// --- S91f: revoke — preview writes nothing, only the initiator may revoke.
+const s91RevokePreview = await call(
+  'collab_request_owner',
+  { target: S90_OWNER, id: s90Main, revoke: true, confirm: false },
+  as(S90_FROM)
+);
+expect(
+  'S91 revoke preview deletes nothing',
+  s91RevokePreview.includes('未撤回') && qFiles(S90_OWNER).includes(`${s90Main}.json`),
+  s91RevokePreview.split('\n')[0]
+);
+await expectFail(
+  'S91 a bystander cannot revoke someone else’s item',
+  () => call('collab_request_owner', { target: S90_OWNER, id: s90Main, revoke: true, confirm: true }, as('ses_bbb')),
+  /只有发起方/
+);
+const s91Revoked = await call(
+  'collab_request_owner',
+  { target: S90_OWNER, id: s90Main, revoke: true, confirm: true },
+  as(S90_FROM)
+);
+out('S91 revoke', s91Revoked);
+expect(
+  'S91 the initiator revokes its own item (file gone, list shrinks)',
+  !qFiles(S90_OWNER).includes(`${s90Main}.json`) &&
+    (await call('collab_list', {}, as(S90_FROM))).includes(`我提交给受保护会话的请求：${s91Pending - 1} 条待处理`),
+  s91Revoked.split('\n')[0]
+);
+// Revoke by id alone (no target) — the `collab_list` shape the docs advertise.
+const s91Revoked2 = await call(
+  'collab_request_owner',
+  { id: s91ProtectedId, revoke: true, confirm: true },
+  as(S90_FROM)
+);
+expect(
+  'S91 revoke works with the id alone (no target)',
+  !qFiles(PROTECTED_REQ).includes(`${s91ProtectedId}.json`) && s91Revoked2.startsWith('已撤回'),
+  s91Revoked2.split('\n')[0]
+);
+
+// ================== S92 (`expected:"research"` + same-workspace broadcast)
+// --- S92a: `research` is a legal value of the enum.
+const s92Enum = tool('collab_broadcast').input.properties.expected.enum.join(',');
+expect(
+  'S92 `expected` accepts implement / review / research',
+  s92Enum === 'implement,review,research' && tool('collab_handoff').input.properties.expected.enum.join(',') === s92Enum,
+  s92Enum
+);
+
+// --- S92b: a same-workspace broadcast is refused on realpath, zero writes.
+const s92Link = join(dir, 'ws-a-alias');
+symlinkSync(WS_A, s92Link);
+const s92BidsBefore = bcBids().length;
+const s92Self = await expectFail(
+  'S92 a same-workspace broadcast is refused (realpath, symlink spelled)',
+  () =>
+    call(
+      'collab_broadcast',
+      { workspace: s92Link, issuePath: ISSUE_A, expected: 'research', confirm: true },
+      { sessionID: 'ses_req', agent: 'build' }
+    ),
+  /同仓|collab_handoff/
+);
+expect(
+  'S92 … the refusal points at collab_handoff and wrote nothing',
+  s92Self.includes('collab_handoff') && bcBids().length === s92BidsBefore,
+  `${bcBids().length - s92BidsBefore} record(s)`
+);
+const s92PreviewBidsBefore = bcBids().length;
+await call(
+  'collab_broadcast',
+  { workspace: s92Link, issuePath: ISSUE_A, expected: 'research', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+).catch(() => {});
+expect(
+  'S92 … preview is refused the same way (no record either)',
+  bcBids().length === s92PreviewBidsBefore,
+  `${bcBids().length - s92PreviewBidsBefore} record(s)`
+);
+
+// --- S92c: the broadcast head + takeover text carry the research wording.
+const s92Preview = await call(
+  'collab_broadcast',
+  { workspace: WS_B, issuePath: ISSUE_B, expected: 'research', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+);
+out('S92 research preview', s92Preview.split('\n').slice(0, 3).join(' | '));
+expect(
+  'S92 `expected:"research"` is echoed with the read-only meaning',
+  s92Preview.includes('期望: research') && s92Preview.includes('只读排查'),
+  s92Preview.split('\n')[1]
+);
+const s92Bid = 'b_aaaa0000000000b1';
+writeFileSync(
+  bcFile(s92Bid),
+  JSON.stringify({
+    bid: s92Bid,
+    scope: 'peer',
+    workspace: WS_A,
+    issuePath: ISSUE_A,
+    title: 'S92 只读排查交接',
+    expected: 'research',
+    affectedFiles: ['src/core/owner-queue.ts'],
+    candidates: [{ sid: 'ses_a_target', score: 90, why: ['agent:build'] }],
+    state: 'open',
+    asked: { sid: 'ses_a_target', at: Date.now(), leaseMs: 300_000 },
+    attempts: 0,
+    seenBy: [],
+    askSeen: [],
+    reminded: [],
+    replies: [],
+    from: { sid: 'ses_req' },
+    receiptMode: 'push',
+    delivery: { cid: 'c_s92', to: 'ses_a_target', admittedAt: Date.now() },
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  })
+);
+const s92AskCtx = contextEvent('ses_a_target');
+await hooks.context(s92AskCtx);
+const s92AskLine = textOf(s92AskCtx)
+  .split('\n')
+  .find(line => line.includes(s92Bid) && line.includes('接管请求'));
+out('S92 research takeover', s92AskLine ?? '(无)');
+expect(
+  'S92 the takeover line asks for a read-only investigation (no code changes)',
+  Boolean(s92AskLine) && s92AskLine.includes('只读排查') && s92AskLine.includes('不要改代码'),
+  s92AskLine ?? '(缺失)'
+);
+
+// --- S92d: `explore` + `implement` is called out; `research` is never a mismatch.
+const WS_S = ws('s');
+const ISSUE_S = issueFile(
+  WS_S,
+  'feat-research-mismatch.md',
+  '# 11-18-collab-owner-queue owner queue 复核（只读）\n\n`src/core/owner-queue.ts`\n'
+);
+sessions.ses_s_ro = {
+  id: 'ses_s_ro',
+  agent: 'explore',
+  title: '11-18-collab-owner-queue owner queue 复核',
+  time: { updated: now - 60_000, busy: 0 },
+  location: { directory: WS_S }
+};
+contexts.set('ses_s_ro', [toolMessage('src/core/owner-queue.ts')]);
+const s92Mismatch = await call(
+  'collab_broadcast',
+  { workspace: WS_S, issuePath: ISSUE_S, expected: 'implement', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+);
+out('S92 capability mismatch', s92Mismatch.split('\n').slice(-2).join(' | '));
+expect(
+  'S92 explore + implement carries the capability-mismatch note',
+  s92Mismatch.includes('只读 agent') && s92Mismatch.includes('expected:"research"') && s92Mismatch.includes('collab_promote'),
+  s92Mismatch.split('\n').at(-1)
+);
+const s92NoMismatch = await call(
+  'collab_broadcast',
+  { workspace: WS_S, issuePath: ISSUE_S, expected: 'research', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+);
+expect(
+  'S92 … and research against the same explore session is legal (no note)',
+  !s92NoMismatch.includes('只读 agent'),
+  s92NoMismatch.split('\n').at(-1)
+);
+const s92HandoffMismatch = await call(
+  'collab_handoff',
+  { target: 'ses_bbb', text: '复核 packages/machine/src/cfg/impl.ts', expected: 'implement', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+);
+expect(
+  'S92 collab_handoff to a read-only target says the same thing (preview)',
+  s92HandoffMismatch.includes('只读 agent') && s92HandoffMismatch.includes('ses_bbb'),
+  s92HandoffMismatch.split('\n').find(line => line.includes('只读 agent')) ?? '(缺失)'
+);
+const s92BuildHandoff = await call(
+  'collab_handoff',
+  { target: 'ses_aaa', text: '复核 packages/machine/src/cfg/impl.ts', expected: 'implement', confirm: false },
+  { sessionID: 'ses_req', agent: 'build' }
+);
+expect(
+  'S92 … while a build target with implement is not flagged',
+  !s92BuildHandoff.includes('只读 agent'),
+  s92BuildHandoff.split('\n')[0]
+);
+
+// Cleanup: leave no queue files behind for the closing summary.
+rmSync(ownerQueueDir, { recursive: true, force: true });
+rmSync(bcFile(s92Bid), { force: true });
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

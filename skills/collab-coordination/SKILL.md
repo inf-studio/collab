@@ -17,6 +17,8 @@ description: 同一工作区多个会话并行、且会争抢共享资源（测�
 
 - 只读操作、批处理无关文件、单测互不干扰。
 - 交接「谁来做」用 `collab_handoff` / `collab_broadcast`（那是 handoff），**不是**这里的锁。
+  `collab_broadcast` 只用于跨工作区（同仓会被拒绝，改用 `collab_handoff`）；要给受保护会话送请求用
+  `collab_request_owner`（只排队、不投递，0.4.0），同样**不是**这里的锁。
 
 ## 规程（五步，0.2.0 起机器判定）
 

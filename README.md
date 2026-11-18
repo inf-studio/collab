@@ -1,7 +1,7 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：十五个原生 `collab_*` 工具（含缺陷上报、闭环后追加与资源租约）+ thread/inbox 协议 +
-一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
+多会话（含跨工作区）协作插件：十六个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约与受保护目标请求队列）+
+thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
 `bid` 算法与单文件版逐字一致，差别只有「可选类型 + 模块边界 + 默认只读」三点。
@@ -25,6 +25,7 @@
 | `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread                              | 发消息            |
 | `collab_broadcast` | 跨工作区交接：读提案 → 打分 → 写全局交接文件 → 只问 top-1 / 必要时拉新会话 | 发消息 + 可建会话 |
 | `collab_accept`    | 原子领取广播（`<bid>.lock`，只有一个 winner）                              | 写交接记录        |
+| `collab_request_owner` | 给**受保护**会话（`[protected]`/`[protected-child]`）排队一条请求：只写队列文件，目标下次运行时看到 ≤3 行只读提示（**不投递**、不建 bid/thread、`revoke` 仅发起方） | 写本地队列        |
 | `collab_grant`     | 给**一个会话**追加 5 条 `collab_*` 会话级权限（`revoke` 还原快照）         | **写会话权限**    |
 | `collab_promote`   | 把一个会话的 agent 切到 `build`/`plan`（`revert` 还原）                    | **写会话 agent**  |
 | `collab_report`    | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方，不改协作状态）              | 写本地证据        |
@@ -35,6 +36,8 @@
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
+受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
+（每条一次，不含指令、不产生投递）。
 
 > **权限提示（务必读）**：本插件可以**读取该实例上的会话元信息与消息上下文**（用于打分与
 > 判断回执）、可以**向其它会话投递消息**（即以该实例的身份说话）、在 `allowWrite:true`
@@ -124,6 +127,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
+| `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |
 | `0.2.x` | `2.3.x`  | `>=22.18` | 新增资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）；其余与 0.1.x 等价 |
 | `0.1.x` | `2.3.x`  | `>=22.18` | 与单文件版行为等价；`@opencode/plugin` 由宿主提供 |
@@ -142,7 +146,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 vp build -c vite.gui.config.ts → dist/gui-experimental.cjs
 pnpm install
 pnpm typecheck
-pnpm test          # build + 526 项 harness + 12 项只读默认 + 18 项侧栏快照
+pnpm test          # build + 582 项 harness + 12 项只读默认 + 18 项侧栏快照
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -159,13 +163,19 @@ pnpm test          # build + 526 项 harness + 12 项只读默认 + 18 项侧栏
   TTL 夹取、`reason` 清洗、`[protected]` 可持有但不可抢占、加锁不投递任何消息。
   0.3.1 追加 S89：闭环后追加的三条硬化——注入抛错不标记（下一轮仍提示）、无效路径条目不标记且
   `collab_list` 只汇总一次、`./docs/issues/x.md` 归一化后可渲染（`..`/绝对/软链仍拒）。
+  0.4.0 追加 S90–S92：受保护目标请求队列（`confirm:false` 零写入、0 次 prompt、
+  `[protected]` 与 `[protected-child]` 各 1 行只读提示且只提示一次、注入抛错不 stamp、
+  每次 ≤3 行、队列满 50 条未读拒新（已读项不占名额，7 天后回收）、仅发起方可 `revoke`、
+  `collab_list` 的待处理 / 已读视图）、
+  `expected:"research"`（枚举 + 接管文案 + `explore`+`implement` 的能力不匹配提示）、
+  同工作区 `collab_broadcast` 按 `realpath` 拒绝且零写入。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
   过期租约在视图里是 `free` 且不落盘、无人的空记录不出现、已决交接不算「未闭环」、
   `{ workspace }` 过滤、RPC 契约为 portable、`dist/gui-experimental.cjs` 只 require 宿主提供的模块。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/侧栏快照）、`src/tools`（十五个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/侧栏快照）、`src/tools`（十六个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill，只在 `setup` 里跑）、
 `src/index.ts`（`Plugin.define` 等价装配 + `ctx.rpc.register`）、

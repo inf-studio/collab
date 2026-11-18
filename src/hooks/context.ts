@@ -2,6 +2,7 @@ import { allBroadcasts } from '../core/claim.ts';
 import { isAckText } from '../core/ack.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
+import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
 import { normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
@@ -214,12 +215,14 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
    * throws — or a host that never surfaces the block — leaves the hint pending
    * for the next request instead of losing it for good.
    */
-  async function injectChain(event: ContextHookEvent): Promise<{ text?: string; keys: string[] }> {
+  async function injectChain(event: ContextHookEvent): Promise<{ text?: string; keys: string[]; ownerQueue: string[] }> {
     const injected = await chain.injectionFor(event?.sessionID, deps.ctx?.location?.directory);
-    if (!injected.lines.length) return { keys: [] };
+    const ownerQueue = injected.ownerQueue ?? [];
+    if (!injected.lines.length) return { keys: [], ownerQueue: [] };
     return {
       text: [`[collab-handoff] 交接链路提醒（每条只出现一次）:`, ...injected.lines].join('\n'),
-      keys: injected.keys
+      keys: injected.keys,
+      ownerQueue
     };
   }
 
@@ -244,6 +247,9 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         // this request. `push` threw → we never get here → the hint stays
         // pending and the next request retries it (natural retry, no counter).
         if (chainPart.keys.length) await markFollowUpSeen(deps.ctx, event.sessionID, chainPart.keys);
+        // D1 (0.4.0): the same rule for the owner-queue lines — `seenAt` is
+        // written after the push, so a failed injection shows them again.
+        if (chainPart.ownerQueue.length) markQueueSeen(event.sessionID, chainPart.ownerQueue);
       }
     } catch (error) {
       // Never break a model request because of collab bookkeeping.

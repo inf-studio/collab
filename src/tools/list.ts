@@ -10,16 +10,36 @@ import {
 } from '../core/followup.ts';
 import { createLineage } from '../core/lineage.ts';
 import { fmtTtl, locksFor } from '../core/locks.ts';
+import { mineFor } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
 import type { CollabContext, ToolDefinition } from '../types.ts';
 import { clamp, fmtTime, sessionState, shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
+import { queueItemLine } from './owner-queue.ts';
 
 /** R8②: the report entry point is a *fixed* last line of every listing. */
 function hintLine(): string {
   return `缺陷上报：collab_report { confirm:true }（证据目录 ${reportDir()}）`;
+}
+
+/**
+ * D1 (0.4.0): the requester's own view of what it queued for protected
+ * sessions — a count, its 3 oldest items, the read/unread split and the revoke
+ * command. Read-only: a listing never writes / stamps / deletes a queue item.
+ */
+function ownerQueueLines(sessionID: string | undefined): string[] {
+  const mine = mineFor(String(sessionID ?? ''));
+  if (!mine.length) return [];
+  const read = mine.filter(item => Boolean(item.seenAt)).length;
+  return [
+    `我提交给受保护会话的请求：${mine.length} 条待处理` +
+      `${read ? `（${read} 条已被目标读到；只读提示，未投递，不是送达通道）` : '（只读提示，未投递；不是送达通道）'}:`,
+    ...mine.slice(0, 3).map(queueItemLine),
+    ...(mine.length > 3 ? [`…还有 ${mine.length - 3} 条`] : []),
+    '撤回: collab_request_owner { id:"<q_…>", revoke:true, confirm:true }'
+  ];
 }
 
 /**
@@ -54,7 +74,9 @@ export function listTool(kit: ToolKit): ToolDefinition {
       'List OpenCode sessions usable as collab targets: id, agent, state (busy/idle), title, parent, alias and ' +
       '`loc=<项目名>`. Read-only. `directory` limits the list to one workspace (default: every session the host ' +
       'returns). Sessions in the `protect` list are marked [protected]; their descendants are marked ' +
-      '[protected-child] — neither can be sent to. Sessions spawned by a broadcast carry [bootstrap].',
+      '[protected-child] — neither can be sent to (queue a request for them with collab_request_owner). ' +
+      'Sessions spawned by a broadcast carry [bootstrap]. The listing also shows the queue items this session ' +
+      'submitted to protected sessions (read-only; revoke with collab_request_owner).',
     input: jsonInput({
       properties: {
         limit: {
@@ -80,11 +102,13 @@ export function listTool(kit: ToolKit): ToolDefinition {
       // F2 (0.3.1): computed before the empty-workspace early return — a session
       // whose only hand-off has an unusable append still has to learn about it.
       const invalidFollowUpNotes = await invalidFollowUpNotice(ctx, me, records);
+      const queueLines = ownerQueueLines(me);
       const sessions = (await chain.listSessions({ directory, limit })).slice(0, limit);
       if (!sessions.length) {
         return {
           content: [
             `${directory ? `工作区 ${directory} 下` : ''}没有可列出的会话。`,
+            ...(queueLines.length ? [...queueLines, ''] : []),
             ...invalidFollowUpNotes,
             hintLine()
           ].join('\n')
@@ -222,6 +246,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
               ]
             : []),
           ...(stale.length ? ['挂起提醒（每类每单只出现一次）:', ...formatStale(stale)] : []),
+          ...(queueLines.length ? [...queueLines, ''] : []),
           ...invalidFollowUpNotes,
           ...(notice ? [reportNoticeLine(pendingCount)] : []),
           hintLine()

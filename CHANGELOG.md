@@ -3,6 +3,68 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-18
+
+> 缺陷 `d_6180f4ab4fb4368a`（muke-pos-app CLI 线，0.3.1）的三条成立项：D1 受保护目标没有合规
+> 送达路径、D3 `expected` 缺只读排查、D4 同工作区还能调 `collab_broadcast`。D2（预览落盘）经核实
+> **不成立**，未改。`BUILTIN_PROTECT` 与血缘判定**完全不变**：新增的队列是 **pull**，不是投递。
+
+### Added
+
+- **D1 `collab_request_owner`（受保护目标请求队列）**：唯一合规的「给 owner 送请求」路径。
+  只允许「非受保护 → `[protected]` / `[protected-child]`」（受保护会话不能投、也不做 protected →
+  protected 转发；普通目标一律拒绝并提示改用 `collab_handoff`）。写入
+  `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`
+  （`{id,target,from,at,summary,issuePath,bid,revokedAt,seenAt}`，`q_<base36ts>_<rand4>`，
+  `tmp + rename`，每目标上限 **50 条未读**、满则拒新而不驱逐；已读项不计入上限并在 7 天后回收）。`summary` 去控制字符 / 合并空白 / ≤500；
+  `issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。
+  `confirm:false` 只预览、**零写入**；写入本身 **0 条 prompt**、不建 bid/thread、不改任何协作状态。
+  `COLLAB_OWNER_QUEUE_DIR` 可覆盖目录（harness 用）。
+- **D1 只读提示**：受保护会话（含 `[protected-child]`）在自己的 `context` 注入里看到未读队列项，
+  每次 **≤3 行**、按 `at` 升序、每条只提示一次：
+  `- [owner-queue] <from 短 id> @ <HH:MM>：<summary 截断 120>（<issuePath 或 ->）`。
+  不含任何指令、不要求回复、不产生投递。`seenAt` 在 `event.system.push` **成功之后**才写
+  （沿用 0.3.1 的 F1 规则：注入抛错 → 不标记，下一轮重试）。
+- **D1 发起方视图**：`collab_list` 追加「我提交给受保护会话的请求：N 条待处理」+ ≤3 行明细
+  （`queueId` → 目标短 id / 时间 / 摘要）+ `…还有 N 条`；`collab_request_owner { id, revoke:true, confirm:true }`
+  可撤回（**仅发起方**，可省略 `target`；`confirm:false` 只预览）。
+- **D3 `expected:"research"`**：`normalizeExpected` 接受三值（`implement` / `review` / `research`）；
+  接管文案（`takeoverBody` / `handoffActions`，push 与 pull 两版）在 `research` 时改成
+  「只读排查，不要改代码；结论写进最后一条回复并用回执发出」；匹配分对 `research` 不再偏向
+  `explore`（`build` 同样合法）。
+
+### Changed
+
+- **D4 同工作区 `collab_broadcast` 拒绝**：`realpath(workspace) === realpath(ctx.location.directory)` 时
+  抛可读错误并提示 `collab_handoff { text }`（预览同样拒绝），**不写任何记录**。比较用 `realpath`，
+  所以 `./ws` / `ws/` / 指向同目录的软链都算同一个工作区。
+- **D3 能力不匹配可见**：承接方是只读 agent（`explore` / `plan`）而 `expected:"implement"` 时，
+  `collab_broadcast`（预览 / spawn / 结果）与 `collab_handoff`（预览 / 结果）都会追加
+  「承接方为只读 agent，implement 期望可能无法完成；建议 `expected:"research"` 或先 `collab_promote`」。
+
+### Fixed
+
+- 受保护会话的注入面补上了「外界真的有话要说」的合法形态：此前只有「闭环后追加」一种 pull，
+  合规的跨线排查请求只能退化为「广播拉起 explore → BLOCKED」。现在多了一类只读队列提示，
+  其它交接类注入仍然不可见。
+
+### 回归
+
+- `test/handoff-harness.mjs` 新增 **S90–S92（56 项）**：预览零写入、写入 0 prompt / 0 bid / 0 thread、
+  summary 清洗与 500 上限、`issuePath` 语法校验、方向拒绝（受保护发起方 / 非保护目标 / 目标为
+  `[protected-child]` 合法）、队列满 50 条未读拒新（已读项不占名额、7 天后回收）、`[protected]` 与 `[protected-child]` 各 1 行只读提示且只提示
+  一次、注入抛错不 stamp（下一轮重试）、每次 ≤3 行、仅发起方可 revoke（含 id-only 形式）、
+  `collab_list` 待处理视图、`research` 枚举/文案/接管行、`explore`+`implement` 的能力不匹配提示、
+  同工作区广播按 `realpath`（含软链写法）拒绝且零写入。S30 同步改为断言 D4 的拒绝。
+  `pnpm test` 现在 = **582 + 12 + 18**。
+
+### 文档
+
+- `docs/collab.md`：新增 §11.12「受保护目标请求队列」；§11.2 工具表（十六个）+ `expected` 三值 +
+  能力不匹配；§11.4 / §11.4.1 的白名单说明；§12.3 的 research 文案与同仓拒绝；§12.5 新增限制 15/16。
+- `skills/collab`：新增 §一点六（受保护目标只能排队）、工具表行、排障两行；`skills/collab-coordination`
+  补一句「广播只用于跨工作区 / 受保护目标走队列」。README：工具表、版本兼容表、回归说明、`pnpm test` 数字。
+
 ## [0.3.1] - 2026-11-18
 
 > 复核补丁：std-ui 承接方对 0.2.0 的只读复核（H1–H5 5/5 落实）提出 3 条 followUps 硬化。

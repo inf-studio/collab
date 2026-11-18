@@ -270,7 +270,11 @@ export function pathsFromMessages(messages: unknown, now = Date.now()): string[]
 
 const AGENT_MATCH: Record<string, RegExp> = {
   implement: /build|implement|trellis-implement/,
-  review: /explore|plan|build|review|check|trellis-check/
+  review: /explore|plan|build|review|check|trellis-check/,
+  // `research` is "read something and answer": any session that can read is a
+  // legal counterpart — including `build` (a build session reading a proposal
+  // is exactly the common case, design §5).
+  research: /explore|plan|build|review|research|check|trellis-/
 };
 
 /**

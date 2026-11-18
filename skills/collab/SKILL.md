@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十五个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -28,6 +28,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, confirm` | **同工作区**交接：选人 + 开 thread | 发消息 |
 | `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
+| `collab_request_owner` | `target?, text?, issuePath?, id?, revoke?, confirm` | **受保护目标请求队列**：只写队列文件（非保护 → 受保护），0 投递 | 写本地队列（旁路） |
 | `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
@@ -35,6 +36,8 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
+`expected` 三值：`implement`（默认，改代码）/ `review`（确认）/ **`research`**（只读排查 + 结论，对 `build` 也合法）。
+承接方是只读 agent 却传 `implement` 时，结果会提示能力不匹配（建议 `research` 或先 `promote`）。
 `confirm:true` 才真正执行；否则只预览。
 
 > 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）的规程在同工作区 skill
@@ -65,6 +68,29 @@ state/receipt、不重开 bid**——想补内容就写文件，不要试图再 
 提示是「注入成功后才标记」（注入失败下一轮重试）；路径校验失败的条目不标记，`collab_list` 会汇总
 「N 条 followUp 因路径无效未渲染」（只提示一次），把提案修回 `docs/issues/` 后提示会自动恢复。
 
+## 一点六、受保护目标只能「排队」，不能投递（0.4.0）
+
+`[protected]` / `[protected-child]`（schema 线等）**投递一律拒绝**，这是单向硬边界，不要试图绕过
+（换 target / 中转 / 让第三方转发 都不行）。要给 owner 送请求，只有一条路：
+
+```text
+collab_request_owner {
+  target: "ses_…(受保护)",           # 或 collab.json 里的别名
+  text: "<一句话：要 owner 看什么>",   # → summary，去控制字符、≤500
+  issuePath: "docs/issues/fix-x.md",  # 可选，只做语法校验（相对、docs/issues/*.md）
+  confirm: true
+}
+→ 写 ~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json
+→ 0 条 prompt、不建 bid/thread、不改任何协作状态（不是送达）
+→ 对方下次运行看到 ≤3 行：- [owner-queue] <from> @ <HH:MM>：<summary>（<path>）
+```
+
+- **不是投递**：没有 ack、没有「已送达」，对方会话不运行就永远不消费；也不会自动变成任务。
+- 每目标上限 **50 条未读**（满则拒新；已读项不占名额，7 天后回收）；只有发起方能
+  `collab_request_owner { id, revoke:true, confirm:true }` 撤回。
+- 发起方自己在 `collab_list` 里能看到「我提交给受保护会话的请求：N 条待处理」。
+- 受保护会话不能给另一个受保护会话投队列项（不做 protected → protected 转发）；普通目标请用 `collab_handoff`。
+
 ## 二、同工作区（local）
 
 ```text
@@ -82,7 +108,7 @@ state/receipt、不重开 bid**——想补内容就写文件，不要试图再 
 1) collab_broadcast {
      workspace: "/data/project/muke-interface",
      issuePath: "docs/issues/fix-x.md",
-     expected: "implement" | "review",
+     expected: "implement" | "review" | "research",
      confirm: true
    }
    → bid；无候选 ≥80 时会 spawn 一个 explore（只读）并投交接请求
@@ -125,6 +151,8 @@ state/receipt、不重开 bid**——想补内容就写文件，不要试图再 
 | 改了插件不生效 | 本地文件会热重载；**npm 包插件版本不会热重载到已运行会话** | 重启 OpenCode 或新开会话；用 `collab_report` 预览里的「版本」确认运行时版本 |
 | `collab_wait` 立刻报「没有 thread」 | thread 存储按 `location` 隔离 | 跨仓改用消息回执，不用 thread |
 | 交接卡在 `claimed` | 对端只分析、没调用工具 | 租约到期自动提取结论；或 `collab_promote` 后重发 |
+| `collab_broadcast` 报「就是当前工作区」 | 同仓广播（0.4.0 起拒绝） | 改用 `collab_handoff { text, confirm:true }` |
+| 受保护线收不到我的请求 | 投递对它一律拒绝（设计如此） | `collab_request_owner` 排队；对方下次运行时才会看到 |
 | 广播重复拉起会话 | 重复广播且 `bid` 不同（提案内容/mtime 变了） | 改提案后重新广播是预期行为；不要为同一内容反复广播 |
 
 ## 六、硬约束
@@ -134,6 +162,8 @@ state/receipt、不重开 bid**——想补内容就写文件，不要试图再 
 3. 不删除任何会话；自建会话也留给 owner 处置。
 4. 跨工作区只写 `docs/issues/**`；对端 git 一律只读。
 5. 一次交接只发一条；超时只提醒一次，不重投。
+6. `collab_broadcast` 只用于**跨工作区**：`workspace` 解析后等于当前工作区会直接报错（改用 `collab_handoff`）。
+7. 给受保护会话只用 `collab_request_owner` 排队，不要尝试任何形式的投递/中转。
 
 ## 六点五、遇到异常怎么办（缺陷上报 + 挂起监控）
 

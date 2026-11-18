@@ -115,7 +115,13 @@ export const BCAST_DONE_STATES = ['done', 'blocked', 'expired'];
 export const BCAST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** Per-write prune budget, so one write never sweeps a huge directory. */
 export const BCAST_PRUNE_LIMIT = 20;
-export const EXPECTED = ['implement', 'review'];
+/**
+ * What the receiving side is expected to do. `research` (0.4.0) is the
+ * read-only counterpart of `implement`: investigate and answer, never edit —
+ * legal for a `build` session too, and the only honest expectation when the
+ * counterpart is a read-only agent (`explore` / `plan`).
+ */
+export const EXPECTED = ['implement', 'review', 'research'];
 /** Spawned sessions get this title so `collab_list` can mark them `[bootstrap]`. */
 export const BOOTSTRAP_TITLE_RE = /^(impl|review):/;
 
@@ -173,6 +179,46 @@ export const REPORT_MESSAGE_LIMIT = 2048;
 export const REPORT_STACK_FRAMES = 5;
 /** Index of `{ signature: { lastAt, triagedAt } }`, written `tmp + rename`. */
 export const REPORT_INDEX_FILE = 'index.json';
+
+// ------------------------------------------------- owner queue (0.4.0, D1)
+
+/**
+ * A *pull* channel into a protected session, and nothing more:
+ * `collab_request_owner` writes one JSON file per request into
+ * `<dir>/<targetSid>/<queueId>.json`; the protected session sees 1–3 read-only
+ * lines in its own `context` injection and decides for itself whether to read.
+ *
+ * Deliberately **not** a delivery path: no `session.prompt`, no inbox entry, no
+ * hand-off record, no bid, no thread. `BUILTIN_PROTECT` stays a one-way hard
+ * boundary — this queue is on the other side of it (the owner pulls).
+ * `COLLAB_OWNER_QUEUE_DIR` overrides the directory (harness / sandbox runs).
+ */
+export const OWNER_QUEUE_DIR =
+  process.env.COLLAB_OWNER_QUEUE_DIR || join(homedir(), '.config', 'opencode', 'collab-owner-queue');
+/**
+ * Hard cap per protected target on **unread** items: a full queue refuses a new
+ * item (never evicts). Seen items do not count — they are no longer part of the
+ * owner's backlog, and counting them would keep a queue "full" long after the
+ * owner read everything, i.e. the permanent block this queue exists to remove.
+ */
+export const OWNER_QUEUE_LIMIT = 50;
+/**
+ * A **seen** item is kept this long (so `collab_list` still shows what the owner
+ * already read) and is then swept on the next write.
+ */
+export const OWNER_QUEUE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** Per-write sweep budget, so one write never scans-then-deletes a huge queue. */
+export const OWNER_QUEUE_PRUNE_LIMIT = 20;
+/** One summary, control characters stripped, whitespace collapsed. */
+export const OWNER_QUEUE_SUMMARY_LIMIT = 500;
+/** At most this many unread items are shown per injection (oldest first). */
+export const OWNER_QUEUE_HINT_LIMIT = 3;
+/** Summary is cut here in the injected line (one line, no body). */
+export const OWNER_QUEUE_HINT_CHARS = 120;
+/** Summary shown per line in `collab_list` (the requester's own view). */
+export const OWNER_QUEUE_LIST_CHARS = 60;
+/** `issuePath` of a queue item is a *syntax* check only (≤ this). */
+export const OWNER_QUEUE_ISSUE_LIMIT = 200;
 
 // -------------------------------------------------------- hang-up monitoring
 
@@ -239,5 +285,5 @@ export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
 export const MAX_RESENDS = 1;
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.3.1';
+export const PLUGIN_VERSION = '0.4.0';
 

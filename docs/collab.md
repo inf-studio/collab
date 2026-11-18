@@ -257,19 +257,20 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十五个工具（协作链路五个 + 权限/上报/追加/租约各一组）
+### 11.2 十六个工具（协作链路六个 + 权限/上报/追加/租约各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
-| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）；本会话持有 / 排队中的资源租约（§11.10）。`directory` 只看一个工作区（省略 = 旧行为） |
+| `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）；本会话持有 / 排队中的资源租约（§11.10）；本会话**提交给受保护会话的队列项**（条数 + ≤3 行明细 + `queueId`，见 §11.12）。`directory` 只看一个工作区（省略 = 旧行为） |
 | `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**） |
 | `collab_reply` | `{ threadID, text, bid?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定） |
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
-| `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
+| `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
+| `collab_request_owner` | `{ target?, text?, issuePath?, bid?, id?, revoke?, confirm }` | **受保护目标请求队列（0.4.0）**：只允许「非受保护 → `[protected]`/`[protected-child]`」，写入 `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`（`tmp+rename`，每目标上限 **50 条未读**，满则拒新；已读项不计、7 天后回收）。**不投递、不唤醒、不建 bid/thread、不改任何协作状态**（0 条 prompt）；`confirm:false` 零写入。`text` → `summary`（去控制字符、≤500）；`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。目标会话只在自己 `context` 注入里看到 ≤3 行只读提示；`revoke:true` + `id` 只允许发起方撤回自己的一条。见 §11.12 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
 | `collab_report` | `{ note?, bid?, threadID?, confirm }` | **缺陷上报（旁路，不改任何协作状态）**：把现场写到 `~/.config/opencode/collab-reports/<signature>/<ts>.{json,md}`（版本/工具/分类/错误名与消息≤2KB/stackTop 5 帧/短 id/工作区/记录快照；**不含正文、文件内容、token**），配了 `report.to` 时额外 `collab_send`（`note`+`queue`）通知维护方；同签名 1 小时最多 1 条。任何非参数校验类错误都会在错误文案末尾提示这个入口（见 §11.8） |
 | `collab_lock` | `{ resource, mode?, ttlMs?, reason?, wait?, confirm }` | **资源租约（0.2.0）**：同工作区共享资源（测试窗口 / 同一文件 / 全量构建）的可判定互斥。`exclusive`（默认）与任何模式互斥，`shared` 之间可共存；`ttlMs` 默认 15 分钟、夹在 `[10s, 2h]`；过期在下次访问时回收（写 `history: expire`），无需人工清理。同一会话重复申请**幂等**（返回既有租约，不重复计数、不延长 TTL）。被占时：不传 `wait` → 返回「持有者 + 剩余 TTL」；`wait:true` → 按 FIFO 入队并返回排位。**不投递消息、不打断会话、不提供抢占**。`confirm:true` 才写，否则只预览。见 §11.10 |
@@ -278,6 +279,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
+`expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
+若承接方是只读 agent（`explore` / `plan`）而 `expected:"implement"`，结果里会明确提示**能力不匹配**并建议 `expected:"research"` 或先 `collab_promote`。
 `mode`：**默认 `queue`**（等目标下一轮，不打断）；`steer` 必须显式传，且只读 agent 会被强制降级（见 §11.7）。
 
 > `collab_list` 的 `[self]` 与 `[protected]` 是**独立**标记：普通会话只显示 `[self]`，只有当前会话本身
@@ -341,6 +344,10 @@ opencode plugin add @inf-studio/collab@0.1.0
 闭环后的追加结论走**拉取**而不是推送：承接方 `collab_followup` + 写提案文件，发起方下次注入看到一行只读提示
 （§11.9.3）；插件**不再**为闭环后的单开放任何 push 窗口（0.1.6 起，评审裁定：常设注入面与 protect 目的冲突）。
 
+**要给受保护线送东西**：投递仍然一律拒绝（`BUILTIN_PROTECT` 是单向硬边界，不变）。
+唯一合规路径是 §11.12 的**受保护目标请求队列**（`collab_request_owner`）：写一条队列项，对方下次运行在自己的
+`context` 注入里看到一行只读提示——这是 **pull**，不是投递，不存在绕过护栏的通道。
+
 受保护线需要结果时还有 §11.4.1 的 pull 模式：它发起的广播不要求推送回执，结果由它自己只读提取
 （`claimed` 走 5 分钟租约到期，`acked` 走静默 2h，见 §12.5 #12），
 或用 `trellis channel` / `--mirror` 留痕，避免让对端空等 `collab_wait`。
@@ -360,8 +367,9 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 三处文案（接管请求注入 / 叫醒 prompt / `collab_broadcast` 结果）与 `collab_accept` 的输出保持同一套说法。
 
-> ⚠ 提醒可达性：`injectionFor` 的**外部**提醒对受保护会话是白名单化的——只有一条只读的
-> 「提案有闭环后追加」提示（§11.9.3；条件：它是该单发起方且存在未提示的 `followUps`），
+> ⚠ 提醒可达性：`injectionFor` 的**外部**提醒对受保护会话是白名单化的——只有两类只读提示：
+> ① 「提案有闭环后追加」（§11.9.3；条件：它是该单发起方且存在未提示的 `followUps`）；
+> ② 「`[owner-queue] …`」未读队列项（§11.12；≤3 行/次，每条一次）。
 > 接管请求 / 群组广播 / 未闭环提醒都不会注入。
 > 另一路 `injectStale` 是**本地**「与本人相关的挂起记录」提醒（`involves(record, sessionID)`：
 > 本人发起、本人领取或正在问询本人），不含任何他人正文、不含任何指令，因此对受保护会话照常生效。
@@ -761,6 +769,38 @@ src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({})
 **关闭**：Settings → Extensions → Plugins 里关掉本插件的 GUI 开关；`opencode.json(c)` 里移除插件
 则连 server 一起停。
 
+### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
+
+D1（缺陷 `d_6180f4ab4fb4368a`）：受保护线（schema 线等 `BUILTIN_PROTECT`）此前**没有任何合规送达路径**——
+投递被拦、`collab_send` 被拦、广播拉起的 `explore` 只能 `BLOCKED`。0.4.0 给出的是 **pull**，不是投递：
+
+```text
+collab_request_owner { target:"ses_…(受保护)", text:"<一句话请求>", issuePath:"docs/issues/x.md", confirm:true }
+  → 写入 ~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json
+  → 0 条 prompt、不唤醒、不建 bid/thread、不改任何协作状态
+  → 对方下次运行（自己的 context 注入）看到：
+     - [owner-queue] ses_ab12…cd34 @ 14:06：<summary ≤120>（docs/issues/x.md 或 -）
+```
+
+| 面 | 规则 |
+| --- | --- |
+| 方向 | 只允许「**非受保护 → 受保护**」；发起方本身受保护（含 `[protected-child]`）一律拒绝——不做 protected → protected 转发。目标不是受保护 → 拒绝并提示改用 `collab_handoff` |
+| 存储 | `<dir>/<targetSid>/<queueId>.json`，`q_<base36ts>_<rand4>`，`tmp + rename`；每目标上限 **50 条未读**，满则**拒新**（不驱逐已有项）；已读项**不计入上限**（否则 owner 读完后队列会永久占满），并在 `seenAt` 超过 7 天后于下次写入时回收（每次最多 20 条）。`COLLAB_OWNER_QUEUE_DIR` 可覆盖目录（harness/沙箱） |
+| 字段 | `{ id, target, from, at, summary, issuePath, bid, revokedAt, seenAt }`；`summary` 去控制字符 / 合并空白 / ≤500，`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径；目标工作区可能不在本机视图内，故不读 fs） |
+| 提示 | 受保护会话每次 `context` 注入最多 **3 行**，按 `at` 升序，**只读**：不含指令、不要求回复、不产生投递；每条只提示一次（`seenAt`） |
+| 标记时机 | 与 §11.9.3 的 F1 一致：`context` hook 在 `event.system.push` **成功之后**才写 `seenAt`；注入抛错 → 不标记，下一轮重试 |
+| 发起方视图 | `collab_list` 追加「我提交给受保护会话的请求：N 条待处理（其中 M 条已被目标读到）」+ ≤3 行明细（`queueId` → 目标短 id / 时间 / 摘要，已读项标 `· 已读`）+ `…还有 N 条`；只读 |
+| 撤回 | `collab_request_owner { id:"q_…", revoke:true, confirm:true }`（可省略 `target`）；**只有发起方**能删自己写的项；`confirm:false` 只预览 |
+| 边界 | 队列**不是**投递通道、不构成送达确认；不会自动变成任务；`BUILTIN_PROTECT` 名单与血缘判定完全不变 |
+
+受保护会话的注入面是**显式白名单**：`[protected]` / `[protected-child]` 只会看到两类行——
+① §11.9.3 的「提案有闭环后追加」（≤1 行）；② 本节 `[owner-queue]` 行（≤3 行）。
+接管请求 / 群组广播 / 未闭环提醒对其仍然**不可见**（§11.4.1 的 ⚠ 一节）。
+
+**去重口径**：不做 `(target, text)` 去重——同一内容可以多次提交（补材料/催办场景），由发起方自行撤回。
+**内容归属**：提示行里的 `<summary>` 由**发起方**撰写并已去控制字符（含 C1 与 bidi）；受保护会话看到的只是
+「有一条待读请求」的提示，**不是指令**，读不读、做不做由它自己决定。
+
 ## 12. 协作链路（handoff chain：local + peer）
 
 把「发现需求 → 找到人 → 交出去 → 收结果」串成一条链路；协议细节与打分口径的唯一真源是
@@ -815,6 +855,7 @@ src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({})
 ```text
 ① 写提案       <对端仓>/docs/issues/fix-x.md（状态/范围/关联/问题/根因/方案/验证/涉及文件）
 ② 广播         collab_broadcast { workspace, issuePath, expected:"implement", confirm:true }
+               （cross-workspace 专用：workspace 解析后等于当前工作区 → 拒绝并提示改用 collab_handoff，0 模型调用、0 写入）
                → 打印 bid + 候选匹配分 why（文件交集 45 / 标题词 25 / 同任务线 15 / agent 10 / 最近活跃 5，busy>30min −10）
                → 有 ≥80 候选：只写文件（0 调用）；只有被问询的 top-1 会收到「接管请求」注入（busy > 30min 额外补 1 条 queue 叫醒）
                → 没有 ≥80 候选：claim(kind=spawn) 拉一个会话（默认 explore；build 需 agentConfirm:true）
@@ -828,6 +869,8 @@ src/gui.tsx (./gui-experimental) ── ctx.client.rpc(CollabState).snapshot({})
                5 分钟不答 → 自动顺延下一候选（attempts+1）。接管请求 / 叫醒 prompt / 广播结果都写成三步：
                `① collab_accept …` / `② collab_send {target:"ses_…", text:"[handoff] DONE|BLOCKED <bid> …", confirm:true}` /
                `③ 只分析、不调用工具 = 未完成`——命令里的 `bid` 与发起方 sid 都是完整可复制的字面量。
+               expected 为 `research` 时 ③ 换成「只读排查：不要改代码；结论写进最后一条回复」；
+               承接方是只读 agent（explore/plan）而 expected=implement 时，预览与结果都会提示能力不匹配。
                受保护会话及其子会话不能领取；只读 agent 不能 `steer`。
 ④ 实施         对端自主实施（peer：只改 docs/issues/**，git 只读，不 push）
 ⑤ 回执         collab_send { target:"<发起方 sid>", text:"[handoff] DONE <bid> <sha/摘要>", confirm:true }
@@ -924,5 +967,13 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
     `collab_inbox` 读到；它**不**代表对方已经开始处理。目标 busy 时不会重发、也不会被判「未送达」
     （`unacked` 只在使用满 1 次重发预算 + 2h 窗口之后才出现）。受保护发起方永远是 `seen=n/a`
     （`ackUnavailable`）。
-    注意：受保护发起方没有 `context` 注入，收口发生在其下一次 `collab_broadcast` / `collab_handoff` 刷新时。
+    注意：受保护发起方**没有交接类** `context` 注入（只有 §11.9.3 的追加提示与 §11.12 的队列提示），
+    收口发生在其下一次 `collab_broadcast` / `collab_handoff` 刷新时。
+
+15. **同工作区不允许 `collab_broadcast`（0.4.0，D4）**：`realpath(workspace) === realpath(ctx.location.directory)`
+    时直接抛错并提示 `collab_handoff { text }`，**不写任何记录**（预览也同样拒绝）。比较用 `realpath`，
+    所以 `./ws` / `ws/` / 指向同目录的软链都算同一个工作区。跨工作区要广播，工作区路径必须解析到别处。
+16. **受保护目标只有队列，没有送达（0.4.0，D1）**：`collab_request_owner` 写的是**队列文件**，
+    目标会话只在自己的 `context` 注入里看到 ≤3 行只读提示（每条一次）。它不是投递：没有 prompt、没有 ack、
+    没有任何「已送达」语义，也不会自动变成任务；对端不看（会话不运行）就永远不消费。`BUILTIN_PROTECT` 与血缘判定不变。
 
