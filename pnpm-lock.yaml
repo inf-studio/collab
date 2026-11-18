@@ -7,11 +7,10 @@ settings:
 importers:
 
   .:
-    dependencies:
+    devDependencies:
       '@opencode/plugin':
         specifier: ^2.3.0
         version: 2.3.0(@opentelemetry/semantic-conventions@1.45.0)(@voidzero-dev/vite-plus-core@1.6.0(@types/node@26.6.6)(typescript@6.0.3))(redis@6.3.1(@opentelemetry/api@1.9.0))
-    devDependencies:
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6
