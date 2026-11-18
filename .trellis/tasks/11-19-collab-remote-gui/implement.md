@@ -32,10 +32,10 @@ pnpm build && pnpm typecheck && pnpm test && node scripts/check-skill.mjs
 
 ## 5. 发布后（主会话，mac 实机）
 
-- [ ] mac：配 `@inf-studio` scope registry（用 `gh auth token`）→ `opencode plugin add @inf-studio/collab@0.5.3`
-- [ ] 重启 Desktop → 标题栏出现 `collab`（GUI 已加载）
-- [ ] 打开远端会话 → 计数条/面板出数，数值与远端 `collab_locks` 一致
-- [ ] 失败时按 PRD R5 的排查顺序记录：pill 有无 → toast 有无 `server=` → 面板是否有横幅
+- [x] mac：配 `@inf-studio` scope registry（用 `gh auth token`）→ `opencode plugin add @inf-studio/collab@0.5.3`
+- [x] 重启 Desktop → 标题栏出现 `collab`（GUI 已加载）
+- [x] 打开远端会话 → 计数条/面板出数，数值与远端 `collab_locks` 一致
+- [x] 失败时按 PRD R5 的排查顺序记录：pill 有无 → toast 有无 `server=` → 面板是否有横幅
 
 ## 6. 回滚
 

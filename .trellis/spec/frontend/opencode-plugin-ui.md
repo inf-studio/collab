@@ -65,6 +65,36 @@ GUI 插件只有这些槽位，**没有左侧应用侧栏**：
   永不启动（0.5.1 的真实 bug，0.5.2 修）。必须监听 `visibilitychange` 显式 start/stop。
 - 页面隐藏时停轮询；面板打开与否不影响这一次轮询（侧栏/计数条也要数）。
 
+## 2.5 Desktop 只有「本机 sidecar」会加载 GUI 插件
+
+桌面端源码（`out/main/host-*.js`，app.asar）确认：
+
+- 插件宿主跟踪的 endpoint 是 `D = () => pe()`（本机 sidecar）；`subscribe-credentials` 用它，
+  `ie(serverId)` 只有 `id === 'sidecar'` 分支返回本机凭据，远端分支存在但宿主不调用。
+- 宿主对该 endpoint `plugin.list()` → 过滤 `features.gui && state === 'active' && source.type !== 'builtin'`
+  → `plugin.gui({id})` 取 bundle。
+
+**推论（务必记住）**：插件装在远端服务器时，Desktop 只会列出它的名字，**GUI 永远不会加载**
+（设置页没有 GUI 开关是正常表现，不是配置错）。
+
+**所以 Desktop 的 GUI 插件必须装在本机**：
+
+```bash
+npm config set @inf-studio:registry https://npm.pkg.github.com   # 私有 scope
+opencode plugin add <pkg>@<version>                              # 装到 ~/.cache/opencode/npm
+```
+
+装完要**重启 Desktop**（宿主在 app 启动时列插件）；验证：`/api/plugin` 里该插件 `features.gui === true`。
+
+**数据必须按会话所属服务器取**（否则装在本机后只看到本机数据）：
+
+```ts
+const session = ctx.sessions.current();
+const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已由 app 鉴权
+```
+
+轮询 key 要含 `server.id`；回包前后比对 key，丢弃迟到的旧服务器结果。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许
