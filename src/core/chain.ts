@@ -7,7 +7,7 @@ import {
   SCORE_CANDIDATE_LIMIT,
   VERDICT_MESSAGE_LIMIT
 } from '../constants.ts';
-import { envelope, newCorrelationID } from '../ids.ts';
+import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import { errText } from '../log.ts';
 import type {
   BroadcastRecord,
@@ -44,6 +44,17 @@ import {
 
 export type { RankResult };
 
+/**
+ * R7 (0.1.4): what the inbound message declared about itself. `explicit:false`
+ * means neither the envelope nor its metadata carried a `kind` — the legacy
+ * shape, where the `[handoff]` body is the only signal and may close a record.
+ * An explicit `note` / `request` never does; only `reply` does besides.
+ */
+export interface ReceiptSource {
+  kind?: string;
+  explicit?: boolean;
+}
+
 export interface HandoffChain extends Grants {
   sessionInfo(sessionID: string | undefined): Promise<SessionInfoLike | undefined>;
   listSessions(input?: { directory?: string; limit?: number }): Promise<SessionInfoLike[]>;
@@ -54,7 +65,12 @@ export interface HandoffChain extends Grants {
     expected: string;
     exclude?: string[];
   }): Promise<RankResult>;
-  applyReceipt(text: unknown, from: unknown, now?: number): Promise<BroadcastRecord | undefined>;
+  applyReceipt(
+    text: unknown,
+    from: unknown,
+    now?: number,
+    source?: ReceiptSource
+  ): Promise<BroadcastRecord | undefined>;
   applyDecline(text: unknown, from: unknown, now?: number): Promise<BroadcastRecord | undefined>;
   notifyRequester(
     record: BroadcastRecord,
@@ -187,8 +203,20 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * undefined when the text carries no `[handoff] DONE|BLOCKED` line / matches
    * nothing / comes from a non-claimant. Async because the refresh in front of
    * it may auto-close a lapsed spawn hand-off (R2).
+   *
+   * R7 (0.1.4): the body is only allowed to speak for a message that did **not**
+   * declare a kind. An explicit `note` / `request` is a deliberate non-receipt
+   * (it may well be quoting the takeover template) and never moves a record;
+   * `reply` does, and silence (legacy CLI text / ≤0.1.1 receipts) does too.
    */
-  async function applyReceipt(text: unknown, from: unknown, now = Date.now()): Promise<BroadcastRecord | undefined> {
+  async function applyReceipt(
+    text: unknown,
+    from: unknown,
+    now = Date.now(),
+    source?: ReceiptSource
+  ): Promise<BroadcastRecord | undefined> {
+    const sourceKind = source?.kind ? normalizeKind(source.kind) : undefined;
+    if (source?.explicit && sourceKind !== 'reply') return undefined;
     const receipt = parseReceiptLine(text);
     if (!receipt) return undefined;
     const open: BroadcastRecord[] = [];
@@ -211,7 +239,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       receipt: {
         from: String(from ?? record.claim?.by ?? '') || undefined,
         at: now,
-        note: receipt.note
+        note: receipt.note,
+        // R8: how the receipt was recognised — an explicit `kind:"reply"` or a
+        // legacy body (`[handoff] …`) — so triage can tell them apart.
+        source: sourceKind === 'reply' ? 'kind' : 'body'
       },
       replies: [...(record.replies ?? []), { from: String(from ?? 'unknown'), at: now, text: receipt.note }].slice(
         -MAX_STORED

@@ -25,7 +25,9 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       'with confirm:false it only previews. Targets in the `protect` list — and any descendant of one — are ' +
       "refused; a kind=reply must target the thread's counterpart and only a participant may send it. " +
       'One exception: a bounded receipt — kind=reply naming (in `bid` or the body) a hand-off that the ' +
-      'protected target itself broadcast and the caller claimed — is queued through as the hand-off receipt.',
+      'protected target itself broadcast and the caller claimed — is queued through as the hand-off receipt. ' +
+      'A legacy receipt written the ≤0.1.1 way (no `kind`, body `[handoff] DONE|BLOCKED <bid> …`) is ' +
+      'recognised by that body and delivered as kind=reply.',
     input: jsonInput({
       properties: {
         target: { type: 'string', description: 'Session id (`ses_…`) or an alias from collab.json.' },
@@ -68,7 +70,12 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       const me = context?.sessionID;
       // R2: the *requested* kind decides whether a bounded receipt applies; the
       // reply-without-threadID downgrade below must not hide it.
+      // R7 (0.1.4): `legacy` means the caller declared **no** kind at all — the
+      // ≤0.1.1 receipt shape. An explicit `kind:"request"` never uses the
+      // widening, so a normal request cannot borrow it.
+      const rawKind = String(input?.kind ?? '').trim();
       const requestedKind = normalizeKind(input?.kind);
+      const legacyKind = rawKind === '';
       let kind = requestedKind;
       let threadID = normalizeThreadID(input?.threadID);
 
@@ -122,7 +129,8 @@ export function sendTool(kit: ToolKit): ToolDefinition {
                 target: resolved.sessionID,
                 sender: me,
                 bid: input?.bid,
-                text: input?.text
+                text: input?.text,
+                mode: input?.mode
               })
             )
           });
@@ -136,17 +144,27 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       // broadcast — as a `kind:reply` from that bid's own claimant, with a fresh
       // thread. Without this the downgrade above would turn the receipt into a
       // `request`, which must stay fail-closed.
+      // R1 (0.1.4): a legacy receipt was *written* as a plain `request`
+      // (`[handoff] DONE <bid> …`, no `kind` at all) and is recognised here for
+      // the same three conditions — the delivered message is still `kind:reply`.
       const boundedReply = canReplyToProtected({
         kind: requestedKind,
         target: target.sessionID,
         sender: me,
         bid: input?.bid,
-        text: input?.text
+        text: input?.text,
+        mode: input?.mode,
+        legacyAllowed: legacyKind
       });
       if (boundedReply) {
         kind = 'reply';
         const downgraded = notes.findIndex(note => note.includes('kind=reply 缺少 threadID'));
         if (downgraded >= 0) notes.splice(downgraded, 1);
+        if (requestedKind !== 'reply') {
+          notes.push(
+            '遗留回执（0.1.1 及更早的命令不带 kind）已按 kind=reply 放行：正文含 [handoff]、bid 归属该记录、发送者是该单领取人。'
+          );
+        }
       }
       return dispatch({
         context,

@@ -3,6 +3,54 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.4] - 2026-11-18
+
+> **升级顺序（重要）**：显式 `kind:"note"/"request"` 不再由正文触发状态迁移（R7）。混版本期间，
+> 仍跑 ≤0.1.3 的会话其行为与 0.1.4 不一致；请把所有常驻会话升级到 0.1.4（见 docs/collab.md 「版本与重载」）。
+
+### Fixed
+
+- **遗留单永远无法闭环**（缺陷上报 `d_e4e7ae824f551d0f`，实例 `b_bdae848832cd51fb`）：
+  0.1.1 及更早的接管请求让承接方发
+  `collab_send {target:"<requester>", text:"[handoff] DONE <bid> <摘要>"}`，**不带 `kind`** →
+  默认 `request` → 0.1.2 的限界 reply 白名单不适用 → 被 protect 护栏拒绝，3 次回执全部失败，
+  而受保护发起方也不会自动触发 pull 提取。现在：
+  - **R1 兼容遗留回执**：`canReplyToProtected` 在 `requestedKind = "request"` 时也放行，但必须
+    ① 正文含 `[handoff]` 且其中的 `bid`（或入参 `bid`）等于该记录、② `record.from.sid === target`、
+    ③ `record.claim.by === sender`、④ 记录未 `done`/`blocked`/`expired`；放行后仍按 `kind=reply`
+    投递并强制 `queue`。`note`、显式 `kind:"request"`、`mode:"steer"` 一律 fail-closed。
+  - **R2 可操作报错**：被 protect 拒绝、且命中「三条件 + 正文含 `[handoff] <bid>`」时，错误文案追加
+    `提示：这是遗留回执，请加 kind:"reply" 重发（或让对端升级到 0.1.4+）：` 与可直接复制的
+    `collab_send {… kind:"reply" …}` 命令。
+- **正文嗅探误判面（R5–R7，安全评审核对后补）**：接管请求本身就含
+  `[handoff] DONE <bid> <摘要>`，而准入与状态迁移共用一条宽松正则，引用模板即可关单。
+  - **R5 行首锚定**：`HANDOFF_RECEIPT_RE` 改为 `/^[ \t]*\[handoff\][ \t]+(DONE|BLOCKED)[ \t]+(\S+)[ \t]*([^\n]*)/im`
+    —— 正文中段的引用/讨论不再算回执，单独成行才算。
+  - **R6 push 侧回声守卫**：`parseReceiptLine` 复用 pull 侧守卫——目标或摘要槽出现 `<bid>` /
+    `<摘要>` / 任意 `<…>` 占位符不算；`DONE` 行自身含否定语（`未完成` / `无法完成` / `不会发` /
+    `还没` / `not done yet` …）或计划语（`完成后我会` …）不算；只判命中行，不跨行拼接。
+    （否定/计划守卫只作用于 `DONE`：`BLOCKED` 行本身就是否定答案，理由里的「无法完成」仍照常关单。）
+  - **R7 显式意图优先**：入站消息**显式**声明 `kind=note|request` 时不再由正文触发状态迁移
+    （`applyReceipt` 现在拿到入站 kind，只有 `kind` 缺省（legacy）或 `reply` 才允许）；
+    `extractInbound` 记录 `kindExplicit`。出站限界白名单同样只在 `kind` 缺省或 `reply` 时生效。
+  - **R8 可追溯**：记录 `receipt.source = "kind" | "body"`，triage 可区分「按 kind 回执」与
+    「按正文识别的遗留回执」。
+
+### Changed
+
+- `collab_send` 描述补充遗留回执说明；放行时额外提示「遗留回执（0.1.1 及更早的命令不带 kind）
+  已按 kind=reply 放行」。
+- 既有回执用例（S28 / S30c / S36）的入站 `kind` 由 `note` 改为 `reply`：按 R7，`note` 不再迁移状态。
+
+### Regression
+
+- `test/handoff-harness.mjs` 新增 S81（13 项：无 kind 回执投递 + `state=done` 闭环 +
+  `receipt.source=body` + note/显式 request/steer/普通 request/仅 bid/旁观者/错目标/错 bid/done 全拒 +
+  报错含 `kind:"reply"` 命令）与 S82（17 项：中段引用、占位符、否定语、计划语不判定；`BLOCKED` 理由
+  含「无法完成」仍关单；显式 note/request 不迁移；缺省 kind 与 `reply` 才迁移；行首正例；
+  `receipt.source` 两种来源）。
+  合计 **405 项 harness + 12 项只读默认**；`build` / `typecheck` / `check:skill` 通过。
+
 ## [0.1.3] - 2026-11-18
 
 ### Added

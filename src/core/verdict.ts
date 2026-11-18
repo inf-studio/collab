@@ -6,9 +6,15 @@ import { truncateRaw } from '../util.ts';
  * Receipt line, written by the session that took the hand-off:
  *   `[handoff] DONE <提案路径|bid|thread> <commit sha 或摘要>`
  *   `[handoff] BLOCKED <…> <原因>`
- * Parsing is deliberately loose — the third field is free text.
+ * The third field is free text.
+ *
+ * R5 (0.1.4): the line must **start a line** (`/^[ \t]*\[handoff\] …/m`). The
+ * takeover prompt itself carries `[handoff] DONE <bid> <摘要>`, and any-position
+ * matching let a quotation / a discussion in the middle of an answer close a
+ * hand-off. A receipt is a line of its own — prose that merely mentions the
+ * format is not one.
  */
-const HANDOFF_RECEIPT_RE = /\[handoff\]\s+(DONE|BLOCKED)\s+(\S+)\s*([^\n]*)/i;
+const HANDOFF_RECEIPT_RE = /^[ \t]*\[handoff\][ \t]+(DONE|BLOCKED)[ \t]+(\S+)[ \t]*([^\n]*)/im;
 /** An explicit refusal from the currently asked candidate. */
 export const HANDOFF_DECLINE_RE = /\bDECLINE\b/i;
 /** A `bid` written inside the DECLINE text, so several asks cannot be confused. */
@@ -20,14 +26,31 @@ export interface Receipt {
   note: string;
 }
 
+/**
+ * Parse a receipt line out of an inbound message (the push path).
+ *
+ * R6 (0.1.4): the push side now reuses the pull-side guards
+ * (`verdictFromTexts`) instead of trusting the raw regex:
+ *   - a `<…>` placeholder in the target or anywhere in the summary slot is the
+ *     template itself (`<bid>` / `<摘要>` / `<原因>`), never a receipt;
+ *   - negation / promise wording on the matched **line** (`未完成` / `不会发` /
+ *     `完成后我会` / `not done yet` …) means "not done" — no `done` judgement
+ *     (a `BLOCKED` line *is* the negative answer already, so its reason may use
+ *     those very words: `BLOCKED … 无法完成` must still close as blocked);
+ *   - only the matched line is judged (never a join with neighbouring lines).
+ */
 export function parseReceiptLine(text: unknown): Receipt | undefined {
   const match = HANDOFF_RECEIPT_RE.exec(String(text ?? ''));
   if (!match) return undefined;
-  return {
-    state: match[1].toUpperCase() === 'DONE' ? 'done' : 'blocked',
-    target: match[2],
-    note: truncateRaw(match[3] ?? '', 500)
-  };
+  const line = match[0];
+  const target = match[2];
+  const summary = match[3] ?? '';
+  const state = match[1].toUpperCase() === 'DONE' ? 'done' : 'blocked';
+  // A placeholder target (`<bid>`) or any `<…>` left in the summary slot is the
+  // template (or an echo of it) — exactly the pull-side H1 rule.
+  if (VERDICT_PLACEHOLDER_RE.test(target) || VERDICT_ECHO_RE.test(summary)) return undefined;
+  if (state === 'done' && (VERDICT_NEGATION_RE.test(line) || VERDICT_PENDING_RE.test(line))) return undefined;
+  return { state, target, note: truncateRaw(summary, 500) };
 }
 
 /**

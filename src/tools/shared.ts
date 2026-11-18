@@ -30,6 +30,12 @@ export function jsonInput(schema: JsonObject): JsonObject {
 
 /** A `bid` written inside a message body (same shape the DECLINE parser uses). */
 const RECEIPT_BID_RE = /\b(b_[0-9a-f]{8,32})\b/;
+/**
+ * The `[handoff]` mark of a receipt line. Every receipt carries it — including
+ * the ones written before `kind:"reply"` existed (`[handoff] DONE <bid> <摘要>`),
+ * which is the only thing that lets 0.1.4 recognise a legacy receipt.
+ */
+const HANDOFF_LINE_RE = /\[handoff\]/i;
 
 /**
  * R2 (bounded reply) — the *only* message that may be delivered into a
@@ -37,38 +43,70 @@ const RECEIPT_BID_RE = /\b(b_[0-9a-f]{8,32})\b/;
  * (fail-closed), yet the hand-off it started still has exactly one legitimate
  * answer: the receipt of the session that claimed that very bid. Three
  * conditions must **all** hold:
- *   ① `kind` is `reply`;
+ *   ① `kind` is `reply` — or, for a *legacy* receipt, `request` (see below);
  *   ② `target` is the `from.sid` of the record the bid names;
  *   ③ `sender` is that record's `claim.by`.
- * A `request` / `note` / `steer`, a foreign bid, a bystander or an unknown
- * sender stays refused, and so does a **decided** record (`done` / `blocked` /
- * `expired`): a closed hand-off has nothing left to report, so the whitelist
- * must not become a generic way into the protected line. Returns the matching
- * record, or `undefined` (= refuse); the record itself is never modified —
- * `applyReceipt` still owns the state.
+ * A `note` / `steer`, a foreign bid, a bystander or an unknown sender stays
+ * refused, and so does a **decided** record (`done` / `blocked` / `expired`): a
+ * closed hand-off has nothing left to report, so the whitelist must not become a
+ * generic way into the protected line. Returns the matching record, or
+ * `undefined` (= refuse); the record itself is never modified — `applyReceipt`
+ * still owns the state.
  *
  * The bid comes from the explicit `bid` argument first, then from the body
  * (`[handoff] DONE b_… …`), so an existing receipt command needs no new field.
+ *
+ * R1 (0.1.4, legacy receipts) — broadcasts created by 0.1.1 and earlier told the
+ * claimant to send `collab_send {target, text:"[handoff] DONE <bid> …"}`, i.e.
+ * **without** `kind`, which defaults to `request` and used to be refused by
+ * this very whitelist: those hand-offs could never be closed. A `request` is
+ * therefore accepted too, but only when it looks unmistakably like a receipt:
+ * its body carries the `[handoff]` line **and** the bid (arg or body) names this
+ * exact record, and the caller did not ask for `steer` (a legacy receipt may
+ * never ask to interrupt). Everything else about `request` stays fail-closed.
+ * R7 (0.1.4): the legacy widening applies only when the caller did **not**
+ * declare a kind (`legacyAllowed`). An explicit `kind:"request"` is a deliberate
+ * request and stays fail-closed — the same rule the inbound side enforces.
  */
 export function canReplyToProtected({
   kind,
   target,
   sender,
   bid,
-  text
+  text,
+  mode,
+  legacyAllowed = false
 }: {
   kind: unknown;
   target: unknown;
   sender: string | undefined;
   bid?: unknown;
   text?: unknown;
+  /** Delivery mode asked for by the caller; a legacy (`request`) receipt must not `steer`. */
+  mode?: unknown;
+  /** True only when the tool input carried **no** `kind` (legacy receipt command). */
+  legacyAllowed?: boolean;
 }): BroadcastRecord | undefined {
-  if (normalizeKind(kind) !== 'reply') return undefined;
+  const requested = normalizeKind(kind);
+  if (requested !== 'reply' && requested !== 'request') return undefined;
+  if (requested === 'request' && !legacyAllowed) return undefined;
   if (!sender) return undefined;
-  const wanted = String(bid ?? '').trim() || RECEIPT_BID_RE.exec(String(text ?? ''))?.[1] || '';
+  const body = String(text ?? '');
+  if (requested === 'request') {
+    // The legacy shape is `[handoff] DONE <bid> …` in the body: without that
+    // line a plain `request` can never borrow this whitelist just because its
+    // text happens to contain a `b_…` string.
+    if (!HANDOFF_LINE_RE.test(body)) return undefined;
+    // A legacy receipt is a closing report, never an interruption.
+    if (String(mode ?? '').trim() === 'steer') return undefined;
+  }
+  const wanted = String(bid ?? '').trim() || RECEIPT_BID_RE.exec(body)?.[1] || '';
   if (!wanted) return undefined;
   const record = readBroadcast(wanted);
   if (!record) return undefined;
+  // The file must really be about the bid that was authorised (a hand-written
+  // record whose `bid` field disagrees with its name is not a receipt).
+  if (String(record.bid ?? '') !== wanted) return undefined;
   // A decided hand-off is not a receipt anymore: fail-closed again.
   if (BCAST_DONE_STATES.includes(String(record.state))) return undefined;
   if (String(record.from?.sid ?? '') !== String(target ?? '')) return undefined;
@@ -237,7 +275,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           target: sessionID,
           sender: context?.sessionID,
           bid: input?.bid,
-          text: input?.text
+          text: input?.text,
+          mode
         })
       ) {
         throw new GuardConflictError(
@@ -247,13 +286,29 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         );
       }
       const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
+      // R2 (0.1.4): a receipt shaped the ≤0.1.1 way (`request` + `[handoff]`
+      // body) is refused for exactly one reparable reason — the missing
+      // `kind:"reply"`. Say so, with the command to copy, instead of only
+      // "target is protected" (that is what kept the legacy hand-offs stuck).
+      const legacyReceipt =
+        normalizeKind(kind) !== 'reply' && HANDOFF_LINE_RE.test(body)
+          ? canReplyToProtected({
+              kind: 'reply',
+              target: sessionID,
+              sender: context?.sessionID,
+              bid: input?.bid,
+              text: input?.text
+            })
+          : undefined;
+      const hint = legacyReceipt
+        ? '提示：这是遗留回执，请加 kind:"reply" 重发（或让对端升级到 0.1.4+）：\n' +
+          `  collab_send {target:"${sessionID}", kind:"reply", text:"[handoff] DONE ${legacyReceipt.bid} <摘要>", confirm:true}`
+        : kind === 'reply'
+          ? '回执同样适用该护栏（fail-closed）；只有「本单发起方 + 该单领取人 + 该 bid」的 kind=reply 回执是白名单例外。'
+          : '';
       throw invalid(
         `拒绝投递：目标 ${sessionID}${alias ? `（别名 ${alias}）` : ''} ${where}在 protect 名单内` +
-          `（${CONFIG_PATH} 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。${
-            kind === 'reply'
-              ? '回执同样适用该护栏（fail-closed）；只有「本单发起方 + 该单领取人 + 该 bid」的 kind=reply 回执是白名单例外。'
-              : ''
-          }`
+          `（${CONFIG_PATH} 的 protect + 内置硬名单，覆盖其任意层级子会话）。未发送任何内容。${hint}`
       );
     }
     if (context?.sessionID && context.sessionID === sessionID) {

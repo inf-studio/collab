@@ -253,7 +253,7 @@ export interface BroadcastRecord {
    *   the requester extracts it once the lease lapses.
    */
   receiptMode?: 'push' | 'pull';
-  receipt?: { from?: string; by?: string; at?: number; note?: string; auto?: boolean };
+  receipt?: { from?: string; by?: string; at?: number; note?: string; auto?: boolean; source?: 'kind' | 'body' };
   createdAt?: number;
   updatedAt?: number;
   [key: string]: any;
@@ -267,6 +267,13 @@ export interface InboxMessage {
   fromSession: string;
   from: string;
   kind: string;
+  /**
+   * R7 (0.1.4): whether the sender actually declared a `kind` (envelope tag or
+   * metadata) or it was merely defaulted to `request`. Only a legacy message
+   * with **no** declared kind may be judged by its `[handoff]` body — an
+   * explicit `note` / `request` is never a receipt, however it is worded.
+   */
+  kindExplicit?: boolean;
   threadID?: string;
   text: string;
   ts: number;

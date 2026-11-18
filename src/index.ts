@@ -98,8 +98,14 @@ const plugin: Plugin.Plugin = {
           // A `[handoff] DONE|BLOCKED <bid> <摘要>` receipt closes the matching
           // hand-off; a `DECLINE` from the asked candidate skips it and asks the
           // next one (§5.3); anything else is only stored in the inbox (§8).
+          // R7: only a message that did not declare a kind (legacy) or declared
+          // `reply` may move a record — an explicit note/request is a deliberate
+          // non-receipt, however it is worded (it may quote the template).
           try {
-            const closed = await chain.applyReceipt(inbound.text, inbound.fromSession);
+            const closed = await chain.applyReceipt(inbound.text, inbound.fromSession, Date.now(), {
+              kind: inbound.kind,
+              explicit: inbound.kindExplicit === true
+            });
             if (closed) log(`handoff ${closed.bid} → ${closed.state}`);
             const declined = await chain.applyDecline(inbound.text, inbound.fromSession);
             if (declined) {

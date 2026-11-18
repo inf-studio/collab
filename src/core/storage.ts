@@ -176,6 +176,10 @@ export function extractInbound(event: InboxEvent | undefined): InboxMessage | un
 
   const id = String(data.inboxID ?? item.id ?? `${sessionID}:${Date.now()}`);
   const body = parsed ? parsed.body : text.replace(COLLAB_PREFIX_RE, '');
+  // R7 (0.1.4): keep the difference between "no kind at all" (legacy CLI text,
+  // may be judged by its `[handoff]` body) and an explicit `note` / `request`
+  // (a deliberate non-receipt, never judged by the body).
+  const declaredKind = String(meta.kind ?? parsed?.kind ?? '').trim();
   return {
     // `id` stays the inbox id (de-dup key for repeated events); `cid` is our own
     // stable per-delivery correlation id, echoed back through message metadata.
@@ -184,7 +188,8 @@ export function extractInbound(event: InboxEvent | undefined): InboxMessage | un
     sessionID: String(sessionID),
     fromSession: String(meta.fromSessionID ?? parsed?.from ?? 'unknown'),
     from: String(meta.from ?? parsed?.from ?? 'unknown'),
-    kind: normalizeKind(meta.kind ?? parsed?.kind),
+    kind: normalizeKind(declaredKind),
+    kindExplicit: Boolean(declaredKind),
     threadID: normalizeThreadID(meta.threadID) ?? normalizeThreadID(parsed?.threadID),
     text: truncateRaw(body, INBOX_TEXT_LIMIT),
     ts: Date.now(),

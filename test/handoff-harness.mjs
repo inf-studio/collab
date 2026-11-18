@@ -138,6 +138,17 @@
  *        signature, rerun idempotent, `--since` filters, `--notify` posts one
  *        note over HTTP and refuses a protected target
  *
+ * S81 (`11-18-collab-legacy-receipt`, R1/R2) covers the receipt shape written by
+ * ≤0.1.1 (no `kind`, body `[handoff] DONE <bid> …`): it is delivered into a
+ * protected requester (three conditions unchanged), the record still closes, and
+ * the refusal of every other shape now carries the `kind:"reply"` hint.
+ *
+ * S82 (same task, R5–R8) covers the fail-closed hardening the review demanded:
+ * the receipt line must start a line (a mid-sentence quotation never counts), the
+ * push parser reuses the pull-side placeholder / negation / promise guards, and
+ * an explicit `kind:note|request` never moves a record (`kind` absent or `reply`
+ * only), with `receipt.source` recording which of the two it was.
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -1239,8 +1250,8 @@ expect(
 push(
   inbound(
     'ses_req',
-    `[collab:${winnerSid}][note:b_${bidB.slice(2)}] [handoff] DONE ${bidB} shipped-in-abc1234`,
-    { from: winnerSid, fromSessionID: winnerSid, cid: 'c_receipt_1', kind: 'note' },
+    `[collab:${winnerSid}][reply:b_${bidB.slice(2)}] [handoff] DONE ${bidB} shipped-in-abc1234`,
+    { from: winnerSid, fromSessionID: winnerSid, cid: 'c_receipt_1', kind: 'reply' },
     'inbox_receipt_1'
   )
 );
@@ -1443,8 +1454,8 @@ expect(
 push(
   inbound(
     'ses_req',
-    `[collab:ses_a_target][note:${localRecord.threadID}] [handoff] DONE ${bidLocal} local-ok`,
-    { from: 'ses_a_target', fromSessionID: 'ses_a_target', cid: 'c_receipt_local', kind: 'note' },
+    `[collab:ses_a_target][reply:${localRecord.threadID}] [handoff] DONE ${bidLocal} local-ok`,
+    { from: 'ses_a_target', fromSessionID: 'ses_a_target', cid: 'c_receipt_local', kind: 'reply' },
     'inbox_receipt_local'
   )
 );
@@ -1625,7 +1636,7 @@ push(
   inbound(
     'ses_req',
     '[handoff] DONE fix-worker-store.md byname',
-    { from: 'ses_f2', fromSessionID: 'ses_f2', cid: 'c_receipt_basename', kind: 'note' },
+    { from: 'ses_f2', fromSessionID: 'ses_f2', cid: 'c_receipt_basename', kind: 'reply' },
     'inbox_receipt_basename'
   )
 );
@@ -1636,7 +1647,7 @@ push(
     'ses_req',
     '[handoff] DONE docs/issues/fix-worker-store.md wrong-person',
     // ses_b1 claimed another workspace's same-named proposal earlier, but not this one.
-    { from: 'ses_b1', fromSessionID: 'ses_b1', cid: 'c_receipt_wrong', kind: 'note' },
+    { from: 'ses_b1', fromSessionID: 'ses_b1', cid: 'c_receipt_wrong', kind: 'reply' },
     'inbox_receipt_wrong'
   )
 );
@@ -1646,7 +1657,7 @@ push(
   inbound(
     'ses_req',
     '[handoff] DONE docs/issues/fix-worker-store.md f2-done',
-    { from: 'ses_f2', fromSessionID: 'ses_f2', cid: 'c_receipt_exact', kind: 'note' },
+    { from: 'ses_f2', fromSessionID: 'ses_f2', cid: 'c_receipt_exact', kind: 'reply' },
     'inbox_receipt_exact'
   )
 );
@@ -3646,11 +3657,11 @@ await expectFail(
   /protect 名单/
 );
 await expectFail(
-  'S69 request to the protected requester stays fail-closed',
+  'S69 a plain request (no [handoff] body) stays fail-closed',
   () =>
     call(
       'collab_send',
-      { target: PROTECTED_REQ, text: `[handoff] DONE ${s69NBid} 当成请求`, confirm: true },
+      { target: PROTECTED_REQ, text: `请再改一下 ${s69NBid} 里提到的地方`, confirm: true },
       { sessionID: s69NSpawn.id, agent: 'build' }
     ),
   /protect 名单/
@@ -4697,6 +4708,329 @@ expect(
     s80Note?.metadata?.collab?.fromSessionID === 'ses_aaa' &&
     !String(s80Note?.metadata?.collab?.fromSessionID ?? '').includes('…'),
   JSON.stringify(s80Note?.metadata?.collab ?? null)
+);
+
+// ================== S81 (R1/R2: the ≤0.1.1 receipt shape, no `kind`)
+// `11-18-collab-legacy-receipt`: broadcasts created by 0.1.1 and earlier told
+// the claimant to send `collab_send {target, text:"[handoff] DONE <bid> …"}`
+// with **no** `kind` — which defaults to `request` and was refused by the very
+// protect guard, so those hand-offs could never be closed (real report
+// `d_e4e7ae824f551d0f`, bid `b_bdae848832cd51fb`). R1 accepts that exact shape
+// (same three conditions, plus a `[handoff]` body naming this bid); R2 makes the
+// remaining refusals say "add kind:\"reply\"" instead of only "protected".
+const S81_CLAIMANT = 'ses_s81';
+const S81_OK = 'b_aaaa0000000000d1';
+const S81_DONE_BID = 'b_aaaa0000000000d2';
+const S81_NEG = 'b_aaaa0000000000d3';
+sessions[S81_CLAIMANT] = {
+  id: S81_CLAIMANT,
+  agent: 'build',
+  title: '11-18 legacy receipt claimant',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+const s81Claim = { by: S81_CLAIMANT, at: nowMs, kind: 'accept', leaseMs: 300_000 };
+writeRaw(S81_OK, { state: 'claimed', receiptMode: 'push', claim: s81Claim, from: { sid: PROTECTED_REQ } });
+writeRaw(S81_NEG, { state: 'claimed', receiptMode: 'push', claim: s81Claim, from: { sid: PROTECTED_REQ } });
+writeRaw(S81_DONE_BID, {
+  state: 'done',
+  receiptMode: 'push',
+  claim: s81Claim,
+  from: { sid: PROTECTED_REQ },
+  receipt: { from: S81_CLAIMANT, at: nowMs, note: '已闭环' }
+});
+
+// --- S81a (R1): the legacy receipt is delivered, still as kind=reply.
+const s81Legacy = await call(
+  'collab_send',
+  { target: PROTECTED_REQ, text: `[handoff] DONE ${S81_OK} 已按提案改好`, confirm: true },
+  { sessionID: S81_CLAIMANT, agent: 'build' }
+);
+out('S81 legacy receipt (no kind) to a protected requester', s81Legacy);
+expect(
+  'S81 a no-kind `[handoff] DONE <bid>` receipt is delivered to the protected requester',
+  s81Legacy.includes('已投递') && s81Legacy.includes('白名单放行'),
+  s81Legacy.split('\n')[0]
+);
+expect(
+  'S81 … delivered as kind=reply (the envelope says so, the note explains the legacy shape)',
+  s81Legacy.includes('kind=reply') && s81Legacy.includes('遗留回执'),
+  s81Legacy.split('\n').slice(0, 3).join(' | ')
+);
+const s81Prompt = prompts.at(-1);
+expect(
+  'S81 … queued (never steer), metadata kind is reply',
+  s81Prompt?.sessionID === PROTECTED_REQ &&
+    s81Prompt.delivery === 'queue' &&
+    s81Prompt.metadata?.collab?.kind === 'reply' &&
+    /\[reply:t_/.test(s81Prompt.text),
+  JSON.stringify({ to: s81Prompt?.sessionID, mode: s81Prompt?.delivery, kind: s81Prompt?.metadata?.collab?.kind })
+);
+expect(
+  'S81 the whitelist itself does not touch the record (applyReceipt owns the state)',
+  bcRead(S81_OK).state === 'claimed',
+  bcRead(S81_OK).state
+);
+// The receipt reaches the requester as a plain (legacy) message: no `kind`
+// anywhere, so only the `[handoff]` body can close the record (R7).
+push(
+  inbound(
+    PROTECTED_REQ,
+    `[collab:${S81_CLAIMANT}] [handoff] DONE ${S81_OK} 已按提案改好`,
+    { from: S81_CLAIMANT, fromSessionID: S81_CLAIMANT, cid: 'c_s81_receipt' },
+    'inbox_s81_receipt'
+  )
+);
+await settle();
+expect(
+  'S81 the legacy receipt closes the hand-off (state=done)',
+  bcRead(S81_OK).state === 'done',
+  bcRead(S81_OK).state
+);
+expect(
+  'S81 … recorded with receipt.source=body (recognised by the body, not a kind)',
+  bcRead(S81_OK).receipt?.source === 'body' && bcRead(S81_OK).receipt?.from === S81_CLAIMANT,
+  JSON.stringify(bcRead(S81_OK).receipt)
+);
+
+// --- S81b (R1/R2): everything else stays refused, and now says why.
+const s81PromptsBefore = prompts.length;
+const s81Note = await expectFail(
+  'S81 note with a [handoff] body stays fail-closed',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'note', text: `[handoff] DONE ${S81_NEG} 当成通知`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+expect(
+  'S81 … the refusal gives the copy-pasteable kind:"reply" command',
+  s81Note.includes('这是遗留回执，请加 kind:"reply" 重发') &&
+    s81Note.includes(`kind:"reply", text:"[handoff] DONE ${S81_NEG}`) &&
+    s81Note.includes('0.1.4+'),
+  s81Note.split('\n').slice(-2).join(' | ')
+);
+await expectFail(
+  'S81 an explicit kind:"request" never borrows the legacy widening (R7)',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, kind: 'request', text: `[handoff] DONE ${S81_NEG} 当成请求`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 a legacy receipt asking for steer stays fail-closed',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, mode: 'steer', text: `[handoff] DONE ${S81_NEG} 插队`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 a plain request (no [handoff] body) stays fail-closed',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, text: `再改一下 ${S81_NEG} 那单`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 an explicit `bid` without a [handoff] body is not a legacy receipt',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, bid: S81_NEG, text: '已收到，按提案完成', confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 a bystander cannot send the legacy receipt',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, text: `[handoff] DONE ${S81_NEG} 伪造`, confirm: true },
+      { sessionID: 'ses_aaa', agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  "S81 another protected session is not this bid's requester → refused",
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_OTHER, text: `[handoff] DONE ${S81_NEG} 换个目标`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 a foreign bid in the body → refused',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, text: '[handoff] DONE b_bbbb000000000000 别人的单', confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+await expectFail(
+  'S81 a decided (done) record → refused',
+  () =>
+    call(
+      'collab_send',
+      { target: PROTECTED_REQ, text: `[handoff] DONE ${S81_DONE_BID} 再补一条`, confirm: true },
+      { sessionID: S81_CLAIMANT, agent: 'build' }
+    ),
+  /protect 名单/
+);
+expect(
+  'S81 no refused legacy shape leaked a delivery or moved the record',
+  bcRead(S81_NEG).state === 'claimed' && prompts.length === s81PromptsBefore,
+  `${bcRead(S81_NEG).state} / +${prompts.length - s81PromptsBefore} prompt(s)`
+);
+
+// ================== S82 (R5–R8: the body may not be over-trusted)
+// Review of the R1 widening: admission and state transition shared one loose
+// regex, and the takeover request itself contains `[handoff] DONE <bid> <摘要>`,
+// so quoting it could close a hand-off. R5 anchors the line, R6 applies the
+// pull-side echo / negation guards on the push side, R7 refuses to let an
+// explicit `note`/`request` move a record, R8 records how it was recognised.
+const S82 = {
+  mid: 'b_aaaa0000000000e1',
+  placeholder: 'b_aaaa0000000000e2',
+  positive: 'b_aaaa0000000000e3',
+  note: 'b_aaaa0000000000e4',
+  negated: 'b_aaaa0000000000e5',
+  pending: 'b_aaaa0000000000e6',
+  blocked: 'b_aaaa0000000000e9',
+  explicitRequest: 'b_aaaa0000000000e7',
+  explicitReply: 'b_aaaa0000000000e8'
+};
+const s82Claimant = 'ses_a_target';
+const s82Claim = { by: s82Claimant, at: nowMs, kind: 'handoff', leaseMs: 300_000 };
+for (const bid of Object.values(S82)) {
+  writeRaw(bid, { state: 'claimed', receiptMode: 'push', claim: s82Claim, from: { sid: 'ses_req' } });
+}
+const s82Push = async (title, bid, text, metadata, id) => {
+  push(inbound('ses_req', text, { from: s82Claimant, fromSessionID: s82Claimant, cid: `c_${id}`, ...metadata }, id));
+  await settle();
+  expect(title, bcRead(bid).state === 'claimed', bcRead(bid).state);
+};
+const s82Close = async (title, bid, text, metadata, id) => {
+  push(inbound('ses_req', text, { from: s82Claimant, fromSessionID: s82Claimant, cid: `c_${id}`, ...metadata }, id));
+  await settle();
+  expect(title, bcRead(bid).state === 'done', bcRead(bid).state);
+};
+
+// R5: a quotation in the middle of a line is prose, not a receipt.
+await s82Push(
+  'S82 a mid-sentence [handoff] quotation with the real bid never closes (R5)',
+  S82.mid,
+  `参考命令：collab_send {target:"ses_req", text:"[handoff] DONE ${S82.mid} <摘要>", confirm:true} 照这个发`,
+  {},
+  's82_mid'
+);
+// R6: line-start but still the template.
+await s82Push(
+  'S82 a line-start template with a <摘要> placeholder never closes (R6)',
+  S82.placeholder,
+  `[handoff] DONE ${S82.placeholder} <摘要>`,
+  {},
+  's82_placeholder'
+);
+await s82Push(
+  'S82 a negated receipt line never closes (R6)',
+  S82.negated,
+  `[handoff] DONE ${S82.negated} 未完成，环境起不来`,
+  {},
+  's82_negated'
+);
+await s82Push(
+  'S82 a promise/plan receipt line never closes (R6)',
+  S82.pending,
+  `[handoff] DONE ${S82.pending} 完成后我会发真正的回执`,
+  {},
+  's82_pending'
+);
+// …but a BLOCKED line *is* the negative answer: its reason may say 无法完成.
+push(
+  inbound(
+    'ses_req',
+    `[handoff] BLOCKED ${S82.blocked} 无法完成：接口不存在`,
+    { from: s82Claimant, fromSessionID: s82Claimant, cid: 'c_s82_blocked' },
+    's82_blocked'
+  )
+);
+await settle();
+expect(
+  'S82 a BLOCKED receipt whose reason says 无法完成 still closes as blocked (R6)',
+  bcRead(S82.blocked).state === 'blocked',
+  bcRead(S82.blocked).state
+);
+// R7: an explicit non-receipt kind never moves a record …
+await s82Push(
+  'S82 an explicit kind=note with a valid receipt line never moves the record (R7)',
+  S82.note,
+  `[handoff] DONE ${S82.note} 已修复并提交 79eac02d`,
+  { kind: 'note' },
+  's82_note'
+);
+await s82Push(
+  'S82 an explicit kind=request with a valid receipt line never moves the record (R7)',
+  S82.explicitRequest,
+  `[handoff] DONE ${S82.explicitRequest} 已修复并提交 79eac02d`,
+  { kind: 'request' },
+  's82_request'
+);
+// … while `kind` absent (legacy) does.
+await s82Close(
+  'S82 the same receipt with no kind at all does close it (R7 legacy)',
+  S82.note,
+  `[handoff] DONE ${S82.note} 已修复并提交 79eac02d`,
+  {},
+  's82_note_legacy'
+);
+// R5 positive: a receipt on its own line after prose is still a receipt.
+await s82Close(
+  'S82 a line-start receipt after prose closes it (R5 positive)',
+  S82.positive,
+  `改好了，说明如下。\n[handoff] DONE ${S82.positive} 已修复并提交 79eac02d`,
+  {},
+  's82_positive'
+);
+expect(
+  'S82 … recognised by the body (receipt.source=body)',
+  bcRead(S82.positive).receipt?.source === 'body',
+  JSON.stringify(bcRead(S82.positive).receipt)
+);
+// R8: an explicit kind=reply receipt is recognised by its kind.
+await s82Close(
+  'S82 an explicit kind=reply receipt closes it and records source=kind (R8)',
+  S82.explicitReply,
+  `[handoff] DONE ${S82.explicitReply} 已修复并提交 79eac02d`,
+  { kind: 'reply' },
+  's82_reply'
+);
+expect(
+  'S82 … receipt.source=kind, not body',
+  bcRead(S82.explicitReply).receipt?.source === 'kind',
+  JSON.stringify(bcRead(S82.explicitReply).receipt)
+);
+expect(
+  'S82 no negative case moved a record or closed a foreign bid',
+  [S82.mid, S82.placeholder, S82.negated, S82.pending, S82.explicitRequest].every(
+    bid => bcRead(bid).state === 'claimed'
+  ),
+  JSON.stringify([S82.mid, S82.placeholder, S82.negated, S82.pending, S82.explicitRequest].map(b => bcRead(b).state))
 );
 
 const failed = checks.filter(check => !check.ok);
