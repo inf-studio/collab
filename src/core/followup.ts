@@ -20,9 +20,20 @@
  * `realpath` — inside `record.workspace`, under `docs/issues/`, as a regular
  * `.md` file. `..`, absolute paths and symlinks are refused; a record whose
  * path cannot be validated renders **nothing** (no fallback concatenation).
+ *
+ * 0.3.1 (F1–F3, std-ui review):
+ *   - F1: the *stamp* moved to the caller — `nextFollowUpHint` is a pure query
+ *     and the `context` hook marks the keys only after the block is pushed;
+ *   - F2: an unusable entry is no longer stamped. It used to be remembered as
+ *     "already hinted" (at-most-once with a silent drop) even though nothing
+ *     was ever rendered, so a proposal that was archived / moved / symlinked
+ *     made the hint disappear forever. Now it stays pending and `collab_list`
+ *     reports the count (once per session, see `takeInvalidFollowUpNotice`);
+ *   - F3: the path is normalised first (`./`, `.` and repeated `/` collapse to
+ *     the same file); only `..` and absolute paths are refused outright.
  */
 import { lstatSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import type { BroadcastRecord, CollabContext } from '../types.ts';
 import { asObject, dedupe, fmtTime } from '../util.ts';
 
@@ -59,6 +70,12 @@ export type IssuePathCheck =
  * non-throwing form: relative, no `..`, under `<workspace>/docs/issues/`, an
  * existing regular `.md` whose `realpath` stays inside that directory and is
  * not a symlink.
+ *
+ * F3 (0.3.1): the path is normalised **before** it is judged — empty segments
+ * and `.` are dropped, so `./docs/issues/x.md`, `docs//issues/x.md` and
+ * `docs/issues/./x.md` are the one file the caller meant. Only `..` and
+ * absolute paths are refused outright; the symlink refusal below is unchanged
+ * (the boundary is `docs/issues/`, not the caller's convenience).
  */
 export function validateIssuePath(workspace: unknown, raw: unknown): IssuePathCheck {
   const root = String(workspace ?? '').trim();
@@ -67,10 +84,9 @@ export function validateIssuePath(workspace: unknown, raw: unknown): IssuePathCh
   const issuePath = sanitizePathText(raw);
   if (!issuePath) return { ok: false, reason: 'issuePath 为空' };
   if (isAbsolute(issuePath)) return { ok: false, reason: `issuePath 不能是绝对路径：${issuePath}` };
-  if (issuePath.split('/').some(part => part === '..' || part === '.')) {
-    return { ok: false, reason: `issuePath 不能包含 .. / .：${issuePath}` };
-  }
-  const clean = relative(root, resolve(root, issuePath)).split(sep).join('/');
+  const parts = issuePath.split('/').filter(part => part && part !== '.');
+  if (parts.includes('..')) return { ok: false, reason: `issuePath 不能包含 ..：${issuePath}` };
+  const clean = parts.join('/');
   if (!/^docs\/issues\/[^/]+\.md$/i.test(clean)) {
     return { ok: false, reason: `issuePath 必须是 docs/issues/<name>.md：${clean}` };
   }
@@ -185,8 +201,19 @@ export function followUpHintLine(entry: FollowUpRecord): string {
 /**
  * R5: pick **at most one** append to hint about, oldest first, skipping the
  * ones already shown to this session and the ones whose path does not validate.
- * Returns the line plus the keys to stamp, or nothing when there is nothing to
- * show. Never renders anything derived from a free-text field.
+ * Returns the line plus the key(s) the caller should stamp **after** the line
+ * is actually in front of the model, or nothing when there is nothing to show.
+ * Never renders anything derived from a free-text field.
+ *
+ * F1 (0.3.1): pure query — no stamping here any more. Stamping before the
+ * injection was an at-most-once delivery with no confirmation: a hook that
+ * threw (or a host that dropped the block) lost the hint forever.
+ *
+ * F2 (0.3.1): an unusable entry is **skipped without being stamped**. It used
+ * to be "remembered" so it cost no `stat()` per request, but that also meant a
+ * proposal archived / moved / symlinked after the append made the conclusion
+ * disappear silently and permanently. The retry is natural (next request), and
+ * `collab_list` reports the backlog (see `takeInvalidFollowUpNotice`).
  */
 export function nextFollowUpHint(
   record: BroadcastRecord,
@@ -195,22 +222,79 @@ export function nextFollowUpHint(
   { workspace }: { workspace?: unknown } = {}
 ): { line: string; keys: string[] } | undefined {
   const known = new Set(seen);
-  const skipped: string[] = [];
   for (const entry of followUpsOf(record)) {
     const key = followUpSeenKey(sessionID, record.bid, entry.at);
     if (known.has(key)) continue;
     const check = validateIssuePath(workspace ?? record.workspace, entry.issuePath);
-    if (!check.ok) {
-      // Fail-closed and quiet: an entry that cannot be validated is never
-      // rendered (no fallback text) and is remembered so it cannot cost a
-      // stat() on every request either.
-      skipped.push(key);
-      continue;
-    }
+    if (!check.ok) continue; // F2: not stamped — retried next round, counted by collab_list
     return {
       line: followUpHintLine({ ...entry, issuePath: check.issuePath }),
-      keys: [...skipped, key]
+      keys: [key]
     };
   }
-  return skipped.length ? { line: '', keys: skipped } : undefined;
+  return undefined;
+}
+
+/**
+ * F2 (0.3.1): the appends of one record that would render nothing — the same
+ * check `nextFollowUpHint` applies, materialised so the requester can be told
+ * (once) instead of the entry being silently stamped into oblivion. The
+ * rejection reason is deliberately **not** kept: it quotes the path text, and
+ * that is exactly what must not reach a `collab_list` reader.
+ */
+export function invalidFollowUps(
+  record: BroadcastRecord | undefined,
+  workspace?: unknown
+): FollowUpRecord[] {
+  const out: FollowUpRecord[] = [];
+  for (const entry of followUpsOf(record)) {
+    const check = validateIssuePath(workspace ?? asObject(record).workspace, entry.issuePath);
+    if (!check.ok) out.push(entry);
+  }
+  return out;
+}
+
+function invalidStorageKey(sessionID: string): string {
+  return `collab/followup-invalid/${sessionID}`;
+}
+
+/**
+ * F2 (0.3.1): `true` when this session should be told about the unusable
+ * appends now — i.e. when the set of them changed since the last time it was
+ * told. Each unusable entry is therefore counted once per session, a growing
+ * backlog is re-reported, and an unchanged one never becomes per-turn noise.
+ *
+ * Called from an explicit pull (`collab_list`), so a storage failure returns
+ * `true` (fail-visible) rather than hiding the fact that a hint channel is
+ * broken.
+ */
+export async function takeInvalidFollowUpNotice(
+  ctx: CollabContext,
+  sessionID: string | undefined,
+  entries: FollowUpRecord[]
+): Promise<boolean> {
+  if (!sessionID || !entries.length) return false;
+  const sigs = dedupe(entries.map(entry => `${entry.bid}:${entry.at}`)).sort();
+  try {
+    const raw = asObject(await ctx.storage.get(invalidStorageKey(sessionID)));
+    const shown = Array.isArray(raw.sigs) ? raw.sigs.filter((sig: unknown): sig is string => typeof sig === 'string') : [];
+    if (shown.length === sigs.length && shown.every((sig, index) => sig === sigs[index])) return false;
+    await ctx.storage.set(invalidStorageKey(sessionID), { sigs, at: Date.now() });
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/** F2: the `collab_list` summary of those entries (count first, never the path). */
+export function invalidFollowUpLines(entries: FollowUpRecord[]): string[] {
+  if (!entries.length) return [];
+  const head =
+    `${entries.length} 条 followUp 因路径无效未渲染（未标记：把结论写回该 workspace 的 ` +
+    'docs/issues/<name>.md 后，下一轮注入会自动提示）:';
+  const lines = entries
+    .slice(0, 5)
+    .map(entry => `- ${entry.bid} 追加于 ${fmtTime(entry.at)} → issuePath 未通过校验`);
+  if (entries.length > 5) lines.push(`…还有 ${entries.length - 5} 条`);
+  return [head, ...lines];
 }

@@ -3,11 +3,16 @@ import { ACKED_EXTRACT_MS, BCAST_DONE_STATES, BOOTSTRAP_TITLE_RE } from '../cons
 import { deliveryLine, deliveryOf, deliveryVisible, unackedDue } from '../core/ack.ts';
 import { allBroadcasts, leaseVerdict } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
+import {
+  invalidFollowUpLines,
+  invalidFollowUps,
+  takeInvalidFollowUpNotice
+} from '../core/followup.ts';
 import { createLineage } from '../core/lineage.ts';
 import { fmtTtl, locksFor } from '../core/locks.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
-import type { ToolDefinition } from '../types.ts';
+import type { CollabContext, ToolDefinition } from '../types.ts';
 import { clamp, fmtTime, sessionState, shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
@@ -15,6 +20,27 @@ import type { ToolKit } from './shared.ts';
 /** R8②: the report entry point is a *fixed* last line of every listing. */
 function hintLine(): string {
   return `缺陷上报：collab_report { confirm:true }（证据目录 ${reportDir()}）`;
+}
+
+/**
+ * F2 (0.3.1): follow-ups of the hand-offs **this session started** whose path no
+ * longer validates. They are no longer stamped, so they stay pending in the
+ * injection path (that is the fix) — but nothing is rendered for them, so
+ * `collab_list` is where the backlog becomes visible. Reported once per session
+ * per set of entries (`takeInvalidFollowUpNotice`), never per turn.
+ */
+async function invalidFollowUpNotice(
+  ctx: CollabContext,
+  sessionID: string | undefined,
+  records: ReturnType<typeof allBroadcasts>
+): Promise<string[]> {
+  if (!sessionID) return [];
+  const entries = records
+    .filter(record => String(record.from?.sid ?? '') === sessionID)
+    .flatMap(record => invalidFollowUps(record));
+  if (!entries.length) return [];
+  if (!(await takeInvalidFollowUpNotice(ctx, sessionID, entries))) return [];
+  return invalidFollowUpLines(entries);
 }
 
 /** `collab_list` — read-only session + open hand-off inventory. */
@@ -49,11 +75,17 @@ export function listTool(kit: ToolKit): ToolDefinition {
       if (directory && !isAbsolute(directory)) {
         throw invalid(`directory 必须是绝对路径："${directory}"`);
       }
+      const records = allBroadcasts();
+      const me = context?.sessionID;
+      // F2 (0.3.1): computed before the empty-workspace early return — a session
+      // whose only hand-off has an unusable append still has to learn about it.
+      const invalidFollowUpNotes = await invalidFollowUpNotice(ctx, me, records);
       const sessions = (await chain.listSessions({ directory, limit })).slice(0, limit);
       if (!sessions.length) {
         return {
           content: [
             `${directory ? `工作区 ${directory} 下` : ''}没有可列出的会话。`,
+            ...invalidFollowUpNotes,
             hintLine()
           ].join('\n')
         };
@@ -69,7 +101,6 @@ export function listTool(kit: ToolKit): ToolDefinition {
 
       // Sessions a broadcast created (`impl:<slug>`) — never deleted by us,
       // but worth marking so a human can tell them from hand-made sessions.
-      const records = allBroadcasts();
       const spawned = new Set(
         records.filter(record => record.claim?.kind === 'spawn').map(record => String(record.claim?.by ?? ''))
       );
@@ -144,7 +175,6 @@ export function listTool(kit: ToolKit): ToolDefinition {
 
       // R6: hang-up classes, once per (session, class, bid); R9.2: one passive
       // "未处理上报 N 条" line when a backlog exists.
-      const me = context?.sessionID;
       // R5 (0.2.0): this session's own leases and queue position — the one
       // coordination fact a session must not have to ask another session for.
       const leases = locksFor(me, now);
@@ -192,6 +222,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
               ]
             : []),
           ...(stale.length ? ['挂起提醒（每类每单只出现一次）:', ...formatStale(stale)] : []),
+          ...invalidFollowUpNotes,
           ...(notice ? [reportNoticeLine(pendingCount)] : []),
           hintLine()
         ].join('\n')

@@ -169,6 +169,17 @@
  *        holder is marked [protected] and cannot be displaced; locking delivers
  *        no message at all
  *
+ * S89 (`11-18-collab-followup-hardening`, F1–F3) covers the std-ui review of the
+ * post-closure append:
+ *   F1  the hint is stamped only after `event.system.push` succeeded — a throwing
+ *       injection leaves it pending for the next request (it used to be stamped
+ *       first, so the conclusion was lost for good)
+ *   F2  an append whose path no longer validates is not stamped; `collab_list`
+ *       reports the count once per session, and the valid appends of the same
+ *       bid still render while it is unusable
+ *   F3  `./docs/issues/x.md` and `docs//issues/./x.md` normalise to the same file;
+ *       `..`, absolute paths and symlinks stay refused
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -6164,6 +6175,222 @@ await unlockCall('ttl-low', 'ses_lk1');
 await unlockCall('ttl-high', 'ses_lk2');
 await unlockCall('reason-check', 'ses_lk3');
 await unlockCall('fifo-window', 'ses_lk4');
+
+// ================== S89 (F1–F3: follow-up hint hardening, 0.3.1)
+// The three findings of the std-ui review: (F1) the hint used to be stamped
+// *before* it was pushed, so a failed injection lost it forever; (F2) an entry
+// whose path failed validation was "remembered" and therefore silently dropped
+// for good; (F3) `./docs/issues/x.md` was refused by the `.`-segment check.
+const WS_S89 = ws('s89');
+const ISSUE_S89 = issueFile(
+  WS_S89,
+  'feat-followup-hardening.md',
+  '# followUps 硬化（11-18-collab-followup-hardening）\n\n`src/core/followup.ts`\n'
+);
+const S89_REQ = 'ses_s89req';
+const S89_BY = 'ses_s89by';
+sessions[S89_REQ] = {
+  id: S89_REQ,
+  agent: 'build',
+  title: 'S89 发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_S89 }
+};
+sessions[S89_BY] = {
+  id: S89_BY,
+  agent: 'build',
+  title: 'S89 承接方',
+  time: { updated: now, busy: 0 },
+  location: { directory: WS_S89 }
+};
+const s89Closed = (bid, extra) =>
+  writeRaw(bid, {
+    workspace: WS_S89,
+    issuePath: ISSUE_S89,
+    state: 'done',
+    claim: { by: S89_BY, at: nowMs - 3_600_000, leaseMs: 300_000 },
+    from: { sid: S89_REQ },
+    receipt: { from: S89_BY, at: nowMs - 3_600_000, note: '已闭环' },
+    ...extra
+  });
+const s89HintLine = (text, bid) => text.split('\n').find(line => line.startsWith(`- ${bid} 已闭环`));
+
+// --- S89a (F3): `.` / `./` / repeated `/` normalise; `..`/absolute/symlink stay out.
+const s89Bid = 'b_aaaa0000000000e1';
+s89Closed(s89Bid, { title: 'S89 F3 路径规范化' });
+const s89DotAppend = await call(
+  'collab_followup',
+  { bid: s89Bid, issuePath: `./${ISSUE_S89}`, confirm: true },
+  as(S89_BY)
+);
+out('S89 ./docs/issues accepted', s89DotAppend.split('\n').slice(0, 3).join(' | '));
+const s89Stored = (bcRead(s89Bid).followUps ?? [])[0] ?? {};
+expect(
+  'S89 `./docs/issues/x.md` is accepted and stored normalised',
+  s89DotAppend.startsWith('已登记闭环后追加') && s89Stored.issuePath === ISSUE_S89,
+  JSON.stringify(s89Stored)
+);
+const s89DoublePreview = await call(
+  'collab_followup',
+  { bid: s89Bid, issuePath: `docs//issues/./${ISSUE_S89.replace('docs/issues/', '')}`, confirm: false },
+  as(S89_BY)
+);
+expect(
+  'S89 … and `docs//issues/./x.md` previews as the same normalised path',
+  s89DoublePreview.includes(`提案: ${ISSUE_S89}（`),
+  s89DoublePreview.split('\n').find(line => line.startsWith('提案:')) ?? '(缺失)'
+);
+for (const [title, badPath, matcher] of [
+  ['.. traversal', `../${ISSUE_S89}`, /不能包含 \.\./],
+  ['middle ..', `docs/issues/../issues/fix-collab-self.md`, /不能包含 \.\./],
+  ['absolute path', join(WS_S89, ISSUE_S89), /绝对路径/]
+]) {
+  await expectFail(
+    `S89 a ${title} issuePath is still refused`,
+    () => call('collab_followup', { bid: s89Bid, issuePath: badPath, confirm: true }, as(S89_BY)),
+    matcher
+  );
+}
+symlinkSync(join(WS_S89, ISSUE_S89), join(WS_S89, 'docs/issues/s89-link.md'));
+await expectFail(
+  'S89 a symlinked proposal is still refused (boundary unchanged)',
+  () =>
+    call('collab_followup', { bid: s89Bid, issuePath: 'docs/issues/s89-link.md', confirm: true }, as(S89_BY)),
+  /软链/
+);
+expect(
+  'S89 no refused path appended anything',
+  (bcRead(s89Bid).followUps ?? []).length === 1,
+  String((bcRead(s89Bid).followUps ?? []).length)
+);
+// An explicit `issuePath` that sanitises away is an error, not a silent fallback
+// to the record's own proposal (F2: never store an entry nobody asked for).
+await expectFail(
+  'S89 an issuePath of only whitespace/control characters is refused',
+  () => call('collab_followup', { bid: s89Bid, issuePath: ' \u0000 ', confirm: true }, as(S89_BY)),
+  /issuePath 为空/
+);
+expect(
+  'S89 … and it appended nothing',
+  (bcRead(s89Bid).followUps ?? []).length === 1,
+  String((bcRead(s89Bid).followUps ?? []).length)
+);
+// The normalised path renders (this also stamps the entry, so the F1/F2 checks
+// below see only their own pending appends).
+const s89DotCtx = contextEvent(S89_REQ);
+await hooks.context(s89DotCtx);
+const s89DotLine = s89HintLine(textOf(s89DotCtx), s89Bid);
+out('S89 rendered hint for ./docs/issues', s89DotLine ?? '(无)');
+expect(
+  'S89 the `./` append renders with the normalised path',
+  Boolean(s89DotLine) && s89DotLine.includes(ISSUE_S89) && !s89DotLine.includes(`./${ISSUE_S89}`),
+  s89DotLine ?? '(缺失)'
+);
+
+// --- S89b (F1): a throwing injection must not stamp the hint.
+const s89F1Bid = 'b_aaaa0000000000e2';
+s89Closed(s89F1Bid, {
+  title: 'S89 F1 注入失败',
+  followUps: [{ bid: s89F1Bid, issuePath: ISSUE_S89, at: nowMs - 1_800_000, by: S89_BY }]
+});
+// `Object.freeze([])` makes `event.system.push` throw — the same failure a host
+// adapter throws when the block cannot be attached to the request.
+const s89FrozenEvent = { sessionID: S89_REQ, agent: 'build', messages: [], system: Object.freeze([]) };
+const s89ErrorBefore = console.error;
+console.error = () => {}; // the hook logs the failure; keep the output readable
+await hooks.context(s89FrozenEvent);
+console.error = s89ErrorBefore;
+expect(
+  'S89 a throwing `event.system.push` does not escape the hook and injects nothing',
+  s89FrozenEvent.system.length === 0,
+  String(s89FrozenEvent.system.length)
+);
+const s89RetryCtx = contextEvent(S89_REQ);
+await hooks.context(s89RetryCtx);
+const s89RetryLine = s89HintLine(textOf(s89RetryCtx), s89F1Bid);
+out('S89 hint after a failed injection', s89RetryLine ?? '(无)');
+expect(
+  'S89 … the hint is still pending on the next request (F1: not stamped before the push)',
+  Boolean(s89RetryLine) && s89RetryLine.includes(ISSUE_S89),
+  s89RetryLine ?? '(缺失)'
+);
+const s89RetryAgain = contextEvent(S89_REQ);
+await hooks.context(s89RetryAgain);
+expect(
+  'S89 … and is stamped once it really was injected',
+  !textOf(s89RetryAgain).includes(`${s89F1Bid} 已闭环`),
+  textOf(s89RetryAgain).split('\n').filter(line => line.includes(s89F1Bid)).join(' | ') || '(无)'
+);
+
+// --- S89c (F2): an unusable path is not stamped; `collab_list` reports it once.
+const s89F2Bid = 'b_aaaa0000000000e3';
+const S89_MISSING = 'docs/issues/s89-missing.md';
+s89Closed(s89F2Bid, {
+  title: 'S89 F2 无效路径',
+  followUps: [
+    // Older, and its file does not exist yet: refused at render time.
+    { bid: s89F2Bid, issuePath: S89_MISSING, at: nowMs - 7_200_000, by: S89_BY },
+    { bid: s89F2Bid, issuePath: ISSUE_S89, at: nowMs - 3_600_000, by: S89_BY }
+  ]
+});
+// The claimant's own view names the backlog (it is their record, so no leak).
+const s89F2Append = await call('collab_followup', { bid: s89F2Bid, confirm: true }, as(S89_BY));
+out('S89 collab_followup with an unusable older entry', s89F2Append.split('\n').slice(-4).join(' | '));
+expect(
+  'S89 collab_followup reports the older unusable appends of the same bid',
+  s89F2Append.includes('另有 1 条 followUp 路径无效'),
+  s89F2Append.split('\n').find(line => line.includes('另有')) ?? '(缺失)'
+);
+const s89List1 = await call('collab_list', {}, as(S89_REQ));
+out(
+  'S89 collab_list invalid follow-ups',
+  s89List1.split('\n').filter(line => line.includes('followUp') || line.includes(s89F2Bid)).join(' | ') || '(无)'
+);
+expect(
+  'S89 collab_list reports the unusable follow-up count',
+  s89List1.includes('1 条 followUp 因路径无效未渲染') && s89List1.includes(s89F2Bid),
+  s89List1.split('\n').find(line => line.includes('followUp 因路径无效')) ?? '(缺失)'
+);
+expect(
+  'S89 … without echoing the unusable path text',
+  !s89List1.includes(S89_MISSING),
+  s89List1.split('\n').filter(line => line.includes('s89-missing')).join(' | ') || '(无)'
+);
+const s89List2 = await call('collab_list', {}, as(S89_REQ));
+expect(
+  'S89 … and only once per session (the set did not change)',
+  !s89List2.includes('followUp 因路径无效未渲染'),
+  s89List2.split('\n').filter(line => line.includes('followUp 因路径无效')).join(' | ') || '(无)'
+);
+// The valid append of the same bid still renders: an all-invalid record used to
+// consume the one-line slot and stamp its keys on the way out.
+const s89F2Ctx = contextEvent(S89_REQ);
+await hooks.context(s89F2Ctx);
+const s89F2Line = s89HintLine(textOf(s89F2Ctx), s89F2Bid);
+out('S89 valid append beside an invalid one', s89F2Line ?? '(无)');
+expect(
+  'S89 the valid append of the same bid renders (the invalid one does not block it)',
+  Boolean(s89F2Line) && s89F2Line.includes(ISSUE_S89),
+  s89F2Line ?? '(缺失)'
+);
+// The key point of F2: the unusable entry was NOT stamped, so creating the file
+// brings the hint back instead of the conclusion being lost forever.
+writeFileSync(join(WS_S89, S89_MISSING), '# s89 missing（补建）\n');
+const s89F2Ctx2 = contextEvent(S89_REQ);
+await hooks.context(s89F2Ctx2);
+const s89F2Line2 = s89HintLine(textOf(s89F2Ctx2), s89F2Bid);
+out('S89 previously unusable append after the file appeared', s89F2Line2 ?? '(无)');
+expect(
+  'S89 an unusable entry is not stamped: once the file exists the hint appears',
+  Boolean(s89F2Line2) && s89F2Line2.includes(S89_MISSING),
+  s89F2Line2 ?? '(缺失)'
+);
+const s89List3 = await call('collab_list', {}, as(S89_REQ));
+expect(
+  'S89 … and the backlog line is gone once every path validates',
+  !s89List3.includes('followUp 因路径无效未渲染'),
+  s89List3.split('\n').filter(line => line.includes('followUp 因路径无效')).join(' | ') || '(无)'
+);
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

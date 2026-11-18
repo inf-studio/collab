@@ -142,7 +142,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 vp build -c vite.gui.config.ts → dist/gui-experimental.cjs
 pnpm install
 pnpm typecheck
-pnpm test          # build + 506 项 harness + 12 项只读默认 + 18 项侧栏快照
+pnpm test          # build + 526 项 harness + 12 项只读默认 + 18 项侧栏快照
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -157,6 +157,8 @@ pnpm test          # build + 506 项 harness + 12 项只读默认 + 18 项侧栏
   同会话幂等（不重复计数/不延长 TTL）、TTL 过期回收（读命令只读不改）、FIFO 排队与不插队、
   `collab_list` 显示本人持有/排队、`file:` 越界/绝对/软链拒绝、中文别名与路径写法归并、
   TTL 夹取、`reason` 清洗、`[protected]` 可持有但不可抢占、加锁不投递任何消息。
+  0.3.1 追加 S89：闭环后追加的三条硬化——注入抛错不标记（下一轮仍提示）、无效路径条目不标记且
+  `collab_list` 只汇总一次、`./docs/issues/x.md` 归一化后可渲染（`..`/绝对/软链仍拒）。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——

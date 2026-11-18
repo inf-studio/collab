@@ -59,9 +59,11 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 3) 发起方下次 context 注入看到一行只读提示： - b_xxx 已闭环，提案 <path> 有追加结论（<ts>），请读取文件
 ```
 
-记录里只存 `{ bid, issuePath, at, by }`（**不存正文**，每单 ≤3 条），路径必须是该记录 workspace 下
-`docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。**不投递、不改 state/receipt、不重开 bid**——
-想补内容就写文件，不要试图再 collab_send 进受保护会话。
+记录里只存 `{ bid, issuePath, at, by }`（**不存正文**，每单 ≤3 条），路径先规范化（`./`、`.`、重复 `/`
+等价）再要求是该记录 workspace 下 `docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。**不投递、不改
+state/receipt、不重开 bid**——想补内容就写文件，不要试图再 collab_send 进受保护会话。
+提示是「注入成功后才标记」（注入失败下一轮重试）；路径校验失败的条目不标记，`collab_list` 会汇总
+「N 条 followUp 因路径无效未渲染」（只提示一次），把提案修回 `docs/issues/` 后提示会自动恢复。
 
 ## 二、同工作区（local）
 

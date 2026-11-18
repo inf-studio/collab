@@ -264,7 +264,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9）；本会话持有 / 排队中的资源租约（§11.10）。`directory` 只看一个工作区（省略 = 旧行为） |
 | `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**） |
 | `collab_reply` | `{ threadID, text, bid?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定） |
-| `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须 realpath 落在该记录 workspace 的 `docs/issues/*.md`（拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
+| `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
@@ -588,13 +588,22 @@ delivery.cid 存在 && !seenAt && resends < 1
 
 - **只存结构**：`followUps[] = { bid, issuePath, at, by }`。任何自由文本都不落记录、不进注入——
   否则任何会话都能借这条通道往 protect 会话的 context 塞话。
-- **路径校验（写入与渲染各一次）**：必须 realpath 落在该记录 workspace 的 `docs/issues/<name>.md`；
-  拒绝 `..`、绝对路径、非 `docs/issues/`、非 `.md`、软链；控制字符/换行一律剔除、上限 200 字。
-  校验失败 → **整行不渲染**（不做降级拼接），写入口直接拒绝并给出原因。
+- **路径校验（写入与渲染各一次）**：**先规范化**——丢掉空段与 `.`、合并重复 `/`，所以
+  `./docs/issues/x.md`、`docs//issues/./x.md` 与 `docs/issues/x.md` 是同一个文件；
+  再要求 realpath 落在该记录 workspace 的 `docs/issues/<name>.md`。只拒 `..`、绝对路径、
+  非 `docs/issues/`、非 `.md`、软链；控制字符/换行一律剔除、上限 200 字。
+  校验失败 → **整行不渲染**（不做降级拼接），写入口直接拒绝并给出原因；
+  写入时 `issuePath` 若只含空白/控制字符直接报错，不再回退到记录自带的提案（0.3.1）。
 - **权限**：只有该单 `claim.by` 能登记；发起方与旁观会话一律拒绝；`expired` 也不接受（需人工接手）。
 - **不投递、不改 state、不改 receipt、不重开 bid**：记录只是多了一个「有追加」的指针。
 - **去重粒度是 `(sid, bid, followUp.at)`**：同一单的第二条追加会在下一次注入里再提示一次；
-  每次注入最多 1 行；路径不可校验的条目会被静默记住（不再每次 stat）。
+  每次注入最多 1 行。
+- **标记时机（0.3.1 F1）**：提示行**先进入本次请求，再标记**。`context` hook 在
+  `event.system.push(...)` 成功之后才 `markFollowUpSeen`；注入抛错（或宿主没接住这块）→ **不标记**，
+  下一次请求自然重试。旧实现是「先标记、后投递」，等于一次没有投递确认的 at-most-once。
+- **无效路径不静默（0.3.1 F2）**：路径校验失败的条目**不标记**、也不渲染；`collab_list` 汇总
+  「N 条 followUp 因路径无效未渲染」（同一会话按无效条目集合去重，集合变化才再提示一次），
+  条目本身只显示 `bid` + 时间、**不回显路径文本**。把提案修回 `docs/issues/` 后，下一次注入就会提示。
 - **protect 的窄化白名单**：受保护会话的 `injectionFor` 仍然**只**返回这一类只读提示行
   （条件：`record.from.sid === 自己` 且存在未提示的 followUps）；不是「放开注入」，而是单独的
   一个函数产出、单独的返回分支，其它任何提醒都不进受保护线。
@@ -906,7 +915,9 @@ collab_handoff { target:"ses_…", text, confirm:true }       # 指定目标
        「`- b_xxx 已闭环，提案 <path> 有追加结论（<ts>），请读取文件`」，每次注入 ≤1 行，
        按 `(sid, bid, at)` 去重，所以第二条追加会再提示一次。
     `note` / `steer` / 任何自由文本都进不去这条路；路径必须 realpath 落在该记录 workspace 的
-    `docs/issues/*.md`（拒绝 `..`、绝对路径、软链），校验失败整行不渲染。
+    `docs/issues/*.md`（路径先规范化：`.` / `./` / 重复 `/` 合并；拒绝 `..`、绝对路径、软链），校验失败整行不渲染。
+    0.3.1 起：提示**在注入成功之后才标记**（注入抛错则下一轮重试）；校验失败的条目不标记，
+    `collab_list` 汇总「N 条 followUp 因路径无效未渲染」（每会话按无效条目集合只提示一次）。
     护栏按**目标**判定，其它会话「中转」同样不可达（不存在绕过路径）。
 
 14. **ack 只是「送到了模型面前」，不是「处理完成」**：`seen=…` 表示收方插件把它注入了上下文/被

@@ -1,6 +1,6 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Cross-session collaboration for OpenCode: fifteen native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend, a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt), and a read-only desktop sidebar (experimental).",
   "keywords": [
     "collab",

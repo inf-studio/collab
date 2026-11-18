@@ -3,6 +3,39 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-11-18
+
+> 复核补丁：std-ui 承接方对 0.2.0 的只读复核（H1–H5 5/5 落实）提出 3 条 followUps 硬化。
+> 只改「闭环后追加」这条 pull 通道的**投递时机**与**失败可见性**，不放宽任何越界/软链拒绝，
+> 不改 `followUps` 结构字段、不改 handoff / lease 语义。
+
+### Fixed
+
+- **F1 提示先标记、后投递 → 注入成功才标记**：`chain.followUpHints` 改为**纯查询**
+  （返回 `{ lines, keys }`，不再自己 `markFollowUpSeen`）；`context` hook 在
+  `event.system.push(...)` **成功之后**才标记 keys。注入抛错（宿主异常 / 块没接住）→ 不标记，
+  下一次请求自然重试。旧行为是「先标记后投递」，等于一次没有投递确认的 at-most-once，
+  提示会永久丢失。
+- **F2 无效路径静默丢弃 → 不标记 + 汇总可见**：路径校验失败的 entry 不再进入 keys（不 stamp），
+  因此提案被归档/移动、或 `docs/issues` 变成软链后不再「一次性静默丢弃」；`collab_list` 汇总
+  「N 条 followUp 因路径无效未渲染」（同一会话按无效条目集合去重，集合变化才再提示一次，
+  条目只显示 `bid` + 时间、不回显路径文本）；`collab_followup` 的返回也会提示本单已有的无效条数。
+  另外，写入时只含空白/控制字符的 `issuePath` 现在**直接报错**，不再静默回退到记录自带的提案。
+- **F3 `./docs/issues/x.md` 被拒 → 先规范化**：`validateIssuePath` 改为先拆段、丢空段与 `.`、
+  合并重复 `/`，再判定边界；只拒 `..` 与绝对路径。软链仍拒（`lstat` + `realpath` 前缀校验不变）。
+- 无效路径的 entry 不再占用「每会话每轮 ≤1 行」的提示位——同一单的有效追加照常渲染。
+
+### Added
+
+- 回归 S89（`test/handoff-harness.mjs`，20 项）：注入抛错不标记（下轮仍提示）、
+  无效路径不标记 + `collab_list` 只提示一次 + 修好路径后恢复提示、`./docs/issues/x.md`
+  可渲染并归一化存储、`../x` / 绝对路径 / 软链仍拒。`pnpm test` 现在 = 526 + 12 + 18。
+
+### Changed
+
+- 文档：`docs/collab.md` §11.9.3（标记时机 / 无效路径 / 路径规范化）与 §12.5 #13；
+  `collab_followup` 的工具描述与表格行同步。
+
 ## [0.3.0] - 2026-11-18
 
 > 只读侧边栏：同工作区并行会话不再靠 `ps` 或反复 `collab_locks` 猜「窗口在谁手里」。

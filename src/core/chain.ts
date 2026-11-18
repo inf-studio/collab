@@ -39,7 +39,6 @@ import {
 } from './claim.ts';
 import {
   followUpsOf,
-  markFollowUpSeen,
   nextFollowUpHint,
   readFollowUpSeen
 } from './followup.ts';
@@ -60,6 +59,17 @@ import {
 } from './verdict.ts';
 
 export type { RankResult };
+
+/**
+ * F1 (0.3.1): the follow-up hint is a **query** now — the lines to render and
+ * the seen-keys to stamp. Stamping moved to the `context` hook, after the block
+ * is actually pushed onto the request (a thrown push / a dropped block used to
+ * lose the hint forever).
+ */
+export interface FollowUpHintResult {
+  lines: string[];
+  keys: string[];
+}
 
 /**
  * R7 (0.1.4): what the inbound message declared about itself. `explicit:false`
@@ -108,12 +118,12 @@ export interface HandoffChain extends Grants {
     actor?: string
   ): Promise<BroadcastRecord | undefined>;
   /** R5 (0.1.6): the read-only "proposal has an append" hint(s), one per request. */
-  followUpHints(sessionID: string | undefined): Promise<string[]>;
+  followUpHints(sessionID: string | undefined): Promise<FollowUpHintResult>;
   notifyRequester(
     record: BroadcastRecord,
     input: { text: string; kind?: string; from?: string; threadID?: string }
   ): Promise<{ delivered: boolean; message?: string; reason?: string; error?: unknown }>;
-  injectionFor(sessionID: string | undefined, directory: string | undefined): Promise<string[]>;
+  injectionFor(sessionID: string | undefined, directory: string | undefined): Promise<FollowUpHintResult>;
   extractVerdict(
     sessionID: string | undefined,
     input?: { since?: number; bid?: string }
@@ -678,29 +688,33 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * (never the append's words; see `core/followup.ts`). Deduped per
    * `(sid, bid, at)`, so a second append is shown on the next request, and at
    * most one line per request.
+   *
+   * F1 (0.3.1): **pure query**. It returns the line(s) plus the keys that make
+   * them "seen"; the caller (`hooks/context.ts`) writes those keys only after
+   * the line is really in the request. A failed injection therefore leaves the
+   * hint pending for the next request instead of dropping it.
    */
-  async function followUpHints(sessionID: string | undefined): Promise<string[]> {
+  async function followUpHints(sessionID: string | undefined): Promise<FollowUpHintResult> {
     const me = String(sessionID ?? '');
-    if (!me) return [];
+    if (!me) return { lines: [], keys: [] };
     const seen = await readFollowUpSeen(ctx, me);
-    const out: string[] = [];
     for (const record of allBroadcasts()) {
       if (String(record.from?.sid ?? '') !== me) continue; // requester only
       if (!['done', 'blocked'].includes(String(record.state))) continue;
       if (!followUpsOf(record).length) continue;
       const hint = nextFollowUpHint(record, me, seen, { workspace: record.workspace });
       if (!hint) continue;
-      if (hint.keys.length) await markFollowUpSeen(ctx, me, hint.keys);
-      if (!hint.line) continue; // every append of this bid failed validation
-      out.push(hint.line);
-      break; // 每会话每次注入 ≤1 行
+      // 每会话每次注入 ≤1 行；F2: an all-invalid record no longer consumes the
+      // slot (it returns undefined and the next record still gets its chance).
+      return { lines: [hint.line], keys: hint.keys };
     }
-    return out;
+    return { lines: [], keys: [] };
   }
 
   /**
    * What this session should be told on its next model request, as plain text
-   * lines (the hook wraps them):
+   * lines (the hook wraps them), plus the follow-up keys to stamp **after** the
+   * block was pushed (F1, 0.3.1):
    *   - open broadcasts of its own workspace it has not seen yet (`seenBy`);
    *   - hand-offs it started that are still unresolved and stale (`reminded`).
    * Both are written back so each line is surfaced exactly once per session.
@@ -710,11 +724,14 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
    * "proposal has an append, read the file" line). It is returned *before* the
    * protect guard, and nothing else is ever added to that list.
    */
-  async function injectionFor(sessionID: string | undefined, directory: string | undefined): Promise<string[]> {
+  async function injectionFor(
+    sessionID: string | undefined,
+    directory: string | undefined
+  ): Promise<FollowUpHintResult> {
     const now = Date.now();
-    if (!sessionID || !directory) return [];
+    if (!sessionID || !directory) return { lines: [], keys: [] };
     const info = await sessionInfo(sessionID);
-    if (!info || info.parentID) return []; // children are not group members
+    if (!info || info.parentID) return { lines: [], keys: [] }; // children are not group members
     const config = readConfig();
     // R5 whitelist (computed for every session; the *only* output a protected
     // one will ever get, and a one-shot hint for everybody else).
@@ -824,7 +841,7 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       const current = readBroadcast(record.bid) ?? record;
       writeBroadcast({ ...current, reminded: dedupe([...(current.reminded ?? []), sessionID]) });
     }
-    return [...lines, ...hints];
+    return { lines: [...lines, ...hints.lines], keys: hints.keys };
   }
 
   return {

@@ -1,5 +1,6 @@
 import { allBroadcasts } from '../core/claim.ts';
 import { isAckText } from '../core/ack.ts';
+import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
@@ -204,11 +205,22 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     ].join('\n');
   }
 
-  /** Group broadcasts + unclosed hand-offs, each surfaced once per session. */
-  async function injectChain(event: ContextHookEvent): Promise<string | undefined> {
-    const lines = await chain.injectionFor(event?.sessionID, deps.ctx?.location?.directory);
-    if (!lines.length) return undefined;
-    return [`[collab-handoff] 交接链路提醒（每条只出现一次）:`, ...lines].join('\n');
+  /**
+   * Group broadcasts + unclosed hand-offs, each surfaced once per session.
+   *
+   * F1 (0.3.1): returns the text **and** the follow-up keys to stamp. The stamp
+   * is deliberately left to the caller: it may only happen after the block was
+   * pushed onto the request (`markFollowUpSeen` below), so an injection that
+   * throws — or a host that never surfaces the block — leaves the hint pending
+   * for the next request instead of losing it for good.
+   */
+  async function injectChain(event: ContextHookEvent): Promise<{ text?: string; keys: string[] }> {
+    const injected = await chain.injectionFor(event?.sessionID, deps.ctx?.location?.directory);
+    if (!injected.lines.length) return { keys: [] };
+    return {
+      text: [`[collab-handoff] 交接链路提醒（每条只出现一次）:`, ...injected.lines].join('\n'),
+      keys: injected.keys
+    };
   }
 
   return async function contextHook(event) {
@@ -222,11 +234,17 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       // this reminder exists to report.
       const staleText = await injectStale(event);
       if (staleText) blocks.push(staleText);
-      const chainText = await injectChain(event);
-      if (chainText) blocks.push(chainText);
+      const chainPart = await injectChain(event);
+      if (chainPart.text) blocks.push(chainPart.text);
       const noticeText = await injectReportNotice(event);
       if (noticeText) blocks.push(noticeText);
-      if (blocks.length) event.system.push({ type: 'text', text: blocks.join('\n\n') });
+      if (blocks.length) {
+        event.system.push({ type: 'text', text: blocks.join('\n\n') });
+        // F1 (0.3.1): the follow-up hint is "seen" only now that it is really in
+        // this request. `push` threw → we never get here → the hint stays
+        // pending and the next request retries it (natural retry, no counter).
+        if (chainPart.keys.length) await markFollowUpSeen(deps.ctx, event.sessionID, chainPart.keys);
+      }
     } catch (error) {
       // Never break a model request because of collab bookkeeping.
       log('context hook failed:', (error as Error)?.message ?? error);

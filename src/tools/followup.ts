@@ -5,6 +5,7 @@ import {
   FOLLOWUP_LIMIT,
   appendFollowUp,
   followUpsOf,
+  invalidFollowUps,
   sanitizePathText,
   validateIssuePath
 } from '../core/followup.ts';
@@ -33,6 +34,14 @@ import type { ToolKit } from './shared.ts';
  * workspace, `docs/issues/*.md`, no `..`, no absolute path, no symlink) and
  * sanitised (no newlines/control characters, ≤200 chars) on both write and
  * render. Nothing is delivered to anyone by this tool's write path.
+ *
+ * 0.3.1 (F2/F3, std-ui review):
+ *   - F3: `./docs/issues/x.md`, `docs//issues/x.md` and `docs/issues/./x.md` are
+ *     normalised to `docs/issues/x.md` instead of being refused;
+ *   - F2: an `issuePath` that sanitises to nothing is **refused** rather than
+ *     silently replaced by the record's own path (that fallback stored an entry
+ *     the caller never asked for), and the return names any older, unusable
+ *     appends of the same bid so they are not invisible.
  */
 export function followupTool(_kit: ToolKit): ToolDefinition {
   return {
@@ -43,7 +52,8 @@ export function followupTool(_kit: ToolKit): ToolDefinition {
       'reopen. The conclusion itself must be written into the proposal file; the requester only gets one ' +
       'read-only context line pointing at that file. Only the session that claimed the bid may call it; ' +
       '`issuePath` defaults to the record\'s own proposal and must resolve inside the record workspace under ' +
-      'docs/issues/ (no `..`, no absolute path, no symlink). At most 3 appends per bid. Requires confirm:true; ' +
+      'docs/issues/ (no `..`, no absolute path, no symlink; `.` / `./` and repeated `/` are normalised away, ' +
+      'so `./docs/issues/x.md` is accepted). At most 3 appends per bid. Requires confirm:true; ' +
       'otherwise it only previews.',
     input: jsonInput({
       properties: {
@@ -103,7 +113,17 @@ export function followupTool(_kit: ToolKit): ToolDefinition {
       // R5 hardening: the *structure* that gets rendered must be provably inside
       // the workspace's docs/issues/. Fail-closed: a bad path refuses the whole
       // append, nothing is stored and nothing is rendered.
-      const requestedPath = sanitizePathText(input?.issuePath ?? '') || sanitizePathText(record.issuePath);
+      //
+      // F2 (0.3.1): an explicit `issuePath` that sanitises to nothing (only
+      // control characters / spaces) is **refused** — the old fallback silently
+      // appended the record's own path, i.e. stored an entry nobody asked for.
+      const requested = input?.issuePath === undefined ? '' : sanitizePathText(input.issuePath);
+      if (input?.issuePath !== undefined && !requested) {
+        throw invalid(
+          '拒绝追加：issuePath 为空（只含空白/控制字符）。要追加到记录自带的提案请省略该参数。'
+        );
+      }
+      const requestedPath = requested || sanitizePathText(record.issuePath);
       const check = validateIssuePath(record.workspace, requestedPath);
       if (!check.ok) {
         throw invalid(`拒绝追加：${check.reason}（必须是该交接 workspace 下 docs/issues/<name>.md）`);
@@ -133,12 +153,21 @@ export function followupTool(_kit: ToolKit): ToolDefinition {
       const written = writeBroadcast(
         appendFollowUp(fresh, { issuePath: check.issuePath, at: now, by: me })
       );
+      // F2 (0.3.1): older appends of this bid whose path no longer validates
+      // render nothing (and are no longer stamped). Say so here — this is the
+      // claimant's own view, so naming the count leaks no path text.
+      const unusable = invalidFollowUps(written);
       return {
         content: [
           `已登记闭环后追加：${bid}（第 ${followUpsOf(written).length}/${FOLLOWUP_LIMIT} 条）`,
           `提案: ${check.issuePath}`,
           `state 不变（${written.state}），receipt 不变，未向任何人投递。`,
           `发起方 ${record.from?.sid ?? '(缺失)'} 会在自己的下一次请求里看到一行只读提示（只含路径与时间，不含正文）。`,
+          ...(unusable.length
+            ? [
+                `注意：本单另有 ${unusable.length} 条 followUp 路径无效，不会渲染（未标记；修好路径后下一轮会再试）。`
+              ]
+            : []),
           // The hint is a pointer, not the conclusion: make that unmissable.
           `结论正文请写进 ${check.issuePath} 的 \`## 闭环后追加（${new Date(now).toISOString().slice(0, 10)}）\` 小节。`,
           `摘要: ${truncate(written.title ?? '(untitled)', 60)}`
