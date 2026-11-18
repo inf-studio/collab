@@ -7,7 +7,9 @@
  * from the terminal. Two surfaces, both contributions to the host's slot tree:
  *
  *   - `session.panel` → the `collab.status` panel (`/collab`, `ctrl+shift+l`);
- *   - `sidebar.content` → one summary line, `锁 N · 交接 M · 队列 K`.
+ *   - `sidebar.content` → one summary line, `锁 N · 交接 M · 队列 K`, that
+ *     0.5.1 made *clickable*: a click expands up to four detail rows, a click on
+ *     a row opens the panel, a click on the summary line collapses it again.
  *
  * Deliberate choices:
  *   - **No state of its own**: every number comes from `collab.state.snapshot`
@@ -15,11 +17,13 @@
  *     `collab_locks` / `collab_list` read. The TUI client can reach a *remote*
  *     server, so the panel still works when the terminal is not the server.
  *   - **No write path** (R7): no lock/release button, no queue action. The panel
- *     renders rows; changing collaboration state stays with the tools.
+ *     renders rows; changing collaboration state stays with the tools. The
+ *     sidebar's only action is `panel.open` (R5 of 0.5.1).
  *   - **Poll only while open** (R7): the 2 s timer is created inside the effect
  *     that reads `panel.name`, so the host's own dispose (panel closed, another
  *     plugin's panel selected, plugin disabled) clears it. The sidebar line
- *     refreshes once per mount instead of keeping a second timer alive.
+ *     refreshes once per mount instead of keeping a second timer alive; expanding
+ *     it renders more lines from the same snapshot and polls nothing (R3).
  *   - **Failure is local** (R6): a rejected RPC keeps the last snapshot and adds
  *     a banner; with no snapshot at all the panel falls back to the host's own
  *     session list plus an explicit "unreachable" line — never a blank pane, and
@@ -30,7 +34,7 @@
  *     is one flat list of `<text>` lines and conditionals are lists, not
  *     `<Show>`: an empty list inserts nothing at all.
  */
-import { For, createEffect, createMemo, onCleanup } from 'solid-js';
+import { For, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import { Plugin, usePlugin } from '@opencode/plugin/tui';
 import type { Context, PanelInput } from '@opencode/plugin/tui/context';
@@ -43,6 +47,10 @@ const POLL_MS = 2000;
 const PANEL = 'collab.status';
 /** Fallback width when a host does not report the panel width. */
 const FALLBACK_WIDTH = 80;
+/** R3 (0.5.1): how many detail rows the sidebar's expanded form shows before `+N`. */
+const DETAIL_LIMIT = 4;
+/** The one message for "there is no session to put the panel in" (keymap and sidebar). */
+const NO_SESSION = '先打开一个会话，再看 collab 状态';
 
 /* ------------------------------------------------------------------ formatting */
 
@@ -428,19 +436,79 @@ function StatusPanel(props: { panel: PanelInput }) {
 
 /* --------------------------------------------------------------------- sidebar */
 
+/** One expanded sidebar line: a lease, an open hand-off, or one of my queue places. */
+interface SidebarRow {
+  text: string;
+  tone: Tone;
+}
+
 /**
- * R5: one line in the sidebar — `锁 N · 交接 M · 队列 K`. It refreshes once per
- * mount (the panel owns the timer); unreachable reads `collab: n/a` rather than
- * a stale `0`, which would look like "nothing is happening".
+ * R3 (0.5.1): the rows behind the summary, in the order the panel shows them —
+ * leases, open hand-offs, my owner-queue places. Derived from the snapshot the
+ * panel already reads; no second RPC, no second timer (expanding only renders
+ * more lines).
+ */
+function sidebarRows(data: Snapshot, me: string): SidebarRow[] {
+  const rows: SidebarRow[] = [];
+  for (const lock of data.locks) {
+    const mine = lock.holders.includes(me) || lock.waiting.includes(me);
+    const holders = lock.holders.length ? lock.holders.map(shortSid).join(',') : 'free';
+    const ttl = lock.expiresInMs ? ` · 剩 ${fmtAge(lock.expiresInMs)}` : '';
+    const waited = lock.waiters ? ` · 等 ${lock.waiters}` : '';
+    rows.push({
+      text: `🔒 ${lock.resource} · ${holders}${mine ? ' (我)' : ''}${ttl}${waited}`,
+      tone: leaseTone(lock, me)
+    });
+  }
+  for (const handoff of data.handoffs) {
+    rows.push({
+      text: `→ ${handoff.bid} · ${handoff.state} · ${fmtAge(handoff.ageMs)} · ${shortSid(handoff.from)}`,
+      // `open` = nobody has taken it yet; that is the row worth noticing.
+      tone: handoff.state === 'open' ? 'warning' : 'base'
+    });
+  }
+  for (const item of data.queue) {
+    rows.push({
+      text: `⇢ ${item.queueId} · ${shortSid(item.target)} · ${item.seen ? 'seen' : 'pending'}`,
+      tone: item.seen ? 'muted' : 'base'
+    });
+  }
+  return rows;
+}
+
+/**
+ * R5 (0.4.2) / R3 (0.5.1): the sidebar summary. Collapsed it is exactly the one
+ * line it always was — `锁 N · 交接 M · 队列 K` with a `▸`/`▾` caret; a click on
+ * that line expands up to `DETAIL_LIMIT` detail rows (plus `+N`), a click on a
+ * detail row opens the full `/collab` panel.
+ *
+ * Deliberate choices:
+ *   - **No extra polling**: the mount effect is the same one load it always had;
+ *     expanding only renders lines that come from `store.state.data`.
+ *   - **Mouse may be off**: the host decides whether a TUI gets mouse events. The
+ *     caret and rows are an addition, never the only way in — `/collab` and
+ *     `ctrl+shift+l` stay (R4). A host that pins this slot to one row height
+ *     clips the details, which is also handled by the panel.
+ *   - **Unreachable stays honest**: with no snapshot the expanded row says
+ *     `collab: n/a · 点击打开面板` instead of pretending "no activity".
  */
 function SidebarSummary(props: { sessionID: string }) {
   const ctx = usePlugin();
   const store = storeFor(ctx);
+  const [expanded, setExpanded] = createSignal(false);
 
   createEffect(() => {
     store.watch(props.sessionID);
     void store.load();
   });
+
+  const toggle = () => setExpanded(value => !value);
+
+  const openPanel = () => {
+    if (!ctx.ui.panel.open(PANEL)) {
+      ctx.ui.toast.show({ message: NO_SESSION, variant: 'warning' });
+    }
+  };
 
   const line = () => {
     const data = store.state.data;
@@ -448,7 +516,40 @@ function SidebarSummary(props: { sessionID: string }) {
     return `锁 ${data.locks.length} · 交接 ${data.handoffs.length} · 队列 ${data.queue.length}`;
   };
 
-  return <text fg={color(ctx, store.state.error ? 'danger' : 'muted')}>{line()}</text>;
+  const details = (): SidebarRow[] => {
+    const data = store.state.data;
+    if (!data) {
+      return [{ text: store.state.loading ? 'collab: …' : 'collab: n/a · 点击打开面板', tone: 'muted' }];
+    }
+    const rows = sidebarRows(data, props.sessionID);
+    if (!rows.length) return [{ text: '无协作活动 · 点击打开面板', tone: 'muted' }];
+    const shown = rows.slice(0, DETAIL_LIMIT);
+    if (rows.length > DETAIL_LIMIT) {
+      shown.push({ text: `+${rows.length - DETAIL_LIMIT}`, tone: 'muted' });
+    }
+    return shown;
+  };
+
+  const rows = () => (expanded() ? details() : []);
+
+  return (
+    <box flexDirection="column">
+      <box onMouseDown={toggle}>
+        <text wrapMode="none" fg={color(ctx, store.state.error ? 'danger' : 'muted')}>
+          {`${expanded() ? '▾' : '▸'} ${line()}`}
+        </text>
+      </box>
+      <For each={rows()}>
+        {row => (
+          <box onMouseDown={openPanel}>
+            <text wrapMode="none" fg={color(ctx, row.tone)}>
+              {`  ${row.text}`}
+            </text>
+          </box>
+        )}
+      </For>
+    </box>
+  );
 }
 
 /* ---------------------------------------------------------------------- plugin */
@@ -491,7 +592,7 @@ export default Plugin.define({
           palette: true,
           run: () => {
             if (!ctx.ui.panel.open(PANEL)) {
-              ctx.ui.toast.show({ message: '先打开一个会话，再看 collab 状态', variant: 'warning' });
+              ctx.ui.toast.show({ message: NO_SESSION, variant: 'warning' });
             }
           }
         }

@@ -1,6 +1,6 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Cross-session collaboration for OpenCode: seventeen native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend, a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt), a pull-only review queue for protected sessions, automatic (reversible) archival of spawned sessions, and read-only status views for the desktop sidebar and the TUI (experimental).",
   "keywords": [
     "collab",
@@ -42,7 +42,7 @@
   "scripts": {
     "build": "vp pack && vp build -c vite.gui.config.ts && vp build -c vite.tui.config.ts",
     "prepublishOnly": "pnpm run build",
-    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/snapshot-shape.mjs && node --conditions=browser test/tui-render.mjs",
+    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/snapshot-shape.mjs && node --conditions=browser test/tui-render.mjs && node --conditions=browser test/gui-entry.mjs",
     "typecheck": "tsc --noEmit",
     "check:skill": "node scripts/check-skill.mjs"
   },

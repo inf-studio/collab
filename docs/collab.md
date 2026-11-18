@@ -723,7 +723,7 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
-### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2，experimental）
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1，experimental）
 
 > GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
 > `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
@@ -769,23 +769,26 @@ ctx.client.rpc(CollabState).snapshot({})                ctx.client.rpc(CollabSta
 
 | 位置 | 内容 |
 | --- | --- |
+| 命令 `collab.open`（0.5.1） | 命令面板与 **Settings → Shortcuts** 可见；默认键 `mod+shift+l`（与 TUI 的 `ctrl+shift+l` 同义），`/collab` 也可触发；`enabled` 跟随当前路由到的会话，仅在会话里可用；执行 = `ctx.layout.open("collab:main", session)`。**只有打开面板这一个动作** |
+| 会话头计数条（0.5.1，`session.header` 槽位） | `锁 N · 交接 M · 队列 K`（与面板**同一个 store / 同一次 2 s 轮询**），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。0.5.1 起这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空、`队列` 会是个结构性的假 0 |
 | 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
-| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时暂停**（`pageHidden()`），恢复可见后继续；面板与 pill 共用一个轮询与一份 store |
+| 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时暂停**（`pageHidden()`），恢复可见后继续；面板、pill、计数条共用一个轮询与一份 store |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
 
-**TUI UI**（0.4.2）：
+**TUI UI**（0.4.2 / 0.5.1）：
 
 | 位置 | 内容 |
 | --- | --- |
 | `/collab`（`ctrl+shift+l`，也在命令面板里） | 打开 `session.panel` 里的 **`collab.status`** 面板；没有打开的会话时提示「先打开一个会话」 |
 | 面板 | 三块等宽表格：`资源租约`（resource / mode / holders / 剩余 TTL / waiters）、`未闭环交接`（bid / state / age / from）、`受保护目标队列`（queueId / target / age / status）。窄终端（<48 列）每个条目拆成两行 |
-| 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`；RPC 不可达时 `collab: n/a`（不假装 0） |
-| 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染） |
+| 侧栏摘要（0.5.1） | 一行 `▸ 锁 N · 交接 M · 队列 K`；**点击摘要行**就地展开（`▾`）最多 4 行明细（锁 → 交接 → 队列，超出的以 `+N` 结尾），**点击明细行**打开 `/collab` 面板，再点摘要行折叠。RPC 不可达时 `collab: n/a`（不假装 0），展开行读 `collab: n/a · 点击打开面板` |
+| 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染）。侧栏只在挂载时 load 一次，**展开/折叠不新增轮询** |
 | 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
 
 **只读**：GUI 面板与 TUI 面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
-（以及 `skills/collab-coordination` 的规程）；TUI 面板只有渲染，没有写路径。
+（以及 `skills/collab-coordination` 的规程）；TUI 面板只有渲染，没有写路径。0.5.1 新增的两个桌面入口
+（命令、会话头计数条）与 TUI 的展开行同样只有一个动作：**打开面板**。
 
 **构建**：
 
@@ -832,13 +835,38 @@ list: input => (input.open.includes(PANEL_TAB) ? [tab] : [])                    
 2) 开关是否打开？         Desktop: Settings → Extensions → Plugins → collab 的 GUI 开关
    → 关掉只影响 GUI/TUI 的视图，server 工具仍在（也可在 opencode.json 里 autoOpen:false 验证）
 3) 入口在哪？
-   Desktop：会话右侧栏的「+」菜单 →「打开协作面板」（0.4.2 起首次进入会自动出现；关掉后可从这里找回）
-   TUI    ：/collab（或 ctrl+shift+l），再不行用 collab_locks / collab_list 的文本视图
+   Desktop：命令面板搜「collab」/ mod+shift+l / 会话头计数条 / 会话右侧栏的「+」菜单 →「打开协作面板」
+   TUI    ：/collab（或 ctrl+shift+l），或点侧栏摘要行展开；再不行用 collab_locks / collab_list 的文本视图
 ```
 
 远端部署（Desktop 连 Linux server）时，GUI bundle 由 server 提供：
 `GET /api/plugin/gui?id=collab` 返回 `dist/gui-experimental.cjs`。这条请求 200 但窗口里没标签 → 是 §11.11.1
 的入口判定问题；这条请求本身 404/500 → 先修 server 侧（插件未加载或产物缺失）。
+
+#### 11.11.3 入口（0.5.1）：命令、会话头计数条、侧栏折叠
+
+0.4.2 仍然有两处「存在但看不见」：Desktop 只注册了 `Panel` / `MenuItem` / 条件出现的 `ComposerPill`，
+**没有 `Command`**——命令面板搜不到、没有快捷键，右侧面板区没打开时用户看不到任何 collab 痕迹；
+TUI 的 `sidebar.content` 只是一行静态 `<text>`，没有点击/展开。0.5.1 只在宿主**已有的**槽位里补入口，
+不伪造左侧应用侧栏（GUI SDK 没有这个槽位）：
+
+| 面 | 补的东西 | 为什么在这个槽位 |
+| --- | --- | --- |
+| Desktop | `Command { id:"open", bind:"mod+shift+l", slash:{name:"collab"}, section:"navigation" }` | 宿主把命令发布成 `collab.open`，命令面板与 Settings → Shortcuts 都可见；`bind` 只是默认值，用户可改 |
+| Desktop | `Slot at "session.header"` → `锁 N · 交接 M · 队列 K` | 会话标题行本来就一直渲染，无需用户先打开任何面板；读的是面板**同一个** store |
+| TUI | 摘要行 `onMouseDown` 展开/折叠 + 明细行 `onMouseDown` 开面板 | OpenTUI 的 renderable 支持鼠标事件，宿主负责把事件派发到命中的行 |
+
+两条降级路径（都不抛错）：
+
+1. **宿主没开鼠标**（或终端不支持）：TUI 的 `▸`/`▾` 与明细行点不了，`/collab` 与 `ctrl+shift+l` 照旧可用；
+   Desktop 侧的命令（键盘 / `/collab`）与计数条（键盘可达的按钮）也都不依赖鼠标。
+2. **宿主把 `sidebar.content` 固定为一行高度**：展开内容会被**裁剪**（不是崩溃、不是覆盖别的行），
+   用户仍看到 `▾` 摘要行与正确数字；此时请用 `/collab` 看全量明细。这是宿主的槽位高度策略，
+   插件侧不做高度协商（那会越过槽位边界）。
+
+不变的部分：`Panel` 的 `list` / `autoOpen` 语义、`MenuItem.opened === 'open'` 的判定、`ComposerPill`
+的显示条件与 0.4.2 完全一致；快照契约（§11.11 开头）**没有新增字段**，也没有新增轮询——计数条与展开行
+都从已有 store / 已有快照派生。
 
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）

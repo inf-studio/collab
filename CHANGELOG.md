@@ -3,6 +3,67 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.1] - 2026-11-18
+
+> 现象（0.5.0）：侧栏方案仍有两次「存在但看不见」。**Desktop** 只注册了 `Panel` + `MenuItem` +
+> 条件出现的 `ComposerPill`，**没有 `Command`** —— 命令面板搜不到、没有快捷键，右侧面板区没打开时
+> 用户完全看不到任何 collab 痕迹；GUI SDK 也没有「左侧应用侧栏」槽位，不能伪造。**TUI** 的
+> `sidebar.content` 只是一行静态 `<text>`，没有点击/展开（宿主 MCP 那种折叠是宿主自己画的）。
+> owner 决策：Desktop 走「命令 + 会话头计数条」，TUI 走「点击展开 + 点行跳面板」；**全部只读**。
+
+### Added
+
+- **R1 Desktop 命令 `collab.open`（`src/gui.tsx`）**：`id:"open"`、`bind:"mod+shift+l"`（与 TUI 的
+  `ctrl+shift+l` 同义）、`slash:{name:"collab"}`、`section:"navigation"`、`keywords` 含中英文
+  （`collab lease lock handoff queue 协作 租约 交接 队列`）；`enabled` 跟随当前路由到的会话；
+  `run` 只做 `ctx.layout.open("collab:main", session)`。宿主发布为 `collab.open`，命令面板与
+  Settings → Shortcuts 都可见，`bind` 可被用户改。**不新增任何写路径。**
+- **R2 Desktop 会话头计数条**：`ctx.add(Slot, { at:"session.header", order:20 })` → `锁 N · 交接 M · 队列 K`，
+  数据来自面板**同一个** `sharedStore`（同一次 2 s 轮询，**不新增 RPC 流**）；点击打开同一个面板；
+  **无快照时不渲染**（不显示 `0`），`store.state.error` 时显示 `collab: n/a` 且仍可点击（面板里有横幅与原因）。
+  样式进既有 `Style`（`.collab-counts`：muted / 12px / 无边框按钮重置 / `cursor:pointer`，不撑高标题行）。
+  i18n 新增 `command.open` / `command.description` / `command.group` / `header.counts` / `header.title` /
+  `header.unreachable`（en + zh）。同时 GUI 的轮询 key 改为含**路由会话 id**、快照请求带 `session: <路由会话>`：`queue` 是「本人提交给
+  受保护会话的请求」，不传 `session` 时契约规定返回空数组——否则 `队列` 永远是个假 0（仍是同一次调用，
+  不是第二条流；`sessions` / `locks` / `handoffs` 不受影响）。
+- **R3 TUI 侧栏折叠（`src/tui.tsx`）**：摘要行默认一行（`▸`）；**点击摘要行**就地展开（`▾`）最多 4 行明细
+  （锁 → 交接 → 队列，超出的以 `+N` 结尾，`wrapMode:"none"` 保证一行一条）；**点击明细行** →
+  `ctx.ui.panel.open("collab.status")`（返回 `false` 时沿用既有 toast「先打开一个会话，再看 collab 状态」）；
+  再点摘要行折叠。展开行全部由 `store.state.data` 派生（复用 `leaseTone` / `fmtAge` / `shortSid`），
+  **展开/折叠都不调用 `load()`**，侧栏仍是挂载时一次 load。无数据时展开显示
+  `collab: n/a · 点击打开面板`，空快照显示 `无协作活动 · 点击打开面板`。
+- **R4 兜底**：鼠标不可用（宿主未开鼠标）时 `/collab` 与 `ctrl+shift+l` 照旧可用；宿主把
+  `sidebar.content` 固定成一行高度时展开内容被**裁剪**而不崩溃——文档写明（`docs/collab.md` §11.11.3）。
+- **R5 只读**：本版不新增任何写动作——命令、计数条、展开行、明细行都只做「打开面板」；快照契约
+  （`src/rpc.ts`）**无新增字段**。
+
+### 测试
+
+- `test/gui-entry.mjs`（新，21 项）：**直接 require 构建产物** `dist/gui-experimental.cjs`（需
+  `node --conditions=browser`，并给一个只有 `addEventListener` 的 `document` 垫片——bundle 在加载期
+  注册 Solid 的事件委托；另需把 `@opencode/plugin/gui` 的裸 specifier 映射到文件，因为该包只声明
+  `import` 条件）——`Panel`/`MenuItem`/`ComposerPill` 未回退；`Command` 的 id/bind/slash/section/group/
+  enabled，`run` 的 `layout.open("collab:main", session)`（无会话时 `enabled:false` + no-op + 不抛）；
+  `Slot.at === "session.header"` 且带 render；两个 locale 的 6 个新键与 `header.counts` 三参数插值；
+  「严格 context」证明 setup 只读 `add/t/layout/sessions/client`（无写 API、注册时零 RPC）；
+  打开会话后仍只有 **1 次**轮询且带 `session`（`queue` 不是默认 0）；切换路由会话会**立即**重载
+  （轮询 key 含会话 id，不会拿上一会话的 queue 停 2 s——该断言做过变异验证：把 key 改回布尔即失败）。
+- `test/tui-render.mjs` **17 → 29 项**：用 `setup.mockMouse.click(x, y)` 发**真实鼠标序列**
+  （渲染器自己命中测试，不是手动调 `onMouseDown`）——折叠 1 行含 `▸`；点击后 `▾` + 4 行明细的**顺序**
+  （🔒 → → → ⇢）；点明细行 `panel.open("collab.status")`；再点折叠回 1 行；展开/折叠前后 `calls` 计数不变；
+  6 个租约 → 4 行 + `+2`；空快照 → `无协作活动 · 点击打开面板`；`panel.open` 返回 `false` → 既有 toast
+  且折叠仍可用；无快照展开 → `collab: n/a · 点击打开面板`（不是「无协作活动」）。
+- 既有 638 + 12 + 35 全绿（现为 **638 + 12 + 35 + 29 + 21**）。
+
+### 文档
+
+- README「状态视图」：入口表补 Desktop 命令 / `mod+shift+l` / 会话头计数条与 TUI 点击展开；新增降级说明；
+  排查第 3 步补命令与计数条；版本兼容表加 `0.5.1` 行；开发段的回归计数更新。
+- `docs/collab.md`：§11.11 GUI/TUI 表格重写，新增 **§11.11.3「入口（0.5.1）」**（槽位选择的理由、
+  两条降级路径与宿主裁剪风险）。
+- `skills/collab/SKILL.md`：状态视图一段补一句入口（含点击展开）。
+- 版本 `0.5.0` → `0.5.1`（`package.json` + `PLUGIN_VERSION`）。
+
 ## [0.5.0] - 2026-11-18
 
 > 现象：`collab_broadcast` 在没人可接时拉起的 bootstrap 会话（`claim.kind="spawn"`）只为一单而存在，

@@ -20,6 +20,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 | [State Management](./state-management.md) | Local state, global state, server state | To fill |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Type Safety](./type-safety.md) | Type patterns, validation | To fill |
+| [OpenCode 插件 UI](./opencode-plugin-ui.md) | GUI 槽位边界、单一轮询、TUI 侧栏折叠、测试与变异验证 | Filled (0.5.1) |
 
 ---
 

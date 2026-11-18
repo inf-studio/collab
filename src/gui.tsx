@@ -23,15 +23,18 @@
 import { For, Show, createMemo, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import {
+  Command,
   ComposerPill,
   MenuItem,
   Panel,
   Plugin,
+  Slot,
   Style,
   createKeyed,
   usePlugin,
   type ComposerPillView,
   type Context,
+  type MountedSession,
   type PanelTab
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
@@ -100,8 +103,8 @@ interface SnapshotStore {
 }
 
 /**
- * The store is created once per window, in `setup`, and shared by the panel and
- * the pill: one RPC per tick, not one per contribution.
+ * The store is created once per window, in `setup`, and shared by the panel, the
+ * pill and the header counts: one RPC per tick, not one per contribution.
  */
 function createSnapshotStore(ctx: Context): SnapshotStore {
   const [state, setState] = createStore<SnapshotState>({ at: 0, loading: true });
@@ -114,7 +117,14 @@ function createSnapshotStore(ctx: Context): SnapshotStore {
     try {
       // Read `ctx.client` here, not when the store is built: the desktop app
       // replaces it when its server restarts.
-      const reply = await ctx.client.rpc(CollabState).snapshot({});
+      //
+      // 0.5.1: name the routed session. `queue` is the *requester's* owner-queue
+      // ("what did I ask of a protected session?"), and the server returns an
+      // empty list without a `session` — i.e. it would look like "0" forever.
+      // It narrows only `queue`; sessions / leases / hand-offs are unchanged,
+      // and it is the same single call, not a second stream.
+      const current = ctx.sessions.current();
+      const reply = await ctx.client.rpc(CollabState).snapshot(current ? { session: current.id } : {});
       if (disposed) return;
       const next = reply as Snapshot | undefined;
       if (!next || typeof next !== 'object') throw new Error('empty snapshot');
@@ -211,6 +221,9 @@ const CSS = `
 .collab-error-title{font-weight:600;}
 .collab-empty{opacity:.6;padding:2px 0;}
 .collab-footer{font-size:11px;opacity:.5;border-top:1px solid color-mix(in srgb, currentColor 12%, transparent);padding-top:8px;}
+.collab-counts{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1;padding:0 4px;margin:0;border-radius:4px;opacity:.6;white-space:nowrap;cursor:pointer;}
+.collab-counts:hover{opacity:.9;background:color-mix(in srgb, currentColor 10%, transparent);}
+.collab-counts:focus-visible{outline:1px solid currentColor;outline-offset:1px;opacity:.9;}
 `;
 
 /* ----------------------------------------------------------------------- rows */
@@ -332,6 +345,44 @@ function PanelView(props: { session: { id: string } }) {
   );
 }
 
+/* ---------------------------------------------------------------- header counts */
+
+/**
+ * R2 (0.5.1): the always-visible entry point. One muted line in the session
+ * header carries the same three numbers as the panel, read from the same
+ * `sharedStore` — no second RPC stream, no second timer.
+ *
+ * It renders **nothing** while there is no snapshot and no error: a `0 · 0 · 0`
+ * row would claim "no collaboration activity" when the real answer is "not
+ * asked yet". An unreachable server reads `collab: n/a` (the honest answer) and
+ * still opens the panel, whose banner carries the reason.
+ */
+function HeaderCounts(props: { session: MountedSession }) {
+  const ctx = usePlugin();
+  const store = storeFor(ctx);
+
+  const label = (): string | undefined => {
+    if (store.state.error) return ctx.t('header.unreachable');
+    const data = store.state.data;
+    if (!data) return undefined;
+    return ctx.t('header.counts', {
+      locks: String(data.locks.length),
+      handoffs: String(data.handoffs.length),
+      queue: String(data.queue?.length ?? 0)
+    });
+  };
+
+  const open = () => ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, props.session);
+
+  return (
+    <Show when={label()}>
+      <button type="button" class="collab-counts" title={ctx.t('header.title')} onClick={open}>
+        {label()}
+      </button>
+    </Show>
+  );
+}
+
 /* --------------------------------------------------------------------- plugin */
 
 export default Plugin.define({
@@ -361,7 +412,13 @@ export default Plugin.define({
       'pill.waiting.one': '{{count}} waiting',
       'pill.waiting.other': '{{count}} waiting',
       'pill.remaining': 'left {{ttl}}',
-      'pill.position': 'queue #{{position}}'
+      'pill.position': 'queue #{{position}}',
+      'command.open': 'Open collab panel',
+      'command.description': 'Read-only: leases, open hand-offs, and the owner queue',
+      'command.group': 'Collab',
+      'header.counts': '{{locks}} locks · {{handoffs}} hand-offs · {{queue}} queue',
+      'header.title': 'Collab status — open the panel',
+      'header.unreachable': 'collab: n/a'
     },
     zh: {
       'panel.title': '协作',
@@ -384,7 +441,13 @@ export default Plugin.define({
       'pill.held.other': '锁 {{count}}',
       'pill.waiting.other': '等待 {{count}}',
       'pill.remaining': '剩余 {{ttl}}',
-      'pill.position': '第 {{position}} 位'
+      'pill.position': '第 {{position}} 位',
+      'command.open': '打开协作面板',
+      'command.description': '只读：资源租约 / 未闭环交接 / 受保护目标队列',
+      'command.group': 'Collab',
+      'header.counts': '锁 {{locks}} · 交接 {{handoffs}} · 队列 {{queue}}',
+      'header.title': '协作状态 — 打开面板',
+      'header.unreachable': 'collab: n/a'
     }
   },
 
@@ -400,7 +463,13 @@ export default Plugin.define({
     // background. `createKeyed` gives the run an owner, so the timer ends when
     // the condition stops holding and when the plugin goes away.
     createKeyed(
-      () => !pageHidden() && ctx.sessions.list().length > 0,
+      () => {
+        // Keying on the routed session, not just "a session exists": `queue` is
+        // per-requester, so switching sessions must reload at once instead of
+        // showing the previous session's queue until the next tick.
+        if (pageHidden() || ctx.sessions.list().length === 0) return false;
+        return ctx.sessions.current()?.id ?? '';
+      },
       () => {
         void store.load();
         const timer = setInterval(() => void store.load(), POLL_MS);
@@ -456,6 +525,36 @@ export default Plugin.define({
           if (current) ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, current, { background: true });
         }
       };
+    });
+
+    // R1 (0.5.1): the panel had a + menu entry and an auto-open tab, but nothing
+    // in the command palette and no shortcut — a user whose side region was
+    // closed had no way to look. One read-only command: it only *opens* the
+    // panel (R5). The host publishes it as `collab.open`, so it shows up in the
+    // palette and in Settings → Shortcuts; `enabled` follows the routed session.
+    ctx.add(Command, (): Command => ({
+      id: 'open',
+      title: ctx.t('command.open'),
+      description: ctx.t('command.description'),
+      keywords: 'collab lease lock handoff queue 协作 租约 交接 队列',
+      group: ctx.t('command.group'),
+      section: 'navigation',
+      bind: 'mod+shift+l',
+      slash: { name: 'collab' },
+      enabled: !!ctx.sessions.current(),
+      run: () => {
+        const session = ctx.sessions.current();
+        if (session) ctx.layout.open(`${ctx.id}:${PANEL_TAB}`, session);
+      }
+    }));
+
+    // R2 (0.5.1): a permanent, quiet presence in the session header. It shares
+    // the panel's store (one poll for the whole window) and only ever opens the
+    // panel; with nothing to report it renders nothing at all.
+    ctx.add(Slot, {
+      at: 'session.header',
+      order: 20,
+      render: input => <HeaderCounts session={input.session} />
     });
 
     // Composer pill: this session's own leases and queue places (R3). Read-only —

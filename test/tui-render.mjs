@@ -21,7 +21,11 @@
  *   4. another plugin's panel renders nothing **and starts no poll**;
  *   5. the poll follows the panel: ticks while open, stops when the panel name
  *      changes away (R7), and resumes when it comes back;
- *   6. `sidebar.content` prints `锁 N · 交接 M · 队列 K` from the same store.
+ *   6. `sidebar.content` prints `锁 N · 交接 M · 队列 K` from the same store;
+ *   7. 0.5.1 (R3): the sidebar summary **clicked** expands to detail rows, a
+ *      detail row clicked opens `/collab`, the summary clicked again folds it —
+ *      real mouse events through the renderer (no prop poking), and expanding
+ *      adds no RPC call.
  */
 import { createSignal } from 'solid-js';
 import { createComponent, testRender } from '@opentui/solid';
@@ -68,11 +72,13 @@ const SNAPSHOT = {
   queue: [{ queueId: 'q_1_aaaa', target: 'ses_protected', ageMs: 30_000, summary: '请复核', seen: false }]
 };
 
-/** A host double: only the fields the plugin reads, plus a call counter. */
-function harness({ fail = false, sessions = [] } = {}) {
+/** A host double: only the fields the plugin reads, plus call counters. */
+function harness({ fail = false, sessions = [], snapshot = SNAPSHOT, panelOpen = true } = {}) {
   const slots = {};
   const layers = [];
   const calls = [];
+  const opened = [];
+  const toasts = [];
   const context = {
     options: {},
     location: { directory: '/data/project/collab' },
@@ -82,7 +88,7 @@ function harness({ fail = false, sessions = [] } = {}) {
         snapshot: async input => {
           calls.push({ definition: definition?.id, input });
           if (fail) throw new Error('connect ECONNREFUSED 10.0.0.5:4096');
-          return SNAPSHOT;
+          return snapshot;
         }
       })
     },
@@ -108,11 +114,22 @@ function harness({ fail = false, sessions = [] } = {}) {
         slots[claim.append ?? claim.prepend ?? claim.replace] = claim.render;
         return () => {};
       },
-      panel: { open: () => true, close: () => {}, current: () => undefined },
-      toast: { show: () => {} }
+      panel: {
+        open: name => {
+          opened.push(name);
+          return panelOpen;
+        },
+        close: () => {},
+        current: () => undefined
+      },
+      toast: {
+        show: message => {
+          toasts.push(message);
+        }
+      }
     }
   };
-  return { context, slots, layers, calls };
+  return { context, slots, layers, calls, opened, toasts };
 }
 
 function panelInput(over = {}) {
@@ -307,6 +324,188 @@ const sidebarOffline = await mount(sideOffline.context, () =>
 expect('R6 an unreachable server reads collab: n/a in the sidebar', sidebarOffline.frame.includes('collab: n/a'));
 await sidebarOffline.setup.dispose();
 await sideOfflineCleanup();
+
+/* ------------------------------------ 7. sidebar: click to expand (0.5.1, R3) */
+
+const SIDEBAR_SIZE = { width: 46, height: 8 };
+const frameOf = async setup => {
+  await setup.renderOnce();
+  return setup.captureCharFrame();
+};
+const click = async (setup, x, y) => {
+  await setup.mockMouse.click(x, y);
+  await sleep(80);
+};
+
+const clickable = harness();
+const clickableCleanup = await plugin.setup(clickable.context);
+const clickableSide = await mount(
+  clickable.context,
+  () => clickable.slots['sidebar.content']({ sessionID: 'ses_probe' }),
+  SIDEBAR_SIZE
+);
+const collapsedFrame = clickableSide.frame;
+const sidebarLines = collapsedFrame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+
+expect(
+  'R3 the sidebar starts collapsed: one line, a ▸ caret, no detail rows',
+  sidebarLines.length === 1 &&
+    sidebarLines[0].startsWith('▸') &&
+    sidebarLines[0].includes('锁 2 · 交接 1 · 队列 1') &&
+    !collapsedFrame.includes('🔒'),
+  sidebarLines.join(' | ')
+);
+
+const callsBeforeExpand = clickable.calls.length;
+await click(clickableSide.setup, 2, 0);
+const expandedFrame = await frameOf(clickableSide.setup);
+const expandedLines = expandedFrame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+
+expect(
+  'R3 clicking the summary line expands it: ▾ plus the detail rows',
+  expandedLines[0].startsWith('▾') &&
+    expandedFrame.includes('named:test-window') &&
+    expandedFrame.includes('named:build') &&
+    expandedFrame.includes('b_00000000a1') &&
+    expandedFrame.includes('q_1_aaaa'),
+  expandedLines.length ? `${expandedLines.length} lines` : 'empty'
+);
+expect(
+  'R3 the details go leases → hand-offs → queue, at most 4 rows',
+  expandedLines.length === 1 + 4 &&
+    /🔒 named:test-window/.test(expandedLines[1]) &&
+    /🔒 named:build/.test(expandedLines[2]) &&
+    /→ b_00000000a1/.test(expandedLines[3]) &&
+    /⇢ q_1_aaaa/.test(expandedLines[4]),
+  expandedLines.slice(1).join(' | ')
+);
+expect(
+  'R3 expanding renders from the same snapshot: no extra load()',
+  clickable.calls.length === callsBeforeExpand,
+  `${callsBeforeExpand} → ${clickable.calls.length} calls`
+);
+
+await click(clickableSide.setup, 3, 2);
+expect(
+  'R3 clicking a detail row opens the /collab panel',
+  clickable.opened.length === 1 && clickable.opened[0] === 'collab.status',
+  JSON.stringify(clickable.opened)
+);
+
+await click(clickableSide.setup, 2, 0);
+const foldedFrame = await frameOf(clickableSide.setup);
+const foldedLines = foldedFrame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+expect(
+  'R3 clicking the summary again folds it back to one line',
+  foldedLines.length === 1 && foldedLines[0].startsWith('▸') && !foldedFrame.includes('🔒'),
+  foldedLines.join(' | ')
+);
+expect(
+  'R3 folding is free too: still the same number of loads',
+  clickable.calls.length === callsBeforeExpand,
+  `${callsBeforeExpand} → ${clickable.calls.length} calls`
+);
+await clickableSide.setup.dispose();
+await clickableCleanup();
+
+// 6 leases → 4 rows + `+2`: the overflow marker, not a truncated list that
+// pretends everything fits.
+const overflow = harness({
+  snapshot: {
+    ...SNAPSHOT,
+    locks: Array.from({ length: 6 }, (_, index) => ({
+      ...SNAPSHOT.locks[0],
+      resource: `named:window-${index + 1}`,
+      waiters: 0,
+      waiting: []
+    })),
+    handoffs: [],
+    queue: []
+  }
+});
+const overflowCleanup = await plugin.setup(overflow.context);
+const overflowSide = await mount(
+  overflow.context,
+  () => overflow.slots['sidebar.content']({ sessionID: 'ses_probe' }),
+  SIDEBAR_SIZE
+);
+await click(overflowSide.setup, 2, 0);
+const overflowFrame = await frameOf(overflowSide.setup);
+const overflowLines = overflowFrame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+expect(
+  'R3 more than 4 rows end with a +N line instead of growing without bound',
+  overflowLines.length === 1 + 4 + 1 &&
+    overflowFrame.includes('named:window-4') &&
+    !overflowFrame.includes('named:window-5') &&
+    overflowLines[5].trim() === '+2',
+  overflowLines.map(line => line.trim()).join(' | ')
+);
+await overflowSide.setup.dispose();
+await overflowCleanup();
+
+// Degradations that must not throw: (a) no data at all, (b) the panel cannot be
+// opened (no session in the host yet).
+const emptySide = harness({ snapshot: { ...SNAPSHOT, locks: [], handoffs: [], queue: [] } });
+const emptySideCleanup = await plugin.setup(emptySide.context);
+const emptyMounted = await mount(
+  emptySide.context,
+  () => emptySide.slots['sidebar.content']({ sessionID: 'ses_probe' }),
+  SIDEBAR_SIZE
+);
+await click(emptyMounted.setup, 2, 0);
+const emptyFrame = await frameOf(emptyMounted.setup);
+expect(
+  'R3 an empty snapshot expands to an explicit "no activity" row (not a blank pane)',
+  emptyFrame.includes('▾') && emptyFrame.includes('无协作活动 · 点击打开面板'),
+  emptyFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await emptyMounted.setup.dispose();
+await emptySideCleanup();
+
+const refused = harness({ panelOpen: false });
+const refusedCleanup = await plugin.setup(refused.context);
+const refusedMounted = await mount(
+  refused.context,
+  () => refused.slots['sidebar.content']({ sessionID: 'ses_probe' }),
+  SIDEBAR_SIZE
+);
+await click(refusedMounted.setup, 2, 0);
+await click(refusedMounted.setup, 3, 1);
+expect(
+  'R4 a host that refuses panel.open gets the existing toast, and nothing throws',
+  refused.opened.length === 1 &&
+    refused.toasts.length === 1 &&
+    /先打开一个会话/.test(refused.toasts[0]?.message ?? ''),
+  JSON.stringify(refused.toasts)
+);
+await click(refusedMounted.setup, 2, 0);
+const refusedFrame = await frameOf(refusedMounted.setup);
+expect(
+  'R4 the summary still folds after a refused open (the caret keeps working)',
+  refusedFrame.includes('▸') && !refusedFrame.includes('🔒'),
+  refusedFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await refusedMounted.setup.dispose();
+await refusedCleanup();
+
+const offlineSide = harness({ fail: true });
+const offlineSideCleanup = await plugin.setup(offlineSide.context);
+const offlineMounted = await mount(
+  offlineSide.context,
+  () => offlineSide.slots['sidebar.content']({ sessionID: 'ses_probe' }),
+  SIDEBAR_SIZE
+);
+await click(offlineMounted.setup, 2, 0);
+const offlineExpanded = await frameOf(offlineMounted.setup);
+expect(
+  'R3 expanded with no snapshot says collab: n/a, not "no activity"',
+  offlineExpanded.includes('▾') &&
+    offlineExpanded.includes('collab: n/a · 点击打开面板') &&
+    !offlineExpanded.includes('无协作活动'),
+  offlineExpanded.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await offlineMounted.setup.dispose();
+await offlineSideCleanup();
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

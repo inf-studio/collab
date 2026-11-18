@@ -44,6 +44,9 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 > 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）的规程在同工作区 skill
 > `collab-coordination`；需要看**全局**（谁持有/谁排队/哪些交接未闭环）时打开 OpenCode Desktop
 > 侧栏的 `collab` 面板（0.3.0 起，只读，与 `collab_locks` 同一数据源）。
+>
+> 入口（0.5.1，全部只读）：Desktop 用命令面板的 `collab.open` / `mod+shift+l` / `/collab`，或点会话头部的
+> `锁 N · 交接 M · 队列 K` 计数条；TUI 用 `/collab`（`ctrl+shift+l`），或点侧栏摘要行展开明细、再点明细行开面板。
 
 ## 一点五、送达与闭环后追加（0.1.6）
 
