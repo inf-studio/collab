@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态/加急/冻结各一组）
+### 11.2 二十一个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态/thread 聚合/加急/冻结各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -267,7 +267,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
-| `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。带 `origin` 的转发单还会显示 `origin=ses_… @ <dir>`（§11.16）。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
+| `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。带 `origin` 的转发单还会显示 `origin=ses_… @ <dir>`（§11.16）。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**消息 thread 不再报错**（0.7.0）：没有广播记录的 thread 降级为 `kind=messages` + 目标 + 最近出入站摘要（≤5 条）——只有索引与 thread store 都不认识的 thread 才保持原错误（§11.17）。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
+| `collab_threads` | `{ target, includeClosed? }` | **thread 聚合（0.7.0，只读）**：列出与**一个** target 的全部 thread（`threadID` / `kind` handoff\|messages / 状态 / 最近活动 / 最近出入站摘要各 ≤120 字 / 交接单的 `bid`），并给出**建议继续哪个**（最新未闭环那条，附可直接复制的 `collab_reply` 或 `collab_status`）。默认只列未闭环，`includeClosed:true` 再列最近 3 条已闭环；≤20 条，超出给「还有 N 个」。数据 = thread 索引（`~/.config/opencode/collab-threads.json`，只在该消息**真的投递成功**后写）join 广播记录 + thread store。**零写入**（读前后索引 mtime/hash 不变）。见 §11.17 |
 | `collab_escalate` | `{ bid?, threadID?, session?, reason, mode?, confirm }` | **加急（0.6.0）**：让被加急的一单**现在就进对方当前轮**——复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递。`bid` / `threadID` / `session` 三选一；`reason` 必填（≤200，剥控制字符）。`mode` 默认 **`steer`**（显式 `"queue"` 才排队），只读 agent（`explore`/`plan`）目标**强制 `queue`**（回执标 `forced`）；回执打印**宿主实际采用**的 `delivery`（空闲目标会降级为 `queue`）与 `messageID`。记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state` / `claim` / `receipt`。受保护目标（含血缘）**0 条 prompt** → 写一条 `priority:"urgent"` 的 owner-queue 项，回执 `canPush:false` + 队列位置。同 `bid + reason` 5 分钟内只刷新 `urgentAt`、不重复投递。`confirm:false` 零写入预览。见 §11.14.1 |
 | `collab_freeze` | `{ scope, target?, reason, until?, freeze?, confirm }` | **临时冻结（0.6.0）**：让协作层自己遵守「先别动」。`scope` = `session`（覆盖其子会话，血缘）/ `workspace`（目录）/ `bid`（一单）；`target` 除 `workspace` 外必填（`session` 收别名，`workspace` 缺省 = 当前工作区）。`until` 支持相对 `"30m"`/`"2h"`/`"45s"` 或绝对 ISO，默认 **30 分钟**、上限 30 天；**到期在读取时失效**（无定时器、无清理）。写入 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename + 短锁，并发不丢条目）。被冻结对象上的**新建**协作一律可读拒绝（0 写入）：`collab_handoff`（目标 / 祖先 / 目标工作区）、`collab_broadcast`（工作区，spawn 前再判一次）、`collab_accept`（该单或本会话）、`collab_escalate`（冻结优先）；读取类 `collab_list` / `collab_status` 只标 `[frozen]`。通知一次：非受保护 → 1 条 `queue` prompt（回执 `cid` / `messageId` 存 `delivery[]`）；受保护（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项。被冻会话自己的 `context` 只提示一次（写 `notifiedAt`）。`freeze:false` 解冻（幂等 no-op）；`confirm:false` 零写入预览。冻结 ≠ 归档 ≠ 删除。见 §11.14.2 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话）。`origin?`（0.7.0）：转发链的起点，缺省从「本会话正在承接的未闭环交接」继承一层（§11.16） |
@@ -1208,6 +1209,10 @@ b_14528d828f9df27b  state=claimed  priority=urgent  承接=ses_e105…d85（hand
   **不**调用 `writeBroadcast`、`persistRefresh`、`session.prompt|update|remove`、`releaseLock`。
   测试用「写方法一旦调用即抛」的严格宿主 + 广播 / 队列目录（文件名 + 大小 + mtime）与 `ctx.storage`
   调用前后一致来证明（S96）。
+- **消息 thread 的降级（0.7.0）**：`collab_send` / `collab_reply` 建立的 thread 没有广播记录，过去直接报错
+  （7 个 thread 里 6 个命中）。现在改为 `kind=messages` + `target` + `status` + 最近 ≤5 条出入站摘要
+  （各 ≤120 字）+ 关联交接单（索引里的 `bid`）；只有索引与 thread store 都不认识的 thread 才保留原错误。
+  同批新增的 `collab_threads { target }` 一次列出「与该 target 的全部 thread」并指出先答哪个——见 §11.17。
 - **非目标**：不做历史归档查询（用 `collab_list` / 归档过滤）、不做自动催办（用 `collab_escalate`）。
 
 #### 11.14.1 加急（`collab_escalate`，0.6.0）
@@ -1450,6 +1455,62 @@ bid：b_…
 
 回滚：`git restore -- src/types.ts src/core/{claim,verdict,chain}.ts src/tools/{handoff,broadcast,send,status,list,shared}.ts`；
 旧记录不受影响，新记录退化为「无对接人」。
+
+### 11.17 thread 聚合 + 状态降级（0.7.0，只读）
+
+**为什么**：实测一条跨仓链路里同一对会话并行 **7 个 thread**（6 个是 `collab_send` / `collab_reply`
+建立的消息 thread），于是两件事都做不到：① 发消息前不知道「哪些还没闭环」；②
+`collab_status { threadID }` 对消息 thread **直接报错**（`没有 thread … 对应的交接单`，7 个里 6 个命中）。
+根因是 `ThreadStore` 只能按 id 读、**不能枚举**——所以补一份轻量索引，而不是让某个工具去扫全量存储。
+
+**索引文件**（唯一新存储）：
+
+```jsonc
+// ~/.config/opencode/collab-threads.json（COLLAB_THREAD_INDEX_FILE 可覆盖路径）
+{ "version": 1,
+  "entries": {
+    "t_m3k9_abcd": { "target": "ses_…", "kind": "handoff", "from": "ses_…",
+                     "lastAt": 1795071578447, "preview": "≤80 字", "bid": "b_…" }
+  } }
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 写点 | **只在消息真的投递成功之后**：`collab_send` / `collab_reply`（`dispatch` 成功）、`collab_handoff`（记录写完后标 `kind:"handoff"` + `bid`）。预览、护栏拒绝、投递失败都**不写** |
+| 语义 | `target` / `from` 是这**两个参与者**，首次写入后不再改动（回复方向相反，两边都要能列出这个 thread；匹配用 `target === sid \|\| from === sid`）；`kind` 一旦为 `handoff` 不再退回；`lastAt` / `preview` 每次投递更新 |
+| 上限 | ≤ **500** 条，超出按 `lastAt` 淘汰最旧——只在**写**路径淘汰 |
+| 保留 | 读时过滤 **7 天**前的条目（不删文件） |
+| 容错 | 坏文件 / 未知 `version` → 按空处理并记一次日志（索引坏了只少一行，不让工具挂掉） |
+| 原子性 | 读-合并-写 + `tmp + rename`（与广播/冻结/租约同一套） |
+
+**`collab_threads { target, includeClosed? }`**：按索引列出该 target 的 thread，join 广播记录（→ `kind:handoff`、
+`state`、`bid`）与 thread store（`open|answered` + 真实出入站正文）。每行：
+
+```
+- t_m3k9_abcd  handoff  acked   14:59  out="…"  in="…"  bid=b_…  ← 建议继续
+```
+
+默认只列未闭环（交接单非终态 / thread store `status !== "answered"`），`includeClosed:true` 再列最近
+**3** 条已闭环（标 `（已闭环）`）；渲染上限 **20** 条，超出 `…还有 N 个`。建议行固定指向**最新未闭环**的
+thread，并给出可直接复制的下一步（交接单 → `collab_status {threadID}`；消息 thread →
+`collab_reply {threadID}`）。`target` 接受 `ses_…` 或别名；未知别名是可读错误，但**不要求会话仍可读**
+（thread 比会话行活得久）。
+
+**`collab_status` 降级**：命中广播记录时行为**逐字不变**；没有记录时查索引 + `threads.read(threadID)`，
+命中即返回 `kind=messages` + `target` + `state/status` + 最近 ≤5 条出入站摘要（各 ≤120 字）+ 关联交接单
+（索引里的 `bid`，记录已回收则注明）。两者都没有才保留原文案（「可能拼错，或该 thread 由 collab_send /
+collab_reply 建立」）。
+
+**只读**（`collab_threads` 与降级后的 `collab_status`）：不写索引、不改 thread 状态、不投递、不刷新记录；
+回归用严格宿主（所有写方法抛错）+ 索引文件 **mtime + 内容**与广播目录前后比对。
+
+**测试**：`test/handoff-harness.mjs` S102（18 条）——1 handoff + 2 消息 thread 全列出且 kind/bid 正确、
+唯一「← 建议继续」、`includeClosed` 才列已闭环、消息 thread 的 `collab_status` → `kind=messages`、未知 thread
+原错误、预览零写入、坏索引按空、500 上限淘汰最旧、四个读命令只读。
+变异必做：索引 key 写成 `bid` → 消息 thread 列不出；降级直接返回错误 → 对应用例失败。
+
+**回滚**：删 `~/.config/opencode/collab-threads.json` 即失效（工具回到「只有广播记录」）；
+代码 `git restore -- src/core/thread-index.ts src/tools/{threads,status,shared,handoff,index}.ts`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

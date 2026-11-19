@@ -287,6 +287,12 @@ process.env.COLLAB_CONFIG = collabConfigPath;
 const freezeFile = join(dir, 'freeze.json');
 process.env.COLLAB_FREEZE_FILE = freezeFile;
 
+// 0.7.0 (`11-19-collab-threads`): the thread index is one global file. Set before
+// the import for the same reason, and keep it inside the temp dir so S102 can
+// read the very file the plugin writes (and prove a read never touches it).
+const threadIndexFile = join(dir, 'collab-threads.json');
+process.env.COLLAB_THREAD_INDEX_FILE = threadIndexFile;
+
 // 0.5.0 (S94): the archive HTTP fallback. `constants.ts` reads
 // `COLLAB_SERVER_URL` **once at module load**, so the mock server is started
 // before the import. It only sees traffic from the S94 case that removes
@@ -9240,8 +9246,8 @@ await expectFail(
 
 // --- S98n: registered exactly once; the description states the contract.
 expect(
-  'S98 collab_freeze is registered exactly once (19 → 20 tools)',
-  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 20,
+  'S98 collab_freeze is registered exactly once (19 → 20 → 21 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 21,
   `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
 );
 const s98Desc = String(tool('collab_freeze').description);
@@ -10538,6 +10544,301 @@ for (const thread of [
 }
 rmSync(bcFile(S101_REC), { force: true });
 
+
+// ================== S102 (0.7.0: `collab_threads` + `collab_status` 降级, `11-19-collab-threads`)
+// R1–R4: one counterpart, 7 parallel threads (the observed shape) — 1 hand-off +
+// 2 message threads here — listed with the right `kind`, the last out/in
+// summaries, the bid, and one suggestion; `includeClosed` adds the closed ones
+// (≤3); `collab_status {threadID}` on a **message** thread answers `kind=messages`
+// with a summary instead of refusing; only an unknown thread keeps the old error.
+// The index is one global file: written only after a real admission (a preview
+// writes nothing), capped at 500 on write, 7-day filtered on read, corrupt =
+// empty + no crash. Both tools are read-only (index mtime+content unchanged).
+const s102Now = Date.now();
+const S102_ME = 'ses_s102_me';
+const S102_PEER = 'ses_s102_peer';
+for (const sid of [S102_ME, S102_PEER]) {
+  sessions[sid] = {
+    id: sid,
+    agent: 'build',
+    title: `S102 ${sid}`,
+    time: { created: s102Now, updated: s102Now, busy: 0 },
+    location: { directory: WS_A }
+  };
+}
+const s102IndexRaw = () => {
+  try {
+    return readFileSync(threadIndexFile, 'utf8');
+  } catch {
+    return ''; // not written yet (nothing admitted in this process) = empty
+  }
+};
+const s102IndexJson = () => JSON.parse(s102IndexRaw() || '{"version":1,"entries":{}}');
+const s102IndexStamp = () => {
+  try {
+    const stat = statSync(threadIndexFile);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return 'missing';
+  }
+};
+/** The rendered row of one thread (`- t_…  kind  state  HH:MM …`). */
+const s102Row = (text, threadID) => text.split('\n').find(line => line.startsWith(`- ${threadID} `)) ?? '';
+
+// --- S102a: the hand-off thread — `dispatch` indexes the message, then
+// `collab_handoff` marks the same entry `handoff` + its bid.
+const s102Handoff = await call(
+  'collab_handoff',
+  { target: S102_PEER, text: 'S102 交接：把并行 thread 的清单整理成一张表', expected: 'review', confirm: true },
+  as(S102_ME)
+);
+await settle(5);
+const S102_HANDOFF_THREAD = /thread=(t_[0-9a-z_]+)/.exec(s102Handoff)?.[1] ?? '';
+const S102_BID = bidOf(s102Handoff) ?? '';
+out('S102 handoff', s102Handoff.split('\n').slice(0, 3).join('\n'));
+const s102HandoffEntry = s102IndexJson().entries[S102_HANDOFF_THREAD];
+expect(
+  'S102 collab_handoff writes one index entry marked kind=handoff with its bid',
+  Boolean(S102_HANDOFF_THREAD) &&
+    Boolean(S102_BID) &&
+    s102HandoffEntry?.kind === 'handoff' &&
+    s102HandoffEntry?.bid === S102_BID &&
+    s102HandoffEntry?.target === S102_PEER,
+  `${S102_HANDOFF_THREAD} → ${JSON.stringify(s102HandoffEntry)}`
+);
+
+// --- S102b: two plain message threads (the 6-of-7 shape) + one preview.
+const s102m1 = await call(
+  'collab_send',
+  { target: S102_PEER, kind: 'request', threadID: 't_s102_m1', text: 'S102 消息 thread 1：请复核 A', confirm: true },
+  as(S102_ME)
+);
+await settle(5);
+const s102m2 = await call(
+  'collab_send',
+  { target: S102_PEER, kind: 'note', threadID: 't_s102_m2', text: 'S102 消息 thread 2：补充信息', confirm: true },
+  as(S102_ME)
+);
+expect(
+  'S102 collab_send writes one index entry per thread (kind=messages, target carried)',
+  s102m1.startsWith('已投递') &&
+    s102m2.startsWith('已投递') &&
+    s102IndexJson().entries.t_s102_m1?.kind === 'messages' &&
+    s102IndexJson().entries.t_s102_m2?.target === S102_PEER,
+  `${JSON.stringify(s102IndexJson().entries.t_s102_m1)} / ${JSON.stringify(s102IndexJson().entries.t_s102_m2)}`
+);
+const s102PreviewBefore = s102IndexStamp();
+const s102Preview = await call(
+  'collab_send',
+  { target: S102_PEER, kind: 'note', threadID: 't_s102_preview', text: 'S102 预览不写索引', confirm: false },
+  as(S102_ME)
+);
+expect(
+  'S102 a preview writes no index entry at all (0 writes, unchanged mtime/size)',
+  s102Preview.startsWith('未投递（confirm 不为 true，仅预览）') &&
+    s102IndexStamp() === s102PreviewBefore &&
+    !s102IndexJson().entries.t_s102_preview,
+  `${s102IndexStamp()} / ${s102PreviewBefore}`
+);
+
+// --- S102c: the default listing — all three threads, the right kind, one suggestion.
+const s102Threads = await call('collab_threads', { target: S102_PEER }, as(S102_ME));
+out('S102 collab_threads', s102Threads);
+expect(
+  'S102 collab_threads lists every thread of the counterpart (1 handoff + 2 messages)',
+  s102Threads.includes(S102_HANDOFF_THREAD) &&
+    s102Threads.includes('t_s102_m1') &&
+    s102Threads.includes('t_s102_m2') &&
+    s102Threads.includes('未闭环 3'),
+  s102Threads.split('\n')[0]
+);
+expect(
+  'S102 … with kind handoff/messages on the right rows, bid on the hand-off row',
+  /\bhandoff\b/.test(s102Row(s102Threads, S102_HANDOFF_THREAD)) &&
+    s102Row(s102Threads, S102_HANDOFF_THREAD).includes(`bid=${S102_BID}`) &&
+    /\bmessages\b/.test(s102Row(s102Threads, 't_s102_m1')) &&
+    /\bmessages\b/.test(s102Row(s102Threads, 't_s102_m2')),
+  `${s102Row(s102Threads, S102_HANDOFF_THREAD)} | ${s102Row(s102Threads, 't_s102_m1')}`
+);
+expect(
+  'S102 … and exactly one row is marked ← 建议继续 (the newest thread), named in the 建议 line',
+  s102Threads.split('\n').filter(line => line.includes('← 建议继续')).length === 1 &&
+    s102Row(s102Threads, 't_s102_m2').includes('← 建议继续') &&
+    s102Threads.includes('建议: 先看 t_s102_m2'),
+  s102Threads.split('\n').find(line => line.startsWith('建议:'))
+);
+expect(
+  'S102 … the summaries are the sender\'s own words (in/out), capped, and it says it is read-only',
+  s102Row(s102Threads, 't_s102_m2').includes('out="S102 消息 thread 2：补充信息"') &&
+    s102Threads.includes('只读查询'),
+  s102Row(s102Threads, 't_s102_m2')
+);
+
+// --- S102d: the downgraded `collab_status` on a message thread (the evidence's原文).
+const s102StatusM2 = await call('collab_status', { threadID: 't_s102_m2' }, as(S102_ME));
+out('S102 status (message thread)', s102StatusM2);
+expect(
+  'S102 collab_status {threadID: message thread} answers kind=messages instead of refusing',
+  s102StatusM2.includes('kind=messages') &&
+    s102StatusM2.includes(S102_PEER) &&
+    s102StatusM2.includes('status=open') &&
+    s102StatusM2.includes('S102 消息 thread 2：补充信息') &&
+    s102StatusM2.includes('collab_reply {threadID:"t_s102_m2"'),
+  s102StatusM2.split('\n')[0]
+);
+expect(
+  'S102 … the old refusal text is gone for a known message thread',
+  !s102StatusM2.includes('没有 thread t_s102_m2 对应的交接单'),
+  s102StatusM2.split('\n')[0]
+);
+
+// --- S102e: a closed thread — out of the default list, in with `includeClosed`.
+const s102Reply = await call(
+  'collab_reply',
+  { threadID: 't_s102_m1', text: 'S102 回执：已复核 A', confirm: true },
+  as(S102_PEER)
+);
+const s102OpenOnly = await call('collab_threads', { target: S102_PEER }, as(S102_ME));
+const s102WithClosed = await call('collab_threads', { target: S102_PEER, includeClosed: true }, as(S102_ME));
+out('S102 includeClosed', s102WithClosed);
+expect(
+  'S102 an answered message thread leaves the default list and appears with includeClosed (marked 已闭环)',
+  s102Reply.startsWith('已投递') &&
+    !s102OpenOnly.includes('t_s102_m1') &&
+    s102WithClosed.includes('t_s102_m1') &&
+    s102Row(s102WithClosed, 't_s102_m1').includes('answered') &&
+    s102Row(s102WithClosed, 't_s102_m1').includes('（已闭环）') &&
+    s102Row(s102WithClosed, 't_s102_m1').includes('S102 回执：已复核 A'),
+  `${s102Row(s102WithClosed, 't_s102_m1')}`
+);
+const s102StatusM1 = await call('collab_status', { threadID: 't_s102_m1' }, as(S102_ME));
+expect(
+  'S102 … and its status shows status=answered with both directions',
+  s102StatusM1.includes('status=answered') &&
+    s102StatusM1.includes('请复核 A') &&
+    s102StatusM1.includes('已复核 A'),
+  s102StatusM1.split('\n').slice(0, 2).join(' / ')
+);
+
+// --- S102f: an unknown thread keeps the original error (typo is still an error).
+await expectFail(
+  'S102 an unknown threadID keeps the original readable error (可能拼错)',
+  () => call('collab_status', { threadID: 't_s102x_ghost0' }),
+  /没有 thread t_s102x_ghost0 对应的交接单/
+);
+await expectFail(
+  'S102 collab_threads refuses an unknown alias (a typo is not "no threads")',
+  () => call('collab_threads', { target: 'no-such-alias' }),
+  /未知目标/
+);
+
+// --- S102g: read-only — the index file and the broadcast dir must not move.
+const s102StrictMethods = [
+  ['session', 'prompt'],
+  ['session', 'update'],
+  ['session', 'create'],
+  ['session', 'remove'],
+  ['storage', 'set'],
+  ['storage', 'remove']
+];
+const s102Writes = [];
+const s102Saved = s102StrictMethods.map(([domain, name]) => [domain, name, ctx[domain][name]]);
+for (const [domain, name] of s102StrictMethods) {
+  ctx[domain][name] = () => {
+    s102Writes.push(`${domain}.${name}`);
+    throw new Error(`S102 读命令触发了写操作 ${domain}.${name}（只读契约被破坏）`);
+  };
+}
+const s102Before = [s102IndexRaw(), s102IndexStamp(), s96Snapshot(broadcastDir)];
+let s102ReadonlyError = '';
+try {
+  await call('collab_threads', { target: S102_PEER });
+  await call('collab_threads', { target: S102_PEER, includeClosed: true });
+  await call('collab_status', { threadID: 't_s102_m2' });
+  await call('collab_status', { threadID: 't_s102_m1' });
+} catch (error) {
+  s102ReadonlyError = String(error?.message ?? error);
+} finally {
+  for (const [domain, name, fn] of s102Saved) ctx[domain][name] = fn;
+}
+const s102After = [s102IndexRaw(), s102IndexStamp(), s96Snapshot(broadcastDir)];
+expect(
+  'S102 read-only: four queries, zero write calls, index mtime+hash and broadcast dir unchanged',
+  !s102ReadonlyError && s102Writes.length === 0 && s102Before.join('||') === s102After.join('||'),
+  s102ReadonlyError || `${s102Writes.length} write(s) / ${s102Before.join('||') === s102After.join('||') ? 'index identical' : 'index CHANGED'}`
+);
+
+// --- S102h: a corrupt index is "empty", never a crash.
+const s102GoodIndex = s102IndexRaw();
+writeFileSync(threadIndexFile, '{ this is not json');
+const s102CorruptList = await call('collab_threads', { target: S102_PEER }, as(S102_ME));
+const s102CorruptStatus = await call('collab_status', { threadID: 't_s102_m2' }, as(S102_ME));
+out('S102 corrupt index', s102CorruptList.split('\n')[0]);
+expect(
+  'S102 a corrupt index is treated as empty (list answers, downgrade still reads the thread store)',
+  !s102CorruptList.includes('t_s102_m2') &&
+    !s102CorruptList.includes('t_s102_m1') &&
+    s102CorruptList.includes('与 ses_s102_peer') &&
+    s102CorruptStatus.includes('kind=messages') &&
+    s102CorruptStatus.includes('S102 消息 thread 2：补充信息'),
+  `${s102CorruptList.split('\n')[0]} / ${s102CorruptStatus.split('\n')[0]}`
+);
+writeFileSync(threadIndexFile, s102GoodIndex);
+
+// --- S102i: the 500-entry cap is enforced on write (oldest lastAt evicted).
+const s102Bulk = { version: 1, entries: {} };
+for (let index = 0; index < 500; index += 1) {
+  s102Bulk.entries[`t_s102bulk_${String(index).padStart(3, '0')}`] = {
+    target: 'ses_s102_bulk',
+    kind: 'messages',
+    from: S102_ME,
+    lastAt: s102Now - (index + 1) * 1000,
+    preview: `bulk ${index}`
+  };
+}
+writeFileSync(threadIndexFile, JSON.stringify(s102Bulk));
+const s102CapSend = await call(
+  'collab_send',
+  { target: S102_PEER, kind: 'note', threadID: 't_s102_cap', text: 'S102 第 501 条：淘汰最旧', confirm: true },
+  as(S102_ME)
+);
+const s102Capped = s102IndexJson();
+expect(
+  'S102 the index is capped at 500 entries on write (the oldest lastAt is evicted)',
+  s102CapSend.startsWith('已投递') &&
+    Object.keys(s102Capped.entries).length === 500 &&
+    !s102Capped.entries.t_s102bulk_499 &&
+    Boolean(s102Capped.entries.t_s102_cap) &&
+    Boolean(s102Capped.entries.t_s102bulk_000),
+  `${Object.keys(s102Capped.entries).length} entries / oldest kept=${Boolean(s102Capped.entries.t_s102bulk_000)} / ` +
+    `t_s102bulk_499 kept=${Boolean(s102Capped.entries.t_s102bulk_499)}`
+);
+
+// --- S102j: registered exactly once; the surface is 21 tools; description states the contract.
+expect(
+  'S102 collab_threads is registered exactly once and the surface is 21 collab_* tools',
+  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 21,
+  `${tools.length} tools / ${tools.filter(definition => definition.name === 'collab_threads').length} collab_threads`
+);
+const s102Desc = String(tool('collab_threads').description);
+const s102StatusDesc = String(tool('collab_status').description);
+expect(
+  'S102 the descriptions state read-only + kind=messages downgrade + the 20-thread cap',
+  /read-only/i.test(s102Desc) &&
+    /includeClosed/.test(s102Desc) &&
+    /20 threads/.test(s102Desc) &&
+    /kind=messages/.test(s102StatusDesc),
+  `${s102Desc.slice(0, 120)} | ${s102StatusDesc.slice(0, 120)}`
+);
+
+// Cleanup: index file, the hand-off record and the thread records of S102.
+rmSync(threadIndexFile, { force: true });
+if (S102_BID) rmSync(bcFile(S102_BID), { force: true });
+for (const thread of [S102_HANDOFF_THREAD, 't_s102_m1', 't_s102_m2', 't_s102_cap', 't_s102_preview']) {
+  if (thread) store.delete(`collab/threads/${thread}`);
+}
+delete sessions[S102_ME];
+delete sessions[S102_PEER];
 
 
 const failed = checks.filter(check => !check.ok);

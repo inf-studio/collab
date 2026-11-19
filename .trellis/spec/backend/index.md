@@ -38,3 +38,5 @@ The goal is to help AI assistants and new team members understand how YOUR proje
 **Language**: All documentation should be written in **English**.
 
 | [并发与租约](./concurrency-locks.md) | waiter 心跳/回收、读命令零写入、配置回落、投递幂等 | Filled (0.6.0) |
+
+| [thread 索引](./thread-index.md) | 索引只在投递成功后写、includeClosed 预留槽位、先排序再读降放大 | Filled (0.7.0) |

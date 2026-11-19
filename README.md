@@ -1,7 +1,7 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：二十个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列、
-即时状态回执、加急催办、临时冻结与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
+多会话（含跨工作区）协作插件：二十一个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列、
+即时状态回执、thread 聚合、加急催办、临时冻结与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
 `bid` 算法与单文件版逐字一致，差别只有「可选类型 + 模块边界 + 默认只读」三点。
@@ -21,7 +21,8 @@
 | `collab_list`      | 列可协作会话（id/agent/state/loc/title/parent/别名）+ 未闭环交接           | 只读              |
 | `collab_inbox`     | 本会话收到的跨会话消息全文（单条 ≤4000 字）                                | 只读              |
 | `collab_wait`      | 等某 thread 的回执，或等某会话空闲                                         | 只读              |
-| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 下一步（非阻塞、零写入） | 只读              |
+| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 下一步（非阻塞、零写入）；消息 thread（`collab_send`/`collab_reply` 建立）降级为 `kind=messages` + 出入站摘要，不再报错 | 只读              |
+| `collab_threads`   | 与**一个** target 的全部 thread：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 建议继续哪个（默认只列未闭环，≤20 条） | 只读              |
 | `collab_escalate` | 加急一单：默认 `delivery:steer` 进对方当前轮（只读 agent / 受保护目标自动降级：queue 或 owner-queue 项），回执打印**实际** delivery；只追加 `priority/urgentAt/urgentReason/urgentBy` | 发消息 / 写队列 |
 | `collab_freeze`   | **临时冻结**一个会话（含子会话）/ 工作区 / 一单：`handoff`/`broadcast`/`accept`/`escalate` 对它的**新建**协作可读拒绝（0 写入），`until` 到期自动失效；通知一次（受保护目标 → urgent 队列项）；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
 | `collab_send`      | 往另一个会话投递消息（`queue` 默认，不打断）                               | 发消息            |
@@ -275,7 +276,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 805 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
+pnpm test          # build + 823 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -308,6 +309,10 @@ pnpm test          # build + 805 项 harness + 12 项只读默认 + 20 项看板
   0.7.0 追加 S101：跨 thread 正文去重（同一 target 的 3 个 thread 同文只投 1 次、回执写明「已在 thread … 发过」）、
   `force:true` 三投三中且标 `dedupeOverridden`（带 `bid` 时记录标 `dedupeOverriddenAt` 且状态字段不变）、
   窗口边界（59s 拦 / 61s 放行，`Date.now` 前跳）、不同 target / 预览 / `dedupeWindowMs:0` 各一条。
+  0.7.0 追加 S102：thread 聚合（`collab_threads` 一次列出 1 handoff + 2 消息 thread、kind/bid/出入站摘要、
+  唯一「← 建议继续」、`includeClosed` 才列已闭环 ≤3）与 `collab_status` 降级（消息 thread → `kind=messages`
+  + 摘要、未知 thread 保留原错误）；索引只在该消息**真的投递成功**后写（预览零写入）、上限 500 按 `lastAt` 淘汰、
+  坏文件按空处理、四个读命令前后索引 mtime+hash 与广播目录不变。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——
@@ -338,7 +343,7 @@ pnpm test          # build + 805 项 harness + 12 项只读默认 + 20 项看板
   变异验证：`server?.client` 改回 `ctx.client` → 7 条失败；去掉回包前的 key 比对 → 迟到回包那条失败；
   去掉 `adopt()` 的清屏 → 「切走即清」那条失败。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（二十个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照/thread 索引）、`src/tools`（二十一个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill + 命令 + `session.header` 计数条 + 标题栏 pill 探针，只在 `setup` 里跑）、
 `src/tui.tsx`（`./tui`：`collab.status` 面板 + 可展开的侧栏摘要 + `/collab` 命令，只读）、

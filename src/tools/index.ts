@@ -15,6 +15,7 @@ import { reportTool } from './report.ts';
 import { sendTool } from './send.ts';
 import type { ToolKit } from './shared.ts';
 import { statusTool } from './status.ts';
+import { threadsTool } from './threads.ts';
 import { waitTool } from './wait.ts';
 import { escalateTool } from './escalate.ts';
 import { freezeTool } from './freeze.ts';
@@ -45,6 +46,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     inboxTool(kit),
     waitTool(kit),
     statusTool(kit),
+    threadsTool(kit),
     escalateTool(kit),
     freezeTool(kit),
     grantTool(kit),

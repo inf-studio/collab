@@ -36,6 +36,8 @@ process.env.COLLAB_CONFIG = join(dir, 'collab.json');
 process.env.COLLAB_REPORT_DIR = join(dir, 'reports');
 // Resource leases are global as well; keep them in the temp dir.
 process.env.COLLAB_LOCK_DIR = join(dir, 'locks');
+// 0.7.0: the thread index is one global file — never the operator's real one.
+process.env.COLLAB_THREAD_INDEX_FILE = join(dir, 'collab-threads.json');
 // 0.6.0: the freeze file is global too — never write the operator's real one.
 process.env.COLLAB_FREEZE_FILE = join(dir, 'freeze.json');
 
@@ -145,7 +147,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the twenty collab_* tools + collab_report',
+  'R8 the package registers the twenty-one collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -159,6 +161,7 @@ expect(
       'collab_inbox',
       'collab_wait',
       'collab_status',
+      'collab_threads',
       'collab_escalate',
       'collab_freeze',
       'collab_grant',

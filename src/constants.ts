@@ -356,8 +356,37 @@ export const ACK_SEEN_WINDOW_MS = 2 * 60 * 60 * 1000;
 /** R2: at most one extra delivery per hand-off (same `cid`, so it is idempotent). */
 export const MAX_RESENDS = 1;
 
-// ------------------------------------------------------ spawn session archive
+// ------------------------------------------------------ thread index (0.7.0)
 
+/**
+ * 0.7.0 (`11-19-collab-threads`): `ThreadStore` is a key/value domain (read one
+ * thread by id, no enumeration), so "the threads of this counterpart" needs one
+ * **lightweight index**. One JSON file, one entry per thread, written only after
+ * a message was really admitted.
+ *
+ * `COLLAB_THREAD_INDEX_FILE` overrides the path (harness / sandbox runs) — like
+ * every other global path here it is read once at module load.
+ */
+export const THREAD_INDEX_FILE =
+  process.env.COLLAB_THREAD_INDEX_FILE || join(homedir(), '.config', 'opencode', 'collab-threads.json');
+/** The file shape this build writes (an unknown version is treated as empty). */
+export const THREAD_INDEX_VERSION = 1;
+/** Hard cap: above this the oldest `lastAt` entries are evicted **on write**. */
+export const THREAD_INDEX_LIMIT = 500;
+/** Reads ignore entries older than this (7 days); nothing is deleted by a read. */
+export const THREAD_INDEX_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** The stored preview: the sender's own words, one line, ≤ this. */
+export const THREAD_INDEX_PREVIEW_CHARS = 80;
+/** `collab_threads` renders at most this many threads, then "还有 N 个". */
+export const THREADS_MAX = 20;
+/** `includeClosed` also lists at most this many already-closed threads. */
+export const THREADS_CLOSED_MAX = 3;
+/** Summary cut per rendered line (`collab_threads` / downgraded `collab_status`). */
+export const THREAD_SUMMARY_CHARS = 120;
+/** How many in/out messages the downgraded `collab_status` shows (newest last). */
+export const THREAD_STATUS_MESSAGES = 5;
+
+// ------------------------------------------------------ spawn session archive
 /**
  * 0.5.0: a spawned (`claim.kind = "spawn"`) session is **archived** — never
  * deleted — once the hand-off it exists for is over and nobody needs it any

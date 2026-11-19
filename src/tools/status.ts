@@ -22,14 +22,15 @@
  * The harness runs it against a strict host (every write method throws) and
  * compares the broadcast / owner-queue directories before and after.
  */
-import { BCAST_DONE_STATES, STORAGE_ALIASES } from '../constants.ts';
+import { BCAST_DONE_STATES, STORAGE_ALIASES, THREAD_STATUS_MESSAGES, THREAD_SUMMARY_CHARS } from '../constants.ts';
 import { deliveryOf, unackedDue } from '../core/ack.ts';
 import { allBroadcasts, isValidBid, leaseVerdict, readBroadcast } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import { fmtTtl } from '../core/locks.ts';
 import { listFor, mineFor } from '../core/owner-queue.ts';
-import type { BroadcastRecord, CollabContext, OwnerQueueItem, ToolDefinition } from '../types.ts';
+import { threadEntry } from '../core/thread-index.ts';
+import type { BroadcastRecord, CollabContext, OwnerQueueItem, ThreadRecord, ToolDefinition } from '../types.ts';
 import { asObject, fmtTime, shortID, truncate } from '../util.ts';
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
 import { jsonInput } from './shared.ts';
@@ -246,6 +247,76 @@ function formatBlock({ record, items, addressee, canPush }: Pick, now: number): 
 }
 
 /**
+ * R2 (0.7.0, `11-19-collab-threads`): the **downgrade** for a message thread.
+ *
+ * `collab_status {threadID}` used to answer only from broadcast records, so a
+ * thread created by `collab_send` / `collab_reply` (6 of the observed 7 threads
+ * on one counterpart) was a hard error — a status query failing on the most
+ * common case. Now: no record → look at the thread index + the thread record and
+ * describe it as `kind=messages` (target, states, the last in/out summaries, the
+ * related hand-off if the index knows a bid). Only a thread that neither source
+ * knows keeps the old error.
+ *
+ * Read-only: `threadEntry` / `threads.read` / `readBroadcast` — no write, no
+ * delivery (the same strict-host assertion as the rest of this tool).
+ */
+function messageThreadBlock(input: {
+  threadID: string;
+  entry?: { target: string; kind: string; lastAt: number; preview: string; bid?: string };
+  thread?: ThreadRecord;
+  record?: BroadcastRecord;
+  me?: string;
+}): string {
+  const { threadID, entry, thread, record, me } = input;
+  const counterpart =
+    (me && thread?.fromSession === me ? thread?.toSession : thread?.fromSession) ||
+    thread?.toSession ||
+    thread?.fromSession ||
+    entry?.target ||
+    '-';
+  const msgs = thread?.msgs ?? [];
+  const updatedAt = Number(thread?.updatedAt) || Number(entry?.lastAt) || 0;
+  const status = String(thread?.status ?? (entry ? 'open' : '-'));
+  const lines = [
+    `thread ${threadID}（kind=messages：由 collab_send / collab_reply 建立，没有广播记录）`,
+    `target: ${counterpart}${me && counterpart === me ? '（本会话）' : ''}  status=${status}` +
+      `  最近活动=${updatedAt ? fmtTime(updatedAt) : '-'}` +
+      `${msgs.length ? `  消息 ${msgs.length} 条` : '  消息 0 条（thread store 无记录，只有索引摘要）'}`
+  ];
+
+  if (msgs.length) {
+    lines.push(`最近消息（最多 ${THREAD_STATUS_MESSAGES} 条，各 ≤${THREAD_SUMMARY_CHARS} 字）:`);
+    for (const message of msgs.slice(-THREAD_STATUS_MESSAGES)) {
+      const from = shortID(message?.fromSession) || String(message?.from ?? '?');
+      const to = shortID(
+        String(message?.fromSession ?? '') === counterpart ? thread?.fromSession : counterpart
+      );
+      lines.push(
+        `  - ${fmtTime(message?.ts)} ${from} → ${to || '?'}  "${truncate(message?.text, THREAD_SUMMARY_CHARS)}"`
+      );
+    }
+  } else if (entry?.preview) {
+    lines.push(`最近消息: ${fmtTime(entry.lastAt)} "${truncate(entry.preview, THREAD_SUMMARY_CHARS)}"（索引摘要）`);
+  } else {
+    lines.push('最近消息: -（thread store 与索引都没有正文）');
+  }
+
+  const bid = String(entry?.bid ?? '').trim();
+  if (bid) {
+    lines.push(
+      record
+        ? `关联交接单: ${bid} state=${String(record.state ?? 'open')}（详情 collab_status {bid:"${bid}"}）`
+        : `关联交接单: ${bid}（记录已闭环回收/不可读；历史用 collab_list）`
+    );
+  }
+  lines.push(
+    `下一步: 继续该 thread → collab_reply {threadID:"${threadID}", text:"…", confirm:true}；` +
+      `阻塞等回执 → collab_wait {threadID:"${threadID}"}`
+  );
+  return lines.join('\n');
+}
+
+/**
  * `collab_status` — read-only, non-blocking state of one hand-off (0.6.0).
  * Input is exactly one of `bid` / `threadID` / `session`; with none it lists the
  * unresolved hand-offs this session started or claimed (≤5, newest first).
@@ -261,7 +332,10 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       'delivery (admitted / seen / ack-unavailable), the owner-queue items of its target with the queue position, ' +
       'the last reply summary, the receipt of a closed hand-off and one suggested next step. Input is exactly one ' +
       'of `bid` / `threadID` / `session`; with none it lists the unresolved hand-offs this session started or ' +
-      'claimed (at most 5, newest first). Writes nothing — no state refresh, no lock release, no message delivery ' +
+      'claimed (at most 5, newest first). A thread created by collab_send / collab_reply (no hand-off record) is ' +
+      'described as kind=messages — its counterpart, state and last in/out summaries — instead of being an error ' +
+      '(use collab_threads for the full list with one counterpart). Writes nothing — no state refresh, no lock ' +
+      'release, no message delivery ' +
       '— so it is safe on protected targets too (they report canPush:false and the queue position instead). ' +
       'For blocking waits use collab_wait; for a full inventory use collab_list.',
     input: jsonInput({
@@ -346,6 +420,20 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       } else if (threadID) {
         const matches = records.filter(record => String(record.threadID ?? '') === threadID);
         if (!matches.length) {
+          // R2 (0.7.0): a message thread is the *common* case — describe it
+          // instead of refusing. Only a thread neither the index nor the thread
+          // store knows keeps the old error.
+          const entry = threadEntry(threadID);
+          const thread = await deps.threads.read(threadID);
+          if (entry || thread) {
+            const related = entry?.bid ? readBroadcast(entry.bid) : undefined;
+            return {
+              content: [
+                messageThreadBlock({ threadID, entry, thread, record: related, me }),
+                footer
+              ].join('\n')
+            };
+          }
           throw invalid(
             `没有 thread ${threadID} 对应的交接单：threadID 可能拼错，或该 thread 由 collab_send / collab_reply 建立` +
               '（没有广播记录）。可用 collab_inbox 核对 threadID。'

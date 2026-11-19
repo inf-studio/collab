@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -24,7 +24,8 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_list` | `limit?`, `directory?` | 列会话（id/agent/state/`loc=`/`parent=`/title）+ 未闭环交接 | 只读 |
 | `collab_inbox` | `limit?` | 本会话收到的跨会话消息全文 | 只读 |
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
-| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
+| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false`；**消息 thread 降级**为 `kind=messages` + 出入站摘要（不再报错） | 只读 |
+| `collab_threads` | `target`, `includeClosed?` | **与一个 target 的全部 thread**：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 唯一「← 建议继续」；默认只列未闭环，≤20 条 | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
 | `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`） | 发消息 |
@@ -160,6 +161,25 @@ collab_status { }                    # 本会话相关未闭环，≤5 条，按
 - **零写入**：不刷新状态（过期租约只描述「下次 refresh 会释放」，不改写）、不释放锁、不投递。
   所以它可以安全地反复问，不会把 `claimed` 的租约提前推进。
 - 已闭环 → `下一步: 无需动作`；全量清单仍用 `collab_list`，阻塞等回执照旧用 `collab_wait`。
+
+### 一点八·补：消息 thread 与聚合（`collab_threads`，0.7.0，只读）
+
+同一对会话并行多条 thread 时（实测 7 条，6 条是 `collab_send`/`collab_reply` 建立的消息 thread），
+先看清单再发消息：
+
+```text
+collab_threads { target:"ses_…" }                 # 未闭环 thread（≤20 条）
+collab_threads { target:"ses_…", includeClosed:true }  # 再列最近 3 条已闭环
+collab_status { threadID:"t_…" }                  # 单条详情
+```
+
+- 每行：`threadID / kind（handoff|messages）/ 状态 / 最近活动 / out= / in= / bid?`；唯一一条标 `← 建议继续`
+  （最新未闭环），并给出可直接复制的下一步（消息 thread → `collab_reply {threadID}`）。
+- 默认只列未闭环；已闭环的（交接单终态 / `status=answered`）要 `includeClosed:true` 才出现。
+- `collab_status { threadID }` 对**消息 thread 不再报错**：返回 `kind=messages` + target + 最近 ≤5 条
+  出入站摘要；只有拼错的 thread 才报「没有 thread … 对应的交接单」。
+- 索引（`~/.config/opencode/collab-threads.json`）**只在该消息真的投递成功后**写：预览 / 护栏拒绝 /
+  投递失败都不写；上限 500 条按 `lastAt` 淘汰、读时过滤 7 天、坏文件按空处理。两个读命令零写入。
 
 ## 一点九、加急（`collab_escalate`，0.6.0）
 

@@ -11,6 +11,7 @@ import { invalid } from '../core/errors.ts';
 import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
+import { recordThread } from '../core/thread-index.ts';
 import { originHint, protocolHeader } from '../core/verdict.ts';
 import { newThreadID } from '../ids.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
@@ -265,6 +266,19 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
           : undefined,
         createdAt: Date.now()
       } satisfies JsonObject);
+
+      // 0.7.0 (`11-19-collab-threads`, R1): the thread is a **hand-off** thread,
+      // not just a message thread — recorded after the record exists so the
+      // index never names a bid nobody can read. `dispatch` already indexed the
+      // message; this marks the same entry `handoff` + `bid` (the kind is sticky).
+      recordThread({
+        threadID,
+        target: target.sessionID,
+        from: me ?? 'unknown',
+        kind: 'handoff',
+        text: body,
+        bid
+      });
 
       return {
         content: [

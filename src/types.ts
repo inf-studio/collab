@@ -596,6 +596,43 @@ export interface ThreadMessage {
   [key: string]: any;
 }
 
+// ------------------------------------------------------- thread index (0.7.0)
+
+/**
+ * One entry of the thread index (`~/.config/opencode/collab-threads.json`,
+ * `core/thread-index.ts`).
+ *
+ * `ThreadStore` can only read a thread by id, so this file is the **only** way
+ * to enumerate "the threads of this counterpart" — the 7-parallel-thread case
+ * that made both `collab_threads` and the `collab_status` downgrade necessary.
+ * Written only after a message was really admitted, never by a read path.
+ */
+export interface ThreadIndexEntry {
+  /** The counterpart session (`ses_…`) this thread is with. */
+  target: string;
+  /** `handoff` = a hand-off thread (has a bid); `messages` = plain send/reply. */
+  kind: 'handoff' | 'messages';
+  /** The session that wrote the last indexed message. */
+  from: string;
+  /** When the last indexed message was admitted (ordering + 7-day retention). */
+  lastAt: number;
+  /** ≤80 chars of the sender's own words — a pointer, never the body. */
+  preview: string;
+  /** Hand-off id, when this thread belongs to one. */
+  bid?: string;
+}
+
+/** `ThreadIndexEntry` + the map key (what `threadsFor` returns). */
+export interface ThreadIndexRecord extends ThreadIndexEntry {
+  threadID: string;
+}
+
+/** The whole index file — `{ version: 1, entries: { [threadID]: entry } }`. */
+export interface ThreadIndexFile {
+  version: 1;
+  entries: Record<string, ThreadIndexEntry>;
+}
+
 /** One thread record (`collab/threads/<threadID>`) — the request/reply SSOT. */
 export interface ThreadRecord {
   threadID: string;

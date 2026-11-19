@@ -6,9 +6,12 @@
 ## [Unreleased] · 0.7.0（原 0.6.1 批次） - 2026-11-19
 
 > 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、
-> **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖、工具仍 20。
+> **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖
+> （该批本身不增工具；同一发布窗口另一任务新增了 `collab_threads`，见下）。
 > 同一发布窗口还收了 **协作自动感知**（`11-19-collab-awareness`）：一行双计数提示 + 承接方两行协议头，
-> 以及 **交接对接人 `origin`**（`11-19-collab-origin`）：转发链不再丢链头（实测 4 跳 → 2 跳）。
+> 以及 **交接对接人 `origin`**（`11-19-collab-origin`）：转发链不再丢链头（实测 4 跳 → 2 跳），
+> 以及 **thread 聚合 + 状态降级**（`11-19-collab-threads`）：一对会话的 7 个并行 thread 一眼看清，
+> 消息 thread 的 `collab_status` 不再报错（工具 20 → 21）。
 
 ### Added
 
@@ -107,6 +110,25 @@
   - **顺序**：去重查询在投递之前（命中即不投、不产生队列项），但 `protect` 拒绝仍**优先**——受保护目标
     不会因为「同一句以前发过」把 fail-closed 错误换成一条投递历史提示（S81 的全部拒投断言不变）。
   - 为什么用进程内 Map：投递本身就在服务端进程内完成，60s 窗口跨重启无意义，也不新增磁盘依赖。
+- **`collab_threads` + `collab_status` 降级（R1–R4，`11-19-collab-threads`，工具 20 → 21）**：一对会话实测
+  并行 **7 个 thread**（6 个是 `collab_send` / `collab_reply` 建立的消息 thread），既看不出「哪些没闭环」，
+  `collab_status { threadID }` 又对消息 thread 直接报错（7 个里 6 个）。`ThreadStore` 只能按 id 读、不能枚举，
+  所以补一份**轻量索引** `~/.config/opencode/collab-threads.json`
+  （`{version:1, entries:{ t_…: {target, kind, from, lastAt, preview, bid?} }}`）：
+  - **写点只有一个**：消息**真的投递成功**之后（`dispatch` 成功；`collab_handoff` 在记录写完后把同一 thread 标
+    `handoff` + `bid`）。预览 / 护栏拒绝 / 投递失败都不写。`target`/`from` 是这两个参与者、首次写入后固定
+    （回复方向相反，两边都要能列出同一 thread），`kind:"handoff"` 不退回，`lastAt`/`preview` 每次投递更新。
+  - 上限 **500** 条（按 `lastAt` 淘汰最旧，只在写路径）、读时过滤 **7 天**、坏文件 / 未知 `version` 按空 + 一次日志；
+    读-合并-写 + `tmp + rename`。
+  - **`collab_threads { target, includeClosed? }`**：索引 join 广播记录（`kind:handoff` / `state` / `bid`）与
+    thread store（`open|answered`、真实出入站正文）；每行 `t_… kind 状态 HH:MM out=… in=… bid=?`，
+    默认只列未闭环、`includeClosed:true` 再列最近 **3** 条已闭环、渲染上限 **20** 条（超出「还有 N 个」），
+    并给唯一一条「← 建议继续」（最新未闭环）+ 可直接复制的下一步。`target` 收 `ses_…` 或别名；不要求会话
+    仍可读（thread 比会话行活得久）。
+  - **`collab_status` 降级（R2）**：命中广播记录时逐字不变；否则查索引 + `threads.read(threadID)`，
+    命中返回 `kind=messages` + target + 状态 + 最近 ≤5 条出入站摘要（各 ≤120 字）+ 关联交接单；
+    两者都不认识才保留原文案。
+  - **只读**：两个工具都不写索引 / 不改 thread / 不投递（严格宿主 + 索引内容与 `size:mtime`、广播目录前后一致）。
 
 ### Tests
 
@@ -154,11 +176,23 @@
   `force` 放行；`dedupeWindowMs:0` 两投；两个工具描述都写明 target 维度与 `force:true`。交接链 **788 → 805 项**。
 - 两组变异验证（原始输出见 `research/impl-notes.md`）：① target 索引改用当前 `threadID` 作键 → 跨 thread
   用例 8 条全红（805→797）；② 去掉 `!force` 分支 → force 三条断言失败（805→802）。
+- **thread 聚合 + 状态降级（S102，`test/handoff-harness.mjs`，18 条）**：同一对会话的 1 handoff + 2 消息 thread
+  被 `collab_threads { target }` 一次列出（kind `handoff`/`messages`、`bid`、出入站摘要、唯一「← 建议继续」）；
+  被回执过的消息 thread 默认不列、`includeClosed:true` 才出现（`answered` + `（已闭环）` + `in=` 摘要）；
+  `collab_status { threadID: 消息 thread }` → `kind=messages` + target + status + 摘要（**不再报错**），
+  未知 thread 保留原错误；预览不写索引（mtime/size 不变）；坏索引按空处理（列表仍可答、降级仍从 thread store
+  读）；501 条时按 `lastAt` 淘汰最旧；四个读命令零写调用且索引内容+`size:mtime`、广播目录前后一致。
+  交接链 **805 → 823 项**，注册表 **20 → 21**。
+- 两组变异验证（原始输出见 `research/impl-notes.md`）：① 索引 key 写成 `bid` → 消息 thread 的列出行消失
+  （3 条断言红）；② 降级直接返回原错误 → `kind=messages` 两条断言红。
 
 ### Docs
 
 - `README.md` 测试计数同步（20 项看板 / 49 项 TUI）；`docs/collab.md` §11.11.6 写明看板复用
   `freeze-pure` 的判定，不再复制优先级。版本三处（`package.json` / `PLUGIN_VERSION` / GUI 常量）→ `0.6.1`。
+- **thread 聚合**：`docs/collab.md` §11.2 新增 `collab_threads` 行并更新 `collab_status` 行 + §11.14 补「消息
+  thread 的降级」+ 新增 §11.17（痛点 / 索引样例与写点 / 上限与容错 / 输出样例 / 只读证明 / 测试与变异 / 回滚）；
+  `README.md` 工具表与结构行；`skills/collab/SKILL.md` 工具表 + 「一点八·补：消息 thread 与聚合」。版本号不变。
 - **自动感知**：`docs/collab.md` §11.3 + 新增 §11.15（双计数口径 / 抑制条件 / 成本上界（每窗口 2 页）/ 协议头
   与可执行回执命令 / 验收与回滚）与 §11.4 配置说明；`README.md` 配置样例 + 配置表新增 `awareness` 行 +
   `context` hook 段落；`skills/collab/SKILL.md` 新增「一点十一、自动感知」。版本号不变（0.7.0 由父任务统一）。

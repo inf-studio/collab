@@ -16,6 +16,7 @@ import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
+import { recordThread } from '../core/thread-index.ts';
 import { fmtTtl, touchWaiters } from '../core/locks.ts';
 import { takeoverBody } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
@@ -720,6 +721,22 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     // R5 (0.6.0): remember this body for the in-process half of the check. A
     // thread message is the persistent half and needs no memo.
     if (threadID) rememberSend(threadID, body, admittedAt);
+    // 0.7.0 (`11-19-collab-threads`, R1): the thread index — written **only**
+    // here (a message the host really admitted), never for a preview / refusal.
+    // `collab_handoff` re-marks the same thread as `handoff` after its record
+    // exists; nothing else writes this file. A failure is a log line, not a
+    // delivery failure: the message is already out.
+    if (threadID) {
+      recordThread({
+        threadID,
+        target: sessionID,
+        from: context?.sessionID ?? 'unknown',
+        kind: 'messages',
+        text: body,
+        bid: bid || undefined,
+        now: admittedAt
+      });
+    }
     // R1 (0.7.0, `11-19-collab-dedupe-target`): the target half — whichever
     // thread carried it, this body just reached this session.
     rememberTargetSend(sessionID, threadID ?? '', body, admittedAt, bid || undefined);
