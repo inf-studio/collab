@@ -406,5 +406,5 @@ export const ARCHIVE_GRACE_MIN_MS = 60 * 1000;
 export const ARCHIVE_GRACE_MAX_MS = 60 * 60 * 1000;
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.6.0';
+export const PLUGIN_VERSION = '0.7.0';
 

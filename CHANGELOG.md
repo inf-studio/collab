@@ -3,7 +3,7 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] · 0.7.0（原 0.6.1 批次） - 2026-11-19
+## [0.7.0] - 2026-11-19
 
 > 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、
 > **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖
