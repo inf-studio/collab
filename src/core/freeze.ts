@@ -24,7 +24,10 @@
  *   4. **precedence**: `session` (self **or any ancestor**) > `bid` >
  *      `workspace`. The ancestor half reuses `createLineage(...).protectedAncestor`
  *      — the same bounded, cycle-safe walk the protect guard uses — so a
- *      sub-agent cannot bypass a frozen parent line.
+ *      sub-agent cannot bypass a frozen parent line. The pure lookup itself
+ *      lives in `core/freeze-pure.ts` (0.6.1) and is re-exported here: the
+ *      board — which ships inside the GUI bundle and may not import `node:*` —
+ *      shares that one implementation instead of copying the rule.
  *   5. **freeze ≠ archive ≠ delete**: no session is hidden, no file is removed,
  *      no permission/agent is touched. Only *new* collaboration into the frozen
  *      object is refused (`collab_handoff` / `collab_broadcast` /
@@ -40,7 +43,15 @@ import { dirname, join } from 'node:path';
 import { errCode, log } from '../log.ts';
 import type { FreezeEntry, FreezeFile } from '../types.ts';
 import { asObject, randToken, readJsonFile } from '../util.ts';
+// 0.6.1 (R1): the precedence lookup is **one** implementation, in the pure
+// module (no `node:` import) that the GUI bundle can also carry. Everything
+// server-side keeps importing it from here.
+import { freezeFor } from './freeze-pure.ts';
+import type { FreezeKeys, FrozenHit } from './freeze-pure.ts';
 import type { Lineage } from './lineage.ts';
+
+export { freezeFor, freezeMarker, liveFreezeMarker, liveFreezes } from './freeze-pure.ts';
+export type { FreezeKeys, FrozenHit } from './freeze-pure.ts';
 
 /** The single global file (design §1). `COLLAB_FREEZE_FILE` overrides it. */
 export const FREEZE_FILE =
@@ -267,52 +278,6 @@ export function mergeFreezes(mutate: (entries: FreezeEntry[]) => FreezeEntry[], 
   } finally {
     releaseGuard(guard);
   }
-}
-
-export interface FreezeKeys {
-  /** The session being written to (its own freeze counts first). */
-  session?: string;
-  /** Ancestors of `session`, nearest first (the pure snapshot path). */
-  ancestors?: string[];
-  /** Hand-off id (`b_…`). */
-  bid?: string;
-  /** Absolute workspace directory. */
-  workspace?: string;
-}
-
-export interface FrozenHit {
-  entry: FreezeEntry;
-  /** The frozen **ancestor** (only when the session hit came through lineage). */
-  via?: string;
-}
-
-/**
- * Pure precedence lookup: `session` (self, then ancestors) > `bid` > `workspace`.
- * Used by the snapshot (which has the parent map in memory) and by
- * `frozenBy` (which walks the live lineage through the host).
- */
-export function freezeFor(entries: FreezeEntry[], keys: FreezeKeys): FrozenHit | undefined {
-  const chain = [keys.session, ...(keys.ancestors ?? [])].filter(Boolean).map(String);
-  if (chain.length) {
-    const byTarget = new Map(
-      entries.filter(entry => entry.scope === 'session').map(entry => [entry.target, entry] as const)
-    );
-    for (const sid of chain) {
-      const entry = byTarget.get(sid);
-      if (entry) return sid === keys.session ? { entry } : { entry, via: sid };
-    }
-  }
-  if (keys.bid) {
-    const entry = entries.find(candidate => candidate.scope === 'bid' && candidate.target === String(keys.bid));
-    if (entry) return { entry };
-  }
-  if (keys.workspace) {
-    const entry = entries.find(
-      candidate => candidate.scope === 'workspace' && candidate.target === String(keys.workspace)
-    );
-    if (entry) return { entry };
-  }
-  return undefined;
 }
 
 /**

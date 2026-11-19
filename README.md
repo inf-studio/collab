@@ -260,7 +260,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 735 项 harness + 12 项只读默认 + 13 项看板派生 + 50 项快照/产物 + 44 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
+pnpm test          # build + 735 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），

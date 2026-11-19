@@ -25,7 +25,13 @@
  *   7. 0.5.1 (R3): the sidebar summary **clicked** expands to detail rows, a
  *      detail row clicked opens `/collab`, the summary clicked again folds it —
  *      real mouse events through the renderer (no prop poking), and expanding
- *      adds no RPC call.
+ *      adds no RPC call;
+ *   8. 0.6.1 (R3): keyboard dispatch in the host's shape — the registered layer
+ *      factory is read, its `enabled()` gate is checked (current + focused panel
+ *      only), and a keypress is dispatched only through that gate. A background
+ *      or unfocused panel renders the tree but receives nothing. The real
+ *      keybinding → command hop is a manual check on a live Desktop/TUI
+ *      (research/impl-notes.md).
  */
 import { createSignal } from 'solid-js';
 import { createComponent, testRender } from '@opentui/solid';
@@ -176,6 +182,34 @@ async function mount(context, render, { width = 90, height = 30 } = {}) {
   await setup.renderOnce();
   const frame = await setup.captureCharFrame();
   return { setup, frame };
+}
+
+/**
+ * What the host does with one keypress (0.6.1, R3): it reads every registered
+ * layer factory, **skips the layers whose `enabled()` is false**, and runs the
+ * command bound to that key. Calling `run()` directly — as the 0.6.0 test did —
+ * bypasses the gate the real host applies, so it cannot catch a layer that
+ * stays enabled on a background (or unfocused) panel.
+ */
+function hostPress(target, bind) {
+  let ran = 0;
+  for (const factory of target.layers) {
+    const layer = factory();
+    if (layer?.enabled && !layer.enabled()) continue;
+    for (const command of layer?.commands ?? []) {
+      if (command.bind !== bind) continue;
+      command.run();
+      ran++;
+    }
+  }
+  return ran;
+}
+
+/** The board layer (`enter`/`j`) of a harness, as the host would obtain it. */
+function boardLayerOf(target) {
+  return target.layers
+    .map(factory => factory())
+    .find(layer => layer?.commands?.some(command => command.bind === 'enter'));
 }
 
 /* ------------------------------------------------------------- 1. registration */
@@ -414,11 +448,14 @@ expect(
   treeFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
 );
 
-const treeLayer = tree.layers
-  .map(factory => factory())
-  .find(layer => layer?.commands?.some(command => command.bind === 'enter'));
+const treeLayer = boardLayerOf(tree);
 expect('R4 the panel registers a keyboard layer (enter/space toggles, j/k move)', Boolean(treeLayer));
-treeLayer?.commands.find(command => command.bind === 'enter')?.run();
+expect(
+  'R4 the layer is enabled while the panel is current and focused (the host would dispatch)',
+  treeLayer?.enabled?.() === true,
+  String(treeLayer?.enabled?.())
+);
+expect('R4 the host dispatches one enter to the board layer', hostPress(tree, 'enter') === 1);
 await treeMounted.setup.renderOnce();
 const expandedTree = await treeMounted.setup.captureCharFrame();
 expect(
@@ -432,9 +469,9 @@ expect(
   expandedTree.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
 );
 
-treeLayer?.commands.find(command => command.bind === 'j')?.run();
-treeLayer?.commands.find(command => command.bind === 'j')?.run();
-treeLayer?.commands.find(command => command.bind === 'enter')?.run();
+hostPress(tree, 'j');
+hostPress(tree, 'j');
+hostPress(tree, 'enter');
 await treeMounted.setup.renderOnce();
 const archivedOpen = await treeMounted.setup.captureCharFrame();
 expect(
@@ -445,63 +482,118 @@ expect(
 await treeMounted.setup.dispose();
 await treeCleanup();
 
-// F2: switching the panel away and back must not stack keyboard layers. A
-// second enabled `enter` layer would toggle twice (= looks stuck) and `j` would
-// jump two rows.
-const flappy = harness({ snapshot: TREE });
-const flappyCleanup = await plugin.setup(flappy.context);
+// F2 + 0.6.1 (R3): the host's gate, not a direct `run()`. The panel is mounted
+// with a **reactive** name/focus pair — the way the host passes `PanelInput` —
+// so one mounted component can be "the open panel", "another panel", and
+// "unfocused" without remounting. Two properties are checked:
+//
+//   - F2: switching away and back must not stack keyboard layers (a second
+//     enabled `enter` layer would toggle twice = looks stuck, `j` would jump
+//     two rows);
+//   - R3: a keypress reaches the board only through `enabled()` — a background
+//     or unfocused panel is skipped by the host, and its state stays untouched.
+const gated = harness({ snapshot: TREE });
+const gatedCleanup = await plugin.setup(gated.context);
 const [panelName, setPanelName] = createSignal('collab.status');
+const [panelFocused, setPanelFocused] = createSignal(true);
 // A stable PanelInput object with reactive getters: this is how the host passes
 // props. Rebuilding it through `panelInput()` would remount the component and
 // hide the very bug we are testing (a layer re-registered inside an effect).
-const flappyPanel = {
+const gatedPanel = {
   get name() {
     return panelName();
+  },
+  get focused() {
+    return panelFocused();
   },
   sessionID: 'ses_a1',
   width: 100,
   presentation: 'panel',
-  focused: true,
   focus() {},
   close() {},
   toggleFullscreen() {}
 };
-const flappyMounted = await mount(flappy.context, () => flappy.slots['session.panel'](flappyPanel));
+const gatedMounted = await mount(gated.context, () => gated.slots['session.panel'](gatedPanel));
+
+const enabledLayers = () => gated.layers.map(factory => factory()).filter(layer => !layer?.enabled || layer.enabled());
+const enabledBoardLayers = () =>
+  enabledLayers().filter(layer => layer?.commands?.some(command => command.bind === 'enter'));
+// `enabled()` lives on the **layer** (the host's gate), not on the command.
+const gatedBoard = () => boardLayerOf(gated);
+const gatedEnabled = () => gatedBoard()?.enabled?.();
+
+expect(
+  'R3 the current, focused panel: enabled() is true (the host would dispatch)',
+  gatedEnabled() === true && enabledBoardLayers().length === 1,
+  `${enabledBoardLayers().length} enabled / ${gated.layers.length} registrations`
+);
+
+// The host's own gate: with the panel unfocused it renders the tree but skips
+// the layer, so `enter` must not expand anything.
+setPanelFocused(false);
+await sleep(60);
+await gatedMounted.setup.renderOnce();
+const unfocusedBefore = await gatedMounted.setup.captureCharFrame();
+const unfocusedRan = hostPress(gated, 'enter');
+await gatedMounted.setup.renderOnce();
+const unfocusedAfter = await gatedMounted.setup.captureCharFrame();
+expect(
+  'R3 an unfocused panel is skipped by the host: enabled() false, 0 commands run, nothing expands',
+  gatedEnabled() === false &&
+    unfocusedRan === 0 &&
+    unfocusedBefore.includes('▸ ses_a1') &&
+    unfocusedAfter.includes('▸ ses_a1') &&
+    !unfocusedAfter.includes('↳'),
+  `enabled=${gatedEnabled()} ran=${unfocusedRan}`
+);
+setPanelFocused(true);
+await sleep(60);
+
+// Another plugin's panel is current: the layer exists but is disabled, the
+// keypress is dropped, and switching back finds the tree exactly as it was.
 setPanelName('someone.else');
 await sleep(120);
+const backgroundRan = hostPress(gated, 'enter');
 setPanelName('collab.status');
 await sleep(120);
-await flappyMounted.setup.renderOnce();
-const activeLayers = () => flappy.layers.map(factory => factory()).filter(layer => !layer?.enabled || layer.enabled());
-const boardLayers = () => activeLayers().filter(layer => layer?.commands?.some(command => command.bind === 'enter'));
+await gatedMounted.setup.renderOnce();
+const backFrame = await gatedMounted.setup.captureCharFrame();
+expect(
+  'R3 a background panel is skipped by the host (enabled() false, 0 commands run) and the board did not change',
+  backgroundRan === 0 &&
+    backFrame.includes('▸ ses_a1') &&
+    !backFrame.includes('↳') &&
+    !backFrame.includes('▾ ses_a1'),
+  `ran=${backgroundRan} / ${backFrame.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 3).join(' | ')}`
+);
 expect(
   'R4 panel away→back leaves exactly one enabled board keyboard layer',
-  boardLayers().length === 1,
-  `${boardLayers().length} enabled / ${flappy.layers.length} registrations`
+  enabledBoardLayers().length === 1,
+  `${enabledBoardLayers().length} enabled / ${gated.layers.length} registrations`
 );
-const press = (bind) => {
-  for (const layer of activeLayers()) layer.commands?.find(command => command.bind === bind)?.run();
-};
-press('enter');
-await flappyMounted.setup.renderOnce();
-const oneEnter = await flappyMounted.setup.captureCharFrame();
+
+// One host keypress on the current panel: exactly one command runs, exactly one
+// row toggles (the F2 regression: two stacked layers would show as still folded).
+const oneRan = hostPress(gated, 'enter');
+await gatedMounted.setup.renderOnce();
+const oneEnter = await gatedMounted.setup.captureCharFrame();
 expect(
   'R4 one enter toggles once (the tree expands after a single keypress)',
-  oneEnter.includes('↳') && oneEnter.includes('▾ ses_a1'),
-  oneEnter.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+  oneRan === 1 && oneEnter.includes('↳') && oneEnter.includes('▾ ses_a1'),
+  `ran=${oneRan} / ${oneEnter.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')}`
 );
-press('enter'); // fold back
-press('j'); // one row: ses_a1 → ses_child
-press('enter');
-await flappyMounted.setup.renderOnce();
-const oneJump = await flappyMounted.setup.captureCharFrame();
+hostPress(gated, 'enter'); // fold back
+hostPress(gated, 'j'); // one row: ses_a1 → ses_child
+hostPress(gated, 'enter');
+await gatedMounted.setup.renderOnce();
+const oneJump = await gatedMounted.setup.captureCharFrame();
 expect(
   'R4 one j moves one row (ses_child expands, not 已归档 / not two rows)',
   oneJump.includes('▾ ses_child') && !oneJump.includes('▾ ses_a1') && !oneJump.includes('▾ 已归档'),
   oneJump.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
 );
-await flappyMounted.setup.dispose();
-await flappyCleanup();
+await gatedMounted.setup.dispose();
+await gatedCleanup();
 
 // Mouse: clicking the session row itself expands it (no keyboard involved).
 const treeMouse = harness({ snapshot: TREE });

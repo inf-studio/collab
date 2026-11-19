@@ -1037,7 +1037,7 @@ core/board.ts  buildBoard(snapshot, freezes, now, me?)  →  Workspace[] → Ses
 | 归属 | 租约：`holders` 或 `waiting` 含本 sid；交接：`from` 或 `claimBy` 是本 sid；队列：快照 `queue` 属于**调用方**（`mineFor(session)`），只挂到 `me` 那一行 |
 | `↳` 拉起 | `handoff.kind === "spawn" && from === sid`，子会话 id = `handoff.spawned ?? claimBy`（`expiredClaim` 的 spawn 也保留）；**只一层**，不递归 |
 | 归档 | `session.archived === true` 进 `archived[]`，不混入活跃列表；数量进工作区头的 `已归档 A`，面板默认只显示 `已归档 N` 折叠段 |
-| 冻结 / 加急 | `frozen` 优先用快照里的 `session.frozen`，否则按 `freezes` 的 session（含祖先）> workspace 优先级推导，过期即不显示；`urgent` = 该会话任一交接或队列项 `priority:"urgent"` |
+| 冻结 / 加急 | `frozen` 优先用快照里的 `session.frozen`，否则按 **`core/freeze-pure.ts` 的 `freezeFor`**（与 `core/freeze.ts` 同一实现）：session（含祖先）> workspace，过期即不显示；`urgent` = 该会话任一交接或队列项 `priority:"urgent"` |
 | 老快照 | `archived` / `kind` / `spawned` / `priority` 全部**可选**：缺失即 `false` / 空，不崩、不显示空徽标；快照方法签名不变 |
 | 只读 | 看板只归类已有数据，没有释放 / 归档 / 解冻按钮（R5）；展开状态是组件本地信号，轮询不重置 |
 
@@ -1047,6 +1047,9 @@ core/board.ts  buildBoard(snapshot, freezes, now, me?)  →  Workspace[] → Ses
 - 兼容：快照里 `sessions` 为空 / 某行的持有者或 `from` 不在列表（老 server、手写夹具、会话已结束、超出 `limit:100`）时，
   未被任何会话行认领的租约 / 交接 / 队列在树后各自成段，标题注明 `· 未归属`（GUI 与 TUI 共用 `boardOrphans`），
   不静默丢行；头部计数与正文因此始终一致。
+- 单一真源（0.6.1）：冻结判定（`freezeFor` / `liveFreezes`）只在 `src/core/freeze-pure.ts` 实现一次，
+  `src/core/freeze.ts` 再导出给服务端调用方，`src/core/board.ts` 直接用它——board 里不再有
+  `until` / session-vs-workspace 的第二份判断（纯模块不含任何 `node:` 导入，GUI bundle 才装得下）。
 
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）

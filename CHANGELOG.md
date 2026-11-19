@@ -3,6 +3,39 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] · 0.7.0（原 0.6.1 批次） - 2026-11-19
+
+> 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、
+> **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖、工具仍 20。
+
+### Changed
+
+- **冻结优先级单一真源（R1）**：新增 `src/core/freeze-pure.ts`（**零 `node:` 导入**）承载
+  `freezeFor` / `freezeMarker` / `liveFreezeMarker` / `liveFreezes`；`src/core/freeze.ts` 改为
+  导入并**再导出**同一实现（`snapshot` / `collab_list` / 各工具 / `__internals` 的导入路径不变），
+  `src/core/board.ts` 直接导入纯模块，删掉 0.6.0 里那份本地副本（`until` 过期过滤 + session/workspace 优先级）。
+  - 为什么必须拆：GUI bundle 把 Node 内建**外置**（`require("node:fs")` 在窗口里不存在），board 一旦
+    经 `core/freeze.ts` 引入 `node:fs`，面板加载即失败；实测把 `freeze.ts` 接进 board 后
+    `dist/gui-experimental.cjs` 出现 `require("node:fs"|"node:os"|"node:path"|"node:crypto")`，拆分后为 **0**。
+  - `buildBoard(snapshot, freezes, now)` 的 `freezes` 语义写进注释：`readFreezes(now)` 的输出（已过滤过期）；
+    board 仍用同一个纯 `liveFreezes` 兜底，所以更老的调用方也不会画出过期冻结。
+
+### Tests
+
+- **`boardOrphans` 纯单测（R2）**：进 `__internals`；`test/board-shape.mjs` 新增孤儿锁 / 孤儿交接 /
+  「队列项被调用方行认领 → 不算孤儿」+「无 `me` 时同一队列项是孤儿」/ 全部被认领 → 三类空，
+  外加一条冻结优先级断言（session 自身或祖先 > workspace）。看板派生 **13 → 20 项**。
+- **按键分派按宿主形状（R3）**：`test/tui-render.mjs` 不再直接 `run()`，改为读注册的 layer 工厂、
+  先过 `enabled()`（面板名 + 聚焦），再分派；断言非当前面板 / 未聚焦时 0 个命令被执行且棋盘不变，
+  切回后一次 `enter` 只 toggle 一次、一次 `j` 只走一行。TUI 渲染 **44 → 49 项**。
+- 两组变异验证（原始输出见任务 `research/impl-notes.md`）：删 `boardOrphans` 的分支 → 对应断言失败；
+  把冻结优先级改回 workspace 先于 session → 优先级断言失败；去掉 `enabled()` 的聚焦判断 → 门控断言失败。
+
+### Docs
+
+- `README.md` 测试计数同步（20 项看板 / 49 项 TUI）；`docs/collab.md` §11.11.6 写明看板复用
+  `freeze-pure` 的判定，不再复制优先级。版本三处（`package.json` / `PLUGIN_VERSION` / GUI 常量）→ `0.6.1`。
+
 ## [0.6.0] - 2026-11-19
 
 > 五件事：**排队有了生命周期**（waiter 心跳 10min + 回收，解掉「资源 free 却锁不上」的死锁）；

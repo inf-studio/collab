@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "看板单一派生/孤儿兜底/键盘层注册约定"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "可读拒绝与失败隔离（不适用于本任务的行为变更）"}
+{"file": ".trellis/spec/frontend/quality-guidelines.md", "reason": "质量门禁"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "回归与变异要求"}

@@ -13,15 +13,17 @@
  *
  * It is deliberately **pure and I/O-free** (`buildBoard(snapshot, freezes, now)`):
  * no host, no file, no clock of its own. The GUI bundle imports it, so it must
- * not pull `node:fs` in through `core/freeze.ts` — the freeze precedence lookup
- * is the small pure copy below. Older snapshots (no `archived` / `kind` /
- * `spawned` fields) derive exactly as before: absence is `false`, never an
- * empty badge.
+ * not pull `node:fs` in — the freeze marker therefore comes from
+ * `core/freeze-pure.ts`, the same `freezeFor` implementation the server-side
+ * `core/freeze.ts` re-exports (0.6.1, R1: one rule, never a copy). Older
+ * snapshots (no `archived` / `kind` / `spawned` fields) derive exactly as
+ * before: absence is `false`, never an empty badge.
  *
  * Read-only (R5): the board only *files* what the snapshot already reported.
  * No lease is released, no session archived, no freeze lifted.
  */
 import type { FreezeEntry } from '../types.ts';
+import { freezeFor, freezeMarker, liveFreezeMarker, liveFreezes } from './freeze-pure.ts';
 import type {
   Snapshot,
   SnapshotFreeze,
@@ -123,45 +125,37 @@ interface Group {
   handoffs: SnapshotHandoff[];
 }
 
-function marker(entry: FreezeEntry): SnapshotFreeze {
-  return {
-    scope: entry.scope,
-    ...(entry.target ? { target: entry.target } : {}),
-    until: Number(entry.until) || 0,
-    reason: entry.reason
-  };
-}
-
 /**
- * The pure half of `freezeFor` (core/freeze.ts): `session` (self, then
- * ancestors) > `workspace`. Kept here so the GUI bundle never imports the
- * filesystem module. Expired entries (`until <= now`) are ignored here too, so
- * a caller that hands over the raw file cannot mark a freeze that is over.
+ * Marker + precedence for one session row: the snapshot's own marker first
+ * (already resolved by `buildSnapshot` with ancestors + workspace, and kept
+ * only while live), else `freezeFor` from `core/freeze-pure.ts` —
+ * `session` (self, then ancestors) > `workspace`. No rule of its own.
  */
-function freezeOf(
+const freezeOf = (
   session: SnapshotSession,
   ancestors: string[],
   entries: FreezeEntry[],
   now: number
-): SnapshotFreeze | undefined {
-  if (session.frozen && Number(session.frozen.until) > now) return session.frozen;
+): SnapshotFreeze | undefined => {
+  const fromSnapshot = liveFreezeMarker(session.frozen, now);
+  if (fromSnapshot) return fromSnapshot;
   if (!entries.length) return undefined;
-  const live = entries.filter(entry => Number(entry?.until) > now);
-  for (const sid of [session.sid, ...ancestors]) {
-    const hit = live.find(entry => entry.scope === 'session' && entry.target === sid);
-    if (hit) return marker(hit);
-  }
-  const workspace = session.workspace || '';
-  const hit = workspace ? live.find(entry => entry.scope === 'workspace' && entry.target === workspace) : undefined;
-  return hit ? marker(hit) : undefined;
-}
+  const hit = freezeFor(entries, { session: session.sid, ancestors, workspace: session.workspace || '' });
+  return hit ? freezeMarker(hit.entry) : undefined;
+};
 
 /**
- * Build the three-layer board. `freezes` is optional (the panels pass `[]` and
- * rely on `session.frozen`, which the snapshot already computed); `now` only
- * drops expired freeze entries. `me` is the caller's session id: the snapshot's
- * `queue` block belongs to *that* session (it is `mineFor(session)`), so it is
- * attached to that row instead of being guessed onto somebody else.
+ * Build the three-layer board.
+ *
+ * `freezes` is the **live** freeze list, i.e. `readFreezes(now)` output
+ * (expired entries already dropped); the panels pass `[]` and rely on
+ * `session.frozen`, which the snapshot already computed. `now` decides whether
+ * that marker is still live and re-applies the same pure `liveFreezes` filter to
+ * whatever list came in (a raw file must not paint an expired freeze) — the
+ * expiry rule and the precedence rule both live in `core/freeze-pure.ts`, not
+ * here. `me` is the caller's session id: the snapshot's `queue` block belongs
+ * to *that* session (it is `mineFor(session)`), so it is attached to that row
+ * instead of being guessed onto somebody else.
  */
 export function buildBoard(
   snapshot: Snapshot | undefined,
@@ -170,6 +164,7 @@ export function buildBoard(
   me?: string
 ): BoardWorkspace[] {
   const sessions = snapshot?.sessions ?? [];
+  const live = liveFreezes(freezes, now);
   const locks = snapshot?.locks ?? [];
   const handoffs = snapshot?.handoffs ?? [];
   const queue = snapshot?.queue ?? [];
@@ -231,7 +226,7 @@ export function buildBoard(
   for (const entry of [...groups.values()].sort((left, right) => left.workspace.localeCompare(right.workspace))) {
     const toBoard = (session: SnapshotSession): BoardSession => {
       const mine = me !== undefined && session.sid === me;
-      const frozen = freezeOf(session, ancestorsOf(session.sid), freezes, now);
+      const frozen = freezeOf(session, ancestorsOf(session.sid), live, now);
       const myLocks = locks.filter(
         lock => (lock.holders ?? []).includes(session.sid) || (lock.waiting ?? []).includes(session.sid)
       );
