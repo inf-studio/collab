@@ -168,6 +168,12 @@ function formatBlock({ record, items, addressee, canPush }: Pick, now: number): 
   const verdict = leaseVerdict(record, now);
 
   const head = [record.bid, `state=${record.state ?? 'open'}`, `priority=${priorityOf(record)}`];
+  // 0.7.0 (R3): the chain head of a forwarded hand-off — shown only when it is
+  // not this record's own requester (a pre-0.7.0 record prints nothing extra).
+  const originSid = String(record.origin?.sid ?? '');
+  if (originSid && originSid !== String(record.from?.sid ?? '')) {
+    head.push(`origin=${originSid}${record.origin?.directory ? ` @ ${record.origin.directory}` : ''}`);
+  }
   if (claimBy) {
     const kind = String(claim.kind ?? 'claim');
     // The remaining time is only meaningful while a lease applies (`verdict`);

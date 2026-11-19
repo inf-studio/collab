@@ -1,7 +1,10 @@
-import { KINDS } from '../constants.ts';
+import { KINDS, STORAGE_ALIASES } from '../constants.ts';
+import { fillOriginDirectory, resolveOrigin } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
+import { originHint } from '../core/verdict.ts';
 import { isValidThreadID, newThreadID, normalizeKind, normalizeThreadID } from '../ids.ts';
-import type { ToolDefinition } from '../types.ts';
+import type { JsonObject, ToolDefinition } from '../types.ts';
+import { asObject } from '../util.ts';
 import { canReplyToProtected, jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
@@ -12,7 +15,7 @@ import type { ToolKit } from './shared.ts';
  */
 export function sendTool(kit: ToolKit): ToolDefinition {
   const { deps, resolveTarget, resolveMode, dispatch } = kit;
-  const { threads } = deps;
+  const { threads, ctx, readConfig } = deps;
 
   return {
     name: 'collab_send',
@@ -61,6 +64,13 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             "queue (default) waits for the target's next turn — does not interrupt. " +
             'steer merges into the running turn and may interrupt it: only use it deliberately.'
         },
+        origin: {
+          type: 'string',
+          description:
+            '对接人（0.7.0）：转发别人的活儿时这条链真正的起点会话（`ses_…` 或别名）。给了就在正文首行加' +
+            '`对接人（非本单发起方）：ses_… @ <dir>`，让对端不必再问「该找谁」。' +
+            '不写记录，也不继承（本工具没有记录可继承；回执不该被追加一行）；与发送者相同则不写。'
+        },
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false/omitted only returns the preview.'
@@ -90,6 +100,38 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         notes.push('kind=reply 缺少 threadID → 已按新请求处理（并自动生成 threadID）');
       }
 
+      // 0.7.0 (`11-19-collab-origin`, R2): a *forwarded* message names the chain
+      // head. Only an explicit `origin` renders the line: `collab_send` writes
+      // no record, so it has nothing to inherit from, and a receipt written back
+      // to one's own requester must not grow a 对接人 line. No origin = the body
+      // is byte for byte unchanged.
+      let storedAliases: JsonObject = {};
+      if (input?.origin) {
+        try {
+          storedAliases = asObject(await ctx?.storage?.get(STORAGE_ALIASES));
+        } catch {
+          storedAliases = {}; // unreadable alias table = only collab.json's aliases
+        }
+      }
+      const resolvedOrigin = input?.origin
+        ? resolveOrigin({
+            me,
+            directory: ctx?.location?.directory,
+            requested: input.origin,
+            aliases: { ...storedAliases, ...readConfig().aliases }
+          })
+        : ({ ok: true, origin: undefined } as const);
+      if (!resolvedOrigin.ok) throw invalid(resolvedOrigin.reason ?? '对接人无法解析');
+      const origin = await fillOriginDirectory(resolvedOrigin.origin, ctx);
+      const usableOrigin = origin && origin.sid !== String(me ?? '') ? origin : undefined;
+      const originLineText = usableOrigin ? originHint(usableOrigin, me) : undefined;
+      /** The same call with the 对接人 line as the *first* body line (no origin → unchanged). */
+      const withOrigin = (raw: JsonObject | undefined): JsonObject | undefined =>
+        originLineText
+          ? { ...raw, text: `${originLineText}\n${String(raw?.text ?? '').trim()}` }
+          : raw;
+      if (originLineText) notes.push(`${originLineText} → 已写在正文首行`);
+
       // Reply routing: caller must be a participant and the target must be the
       // thread's counterpart. Without both checks a leaked threadID is enough
       // to forge a reply (T1) or to write it into someone else's thread (T2).
@@ -117,7 +159,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
           const { mode, forced } = resolveMode(input?.mode, context?.agent);
           return dispatch({
             context,
-            input,
+            input: withOrigin(input),
             kind,
             threadID,
             mode,
@@ -132,7 +174,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
                 target: resolved.sessionID,
                 sender: me,
                 bid: input?.bid,
-                text: input?.text,
+                text: withOrigin(input)?.text,
                 mode: input?.mode
               })
             )
@@ -155,11 +197,33 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         target: target.sessionID,
         sender: me,
         bid: input?.bid,
-        text: input?.text,
+        text: withOrigin(input)?.text,
         mode: input?.mode,
         legacyAllowed: legacyKind
       });
-      if (boundedReply) {
+      // 0.7.0 (B, `11-19-collab-origin`): a receipt may also be addressed to the
+      // **chain head** of a forwarded hand-off (`A → B → C`: C answers A without
+      // going back through B), so the same `[handoff]` line must travel as
+      // `kind:reply` there too — otherwise the receiving side drops it as an
+      // explicit `request` and the bid stays `acked`.
+      //
+      // Deliberately a **separate** decision from the branch above: it only
+      // rewrites the kind. `allowProtectedReply` below is still
+      // `Boolean(boundedReply)`, i.e. the untouched `from.sid` rule — a
+      // protected `origin` never gains a delivery path through this widening.
+      const receiptToChainHead = boundedReply
+        ? undefined
+        : canReplyToProtected({
+            kind: requestedKind,
+            target: target.sessionID,
+            sender: me,
+            bid: input?.bid,
+            text: withOrigin(input)?.text,
+            mode: input?.mode,
+            legacyAllowed: legacyKind,
+            acceptOrigin: true
+          });
+      if (boundedReply || receiptToChainHead) {
         kind = 'reply';
         const downgraded = notes.findIndex(note => note.includes('kind=reply 缺少 threadID'));
         if (downgraded >= 0) notes.splice(downgraded, 1);
@@ -168,10 +232,16 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             '遗留回执（0.1.1 及更早的命令不带 kind）已按 kind=reply 放行：正文含 [handoff]、bid 归属该记录、发送者是该单领取人。'
           );
         }
+        if (receiptToChainHead) {
+          notes.push(
+            `回执发往对接人 ${target.sessionID}（本单 origin，不是发起方 ${receiptToChainHead.from?.sid ?? '?'}）：` +
+              '同一条 [handoff] 行按 kind=reply 投递并闭环本单；受保护投递规则不变（origin 指向 [protected*] 时仍拒投）。'
+          );
+        }
       }
       return dispatch({
         context,
-        input,
+        input: withOrigin(input),
         kind,
         threadID,
         mode,

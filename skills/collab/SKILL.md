@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -27,10 +27,10 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
-| `collab_send` | `target, text, kind?, threadID?, mode?, confirm` | 投递消息；`kind=request/reply/note` | 发消息 |
+| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0） | 发消息 |
 | `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
-| `collab_handoff` | `target?, text, expected?, confirm` | **同工作区**交接：选人 + 开 thread | 发消息 |
-| `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
+| `collab_handoff` | `target?, text, expected?, origin?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承） | 发消息 |
+| `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
 | `collab_request_owner` | `target?, text?, issuePath?, id?, revoke?, confirm` | **受保护目标请求队列**：只写队列文件（非保护 → 受保护），0 投递 | 写本地队列（旁路） |
 | `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
@@ -230,6 +230,30 @@ collab_freeze { scope:"session", target:"ses_…", freeze:false, confirm:true } 
 「回执」才是完成：只在会话里说「做完了」既不会被采纳，也不会自动闭环——闭环**只认**正文里的
 `[handoff] DONE|BLOCKED <bid>` 行；`collab_reply` 没有 `kind` 参数，`text` 是必填，别省（协议头里的
 `①领取 → ②回执 → ③只分析=未完成` 三步照旧）。
+
+## 一点十二、对接人 `origin`：转发链不丢 A（0.7.0）
+
+A → B → C 时，B→C 的记录 `from` 只能是 B。没有 `origin` 时 C 遇阻塞只能回 B、B 再转 A（实测 4 跳）；
+现在记录带一个可选的 `origin`（真正的链头），C 一眼看到 A，阻塞时把 `[handoff] DONE|BLOCKED b_…` **直接发给 A**
+就闭环（2 跳）。边界：只有本单**发起方或对接人**能闭环（发给第三方仍是普通 `request`），
+且受保护投递规则不变（`origin` 指向 `[protected*]` 时照旧拒投）。
+
+```text
+你是承接方（bid=b_… / thread=t_…）
+完成后回执：<…>
+对接人（非本单发起方）：ses_A @ /data/project/muke-interface
+```
+
+- **不用手填**：`collab_handoff` / `collab_broadcast` 的 `origin` 缺省时，若当前会话是某条**未闭环**交接的
+  承接方（`claim.by = 本会话`），自动继承该记录的 `origin ?? from`；否则就是本会话。
+  第一跳（自己就是链头）不写、不显示；`origin == from` 时输出与旧版逐字一致。
+- 显式 `origin`（`ses_…` 或别名）永远优先，用来**覆盖**继承；未知别名 = 可读拒绝、0 写入、0 投递。
+- `collab_send` 的 `origin` **只影响正文**（首行加同一行，不写记录、不继承）——转发一段话时用。
+- `directory` 是尽力而为：继承时沿用上一跳记录里的目录，显式 sid 时向宿主要一次（失败只显示
+  `(未知目录)`，不抛）。
+- 只读视图：`collab_status` 头部 `origin=ses_… @ <dir>`；`collab_list` 行尾 ` via ses_…`。
+- `origin` 只是展示：指向 `[protected*]` 也不会产生任何投递，护栏不因它放宽。
+- 人工转达时照三行写：`提案：<路径>` / `bid：b_…` / `对接人（非本单发起方）：ses_… @ <dir>`。
 
 ## 二、同工作区（local）
 

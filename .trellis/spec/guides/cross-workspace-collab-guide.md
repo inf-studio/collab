@@ -394,3 +394,12 @@ export default {
 opencode api get "/api/plugin?location%5Bdirectory%5D=$PWD"                            # collab + collab-global(静默)
 opencode api get "/api/plugin?location%5Bdirectory%5D=/data/project/muke-interface"    # collab-global
 ```
+
+## 对接人（`origin`）与「谁能闭环一单」
+
+- 转发链 A→B→C：B 写记录时 `from=B`，真正的链头放 `origin`（`collab_handoff/broadcast` 接受 `origin`；
+  未显式给时**一层继承** B 作为承接方那条未闭环单的 `origin ?? from`）。
+- 记录 `origin.sid === from.sid` 时**不落盘、不渲染**（保证单跳交接与旧版逐字一致）。
+- **回执可发给两个人**：本单发起方（`from.sid`）或对接人（`origin.sid`）。发给第三方仍是 `kind=request`，不会闭环。
+- **受保护白名单没有因此放宽**：能否向 `[protected*]` 投递，仍只看 `target === from.sid`
+  且发送者是领取人；`origin` 只影响「kind 改写」，不影响放行。

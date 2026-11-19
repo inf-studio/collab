@@ -7,7 +7,8 @@
 
 > 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、
 > **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖、工具仍 20。
-> 同一发布窗口还收了 **协作自动感知**（`11-19-collab-awareness`）：一行双计数提示 + 承接方两行协议头。
+> 同一发布窗口还收了 **协作自动感知**（`11-19-collab-awareness`）：一行双计数提示 + 承接方两行协议头，
+> 以及 **交接对接人 `origin`**（`11-19-collab-origin`）：转发链不再丢链头（实测 4 跳 → 2 跳）。
 
 ### Added
 
@@ -29,6 +30,31 @@
 - **配置项 `awareness`**（`collab.json` / 插件 options，默认 `"line"`，`"off"` 关闭）：启动日志打印
   `awareness=…`；`DEFAULTS` 增 `awareness`，`__internals` 增 `awarenessText` / `AWARENESS_TTL_MS` /
   `AWARENESS_LIST_LIMIT`（纯渲染 + 两个界值可无宿主单测）。
+- **交接对接人 `origin`（R1–R5，`11-19-collab-origin`）**：记录新增可选
+  `origin?: { sid, role?, directory? }`（旧记录缺省，`normalizeOrigin` 容忍未知/畸形值）。真实链路
+  A(`ses_edc3…`) → B(`ses_e0e3…`) → C(`ses_e4c0…`) 里 B→C 的 `from` 只能是 B，缺了链头的 C 遇阻塞只能
+  回 B → B 转 A → A 在别的 thread 回话（**4 跳**）；现在 C 直接看得到 A 并直接把 `[handoff] BLOCKED <bid>`
+  发给 A 即闭环（**2 跳**）。
+  - **入参**：`collab_handoff` / `collab_broadcast` / `collab_send` 都接受 `origin`（`ses_…` 或别名）。
+  - **一层继承（R4）**：未显式给时，若当前会话是某条未闭环交接的承接方（`claim.by = 本会话`），取该记录的
+    `origin ?? from`；否则 = 本会话。B 转发 A 的活儿**一个字都不用填**，C 的记录里就是 A。
+  - **存储**：`origin.sid === from.sid`（自己就是链头）不写、不渲染 → 单跳交接的输出与 0.6.0 逐字一致。
+  - **渲染（R3）**：`protocolHeader` / `takeoverBody` / peer 接管请求块在协议头之后加一行
+    `对接人（非本单发起方）：ses_A @ <dir>`（仅当 `origin ≠ from`）；`handoffActions` 的 ② 之后同一行，
+    并给「跨层结论可直接发给它」的可复制 `collab_send`（同一条 `[handoff]` 行也能闭环本单——
+    仅限本单发起方或对接人，第三方发送不会闭环；见下方 Fixed）；
+    `receiptMode:"pull"` 只显示、不邀请 `collab_send`。
+  - **展示**：`collab_status` 头部 `origin=ses_… @ <dir>`，`collab_list` 行尾 ` via ses_…`（同样仅当 `origin ≠ from`）。
+  - **`collab_send`**：只在**显式** `origin` 时把同一行写在正文首行（不写记录、不继承）；无 `origin` 正文逐字不变。
+  - **拒绝**：未知别名 = 可读错误（`未知对接人 "…"：既不是 ses_ 会话 id，也不在别名表里`），0 写入、0 投递。
+  - **`directory` 尽力而为**：继承时沿用上一跳目录；显式 sid 时向宿主要一次会话信息（`fillOriginDirectory`，
+    失败只显示 `(未知目录)`，不抛）。`origin` 本身不产生投递。
+  - **「发给对接人也能闭环」是真的（复核 B，`src/tools/shared.ts` + `send.ts`）**：`collab_send` 的
+    「正文 `[handoff]` + bid 归属该单 + 发送者是该单领取人」遗留回执形态，目标从 `from.sid` 扩展为
+    **`from.sid 或 origin.sid`**，按 `kind=reply` 投递；接收侧才认、本单才闭环（复核前这条承诺是假的：
+    发给 A 的消息到了，`state` 仍停在 `acked`）。**两处刻意拆开**：`acceptOrigin` 只参与 **kind 改写**，
+    `allowProtectedReply` 仍只看 `from.sid` → `origin` 指向 `[protected*]` 时照旧拒投；第三方目标仍是
+    普通 `request`，不闭环（S100 用真实投递回放同时断言正反两面）。
 
 ### Changed
 
@@ -44,6 +70,15 @@
 
 ### Fixed
 
+- **「发给对接人也能闭环」原先只是承诺（0.7.0 复核 B，`11-19-collab-origin`）**：`handoffActions` 让 C
+  「跨层结论可直接发给对接人 A」，但 `canReplyToProtected` 的目标判据只有 `record.from.sid`（本单是 B），
+  发给 A 的消息被投递成 `kind=request`，接收侧按「显式 request 非回执」丢弃——记录停在 `acked`，
+  **同一句承诺还写进了 CHANGELOG / `docs/collab.md` §11.16 / README**。修法：`canReplyToProtected` 增加
+  `acceptOrigin`（目标 = `from.sid` **或** `origin.sid`，仍要求发送者是 `claim.by`），`collab_send` 只在
+  「非受保护放行」那条路径上用它决定 `kind=reply` 改写；`allowProtectedReply` 保持 `Boolean(boundedReply)`
+  ——**受保护投递一点没放宽**（`origin` 指向 `[protected*]` 仍拒投）。同时把 S100 的闭环用例从
+  「手写 `kind:'reply'` + 不存在的 thread」改成**真实投递回放**，并补第三方目标的反向断言与 protected
+  origin 的拒投断言（自证问题见复核 §7）。
 - **协议头的回执命令其实闭不了环（0.7.0 复核 P2）**：第一版第二行是
   `collab_reply { threadID, confirm:true }；阻塞用 kind:"note"`——`text` 是 `collab_reply` 的必填参数（照抄直接报
   `text 不能为空`），`kind` 根本不在它的入参里，且显式 `note` 入站被当作「有意非回执」忽略；补上 `text` 只写「已完成」
@@ -75,6 +110,25 @@
   去掉 10 分钟窗口（`shownAt` 去重 + `listedAt` 复用）→ 两条缓存断言失败（`line=true reads=2`）；
   把 `protocolHeader` 改回缺 `text` 的旧文案 → 「照回执后 done」断言失败；无 workspace 分支改回两边都算 →
   重复计数断言失败。
+- **对接人 `origin`（S100，`test/handoff-harness.mjs`，32 条）**：真实链路 A→B→C——第一跳不写 `origin`
+  （输出与 0.6.0 一致）；B 领取 A 的单后 **B→C 不填 `origin` 也继承 A**（含 A 的目录，`（继承自 b_…）`）；
+  `from` 仍是 B；C 的注入块同时出现 `发起方=B` 与 `对接人 A @ <dir>`，回执指引给出 `collab_send {target:"A"}`
+  的可复制命令**并写明边界**（仅本单发起方或对接人、第三方不闭环）；C 领取后 `collab_status` 显示 `origin=`、
+  `collab_list` 行尾 ` via A`；**闭环用例是真实回放**（复核 §7 修正）：C 真调
+  `collab_send {target:"A", text:"[handoff] DONE b_… …"}` → 宿主收到的 prompt 按 `kind=reply` 投递
+  → 回灌成 inbound → `state=done`；同一行发给**第三方** → `kind=request`、`state` 保持 `acked`（只放开两个目标）；
+  `origin` 指向 `[protected*]` 时该投递仍被拒、0 条 prompt（改写不放宽护栏）；显式 `origin` 覆盖继承
+  （并经宿主要到目录）；旧记录 / `origin == from` 的 `collab_status` 输出**逐字相同**、注入无对接人行；
+  未知别名三个工具一致可读拒绝且 0 记录 0 投递；`collab_handoff` 正文第 4 行是对接人行（前 3 行协议头不动）、
+  `collab_send` 显式 `origin` 写正文首行、无 `origin` 正文不变、自称对接人（`origin == 发送者`）被丢弃。
+  交接链 **756 → 788 项**。
+- 变异验证（原始输出见 `research/impl-notes.md`）：① 把继承分支短路（`if (false && holder)`）→
+  7 条 origin 断言失败（783→776：`B→C inherits A` / 注入 / status / list / receipt 全红）；
+  ② 去掉 `originHint` 的 `origin ≠ requester` 判定 → 旧记录（`origin == from`）的「注入无对接人行」失败（783→782）；
+  ③ 去掉 `acceptOrigin` 的 origin 分支（`targetSid !== requesterSid` 即拒）→ 「回执按 kind=reply 投递」与
+  「C 发给 A 即闭环」两条失败（788→786）；④ 把目标判定放宽成「任意 target」→ 第三方断言失败
+  （`state=blocked` 被第三方提前闭环）、C 的正向闭环也失败，且既有 S69/S81 的受保护拒投同时变红（788→781），
+  说明「改写」必须与「受保护放行」严格拆开。
 
 ### Docs
 
@@ -83,6 +137,9 @@
 - **自动感知**：`docs/collab.md` §11.3 + 新增 §11.15（双计数口径 / 抑制条件 / 成本上界（每窗口 2 页）/ 协议头
   与可执行回执命令 / 验收与回滚）与 §11.4 配置说明；`README.md` 配置样例 + 配置表新增 `awareness` 行 +
   `context` hook 段落；`skills/collab/SKILL.md` 新增「一点十一、自动感知」。版本号不变（0.7.0 由父任务统一）。
+- **对接人 `origin`**：`docs/collab.md` 新增 §11.16（字段与入参 / 一层继承 / 三处渲染 / **三行人工模板**
+  「提案 / bid / 对接人 sid+location」/ 验收与回滚）+ §11.2 五个工具行的 `origin?`；`README.md` 工具表 +
+  `context` hook 段落；`skills/collab/SKILL.md` 新增「一点十二、对接人 `origin`」。版本号不变。
 
 ## [0.6.0] - 2026-11-19
 

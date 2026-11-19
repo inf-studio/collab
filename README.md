@@ -26,8 +26,8 @@
 | `collab_freeze`   | **临时冻结**一个会话（含子会话）/ 工作区 / 一单：`handoff`/`broadcast`/`accept`/`escalate` 对它的**新建**协作可读拒绝（0 写入），`until` 到期自动失效；通知一次（受保护目标 → urgent 队列项）；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
 | `collab_send`      | 往另一个会话投递消息（`queue` 默认，不打断）                               | 发消息            |
 | `collab_reply`     | 按 thread 自动路由的回执                                                   | 发消息            |
-| `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread                              | 发消息            |
-| `collab_broadcast` | 跨工作区交接：读提案 → 打分 → 写全局交接文件 → 只问 top-1 / 必要时拉新会话 | 发消息 + 可建会话 |
+| `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread；`origin?` 记录转发链链头   | 发消息            |
+| `collab_broadcast` | 跨工作区交接：读提案 → 打分 → 写全局交接文件 → 只问 top-1 / 必要时拉新会话；`origin?` 缺省继承上一跳 | 发消息 + 可建会话 |
 | `collab_accept`    | 原子领取广播（`<bid>.lock`，只有一个 winner）                              | 写交接记录        |
 | `collab_request_owner` | 给**受保护**会话（`[protected]`/`[protected-child]`）排队一条请求：只写队列文件，目标下次运行时看到 ≤3 行只读提示（**不投递**、不建 bid/thread、`revoke` 仅发起方） | 写本地队列        |
 | `collab_grant`     | 给**一个会话**追加 5 条 `collab_*` 会话级权限（`revoke` 还原快照）         | **写会话权限**    |
@@ -44,6 +44,15 @@
 0.7.0 起它在**末尾**再追加一行只读的**自动感知**提示（每会话每 10 分钟最多一次、预算满时最先让位）：
 `协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）`——
 只给数量与通道，不猜「该找谁」；`awareness:"off"` 关闭。受保护会话拿不到这一行。
+
+0.7.0 起交接记录还带一个可选的 **`origin`（对接人）**：A → B → C 时 C 的记录 `from` 只能是 B，
+但 `origin` 写的是链头 A（B 不用手填，缺省从「本会话正在承接的未闭环交接」继承一层）。
+承接方的注入 / 回执模板因此多一行 `对接人（非本单发起方）：ses_A @ <dir>`，阻塞时可把
+`[handoff] DONE|BLOCKED b_…` **直接发给 A**：接收侧按 `kind=reply` 认这条回执，本单即闭环
+（实测 4 跳 → 2 跳）；`collab_status` 显示 `origin=`、`collab_list` 行尾 `via ses_…`。
+边界：只有本单**发起方或对接人**能让这条行闭环（发给第三方仍是普通 `request`），
+且受保护投递规则不变（`origin` 指向 `[protected*]` 时照旧拒投）。没有 `origin` 的旧记录输出与 0.6.0
+逐字一致；`origin` 本身不产生任何投递。
 受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
 （每条一次，不含指令、不产生投递；两类合计 ≤3 行，同一提案只渲染 `at` 最新的一条）。
 

@@ -1013,7 +1013,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
             ...protocolHeader({
               bid: record.bid,
               threadID: record.threadID,
-              peer: record.scope === 'peer'
+              peer: record.scope === 'peer',
+              // 0.7.0 (R3): the chain head of a forwarded hand-off (`A → B → C`).
+              origin: record.origin,
+              requester
             }),
             `- 接管请求 ${record.bid}：${truncate(record.title ?? '(untitled)', 80)}（提案 ${record.issuePath}，期望 ${record.expected}，影响面 ${files}）` +
               ` 发起方=${requester || '(缺失，用 collab_inbox 查)'} → ${handoffActions({
@@ -1023,7 +1026,9 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
                 // R1 (pull): a protected requester cannot receive a pushed
                 // receipt, so the ask line must not demand one.
                 receiptMode: record.receiptMode === 'pull' ? 'pull' : 'push',
-                expected: record.expected
+                expected: record.expected,
+                // 0.7.0 (R3): the receipt block names the chain head too.
+                origin: record.origin
               }).join(' ')}`
           );
           // F1 (same class): this write follows `resendIfDue`'s awaits, so merge

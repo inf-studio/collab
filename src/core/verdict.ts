@@ -1,6 +1,6 @@
 import { VERDICT_MESSAGE_LIMIT, VERDICT_NOTE_LIMIT, BCAST_LEASE_MS } from '../constants.ts';
 import { normalizeThreadID } from '../ids.ts';
-import type { BroadcastRecord, SessionMessageLike } from '../types.ts';
+import type { BroadcastOrigin, BroadcastRecord, SessionMessageLike } from '../types.ts';
 import { truncateRaw } from '../util.ts';
 
 /**
@@ -256,12 +256,18 @@ export function verdictFromTexts(texts: string[] | undefined, { bid }: { bid?: s
 export function protocolHeader({
   bid,
   threadID,
-  peer = false
+  peer = false,
+  origin,
+  requester
 }: {
   bid?: string;
   threadID?: string;
   /** Cross-workspace: never advertise `collab_reply` (no shared thread there). */
   peer?: boolean;
+  /** 0.7.0 (R3): the chain head of a forwarded hand-off (`origin ≠ from`). */
+  origin?: BroadcastOrigin;
+  /** `from.sid` of the record — the line is omitted when it *is* the origin. */
+  requester?: string;
 }): string[] {
   const id = String(bid ?? '');
   const target = id || '<bid>';
@@ -283,7 +289,27 @@ export function protocolHeader({
   } else {
     lines.push('完成后回执：把 [handoff] DONE|BLOCKED <bid> <摘要> 写进 collab_send 的 text 发给发起方。');
   }
+  // 0.7.0 (R3): the chain head, when it is not this hand-off's own requester.
+  // Appended — the two receipt lines above keep their exact positions (S99).
+  const hint = originHint(origin, requester);
+  if (hint) lines.push(hint);
   return lines;
+}
+
+/**
+ * 0.7.0 (R3, `11-19-collab-origin`): `对接人（非本单发起方）：ses_… @ <dir>`.
+ *
+ * The real chain `A → B → C` used to hide A in prose: C's record could only say
+ * `from = B`, so a blocked C went back to B, B forwarded to A, A answered in
+ * another thread — 4 hops for a 2-hop question. The line is emitted **only when
+ * the origin really differs from `from.sid`**, which is what keeps every
+ * pre-0.7.0 record (no `origin`) byte for byte identical.
+ */
+export function originHint(origin: BroadcastOrigin | undefined, requester: string | undefined): string | undefined {
+  const sid = String(origin?.sid ?? '').trim();
+  if (!sid || sid === String(requester ?? '').trim()) return undefined;
+  const directory = String(origin?.directory ?? '').trim() || '(未知目录)';
+  return `对接人（非本单发起方）：${sid} @ ${directory}`;
 }
 
 /**
@@ -308,7 +334,14 @@ export function takeoverBody({
   const receiptMode: 'push' | 'pull' = record?.receiptMode === 'pull' ? 'pull' : 'push';
   return [
     // 0.7.0 (R2): the claimant learns who it is and how to answer first.
-    ...protocolHeader({ bid: record.bid, threadID: record.threadID, peer: record.scope === 'peer' }),
+    ...protocolHeader({
+      bid: record.bid,
+      threadID: record.threadID,
+      peer: record.scope === 'peer',
+      // 0.7.0 (R3): `A → B → C` — C sees A here even when `from` is B.
+      origin: record.origin,
+      requester
+    }),
     `[collab-handoff] ${record.title ?? '(untitled)'}`,
     `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
     `影响面：${(record.affectedFiles ?? []).slice(0, 8).join(', ') || '(未标注)'}`,
@@ -323,7 +356,16 @@ export function takeoverBody({
     '按顺序完成（三步都不要省略）：',
     // R1 (G1): accept → receipt → "analysing in-session is not done", with
     // copy-pasteable commands (full sid + bid).
-    ...handoffActions({ bid: record.bid, requester, spawn, leaseMin, receiptMode, expected: record.expected }),
+    ...handoffActions({
+      bid: record.bid,
+      requester,
+      spawn,
+      leaseMin,
+      receiptMode,
+      expected: record.expected,
+      // 0.7.0 (R3): the receipt block names the chain head too.
+      origin: record.origin
+    }),
     spawn
       ? receiptMode === 'pull'
         ? '确实做不了：在最后一条回复里写 BLOCKED 回执（不要 collab_send），不要静默挂起。'
@@ -353,7 +395,8 @@ export function handoffActions({
   spawn = false,
   leaseMin = 5,
   receiptMode = 'push',
-  expected = 'implement'
+  expected = 'implement',
+  origin
 }: {
   bid: string;
   requester?: string;
@@ -362,6 +405,13 @@ export function handoffActions({
   receiptMode?: 'push' | 'pull';
   /** D3 (0.4.0): `research` swaps step ③ for read-only wording. */
   expected?: string;
+  /**
+   * 0.7.0 (R3): the chain head of a forwarded hand-off. Only rendered when it
+   * differs from `requester`; adds the 对接人 line (and, on the push path, the
+   * one command that lets a blocked claimant answer the chain head directly —
+   * the whole point of the field, 4 hops → 2).
+   */
+  origin?: BroadcastOrigin;
 }): string[] {
   const target = requester || 'ses_…';
   const research = expected === 'research';
@@ -385,6 +435,10 @@ export function handoffActions({
         `   没余力/不接：不领取即可（${leaseMin} 分钟不答自动顺延下一候选；pull 模式没有推送，不需要回执）`
       );
     }
+    // 0.7.0 (R3): display only here — a push into any protected line is refused,
+    // so naming the chain head must not turn into a `collab_send` invitation.
+    const pullHint = originHint(origin, requester);
+    if (pullHint) lines.push(`   ${pullHint}（只作展示：跨层结论仍写在你自己最后一条回复里）`);
     return lines;
   }
   lines.push(
@@ -396,6 +450,15 @@ export function handoffActions({
       : '③ 只分析、不调用工具 = 未完成：结论必须用上面的 collab_send 真正发出。' +
         '（② 里的文字只是格式示例——复述/回显它不算回执，也不会被自动闭环。）'
   );
+  // 0.7.0 (R3): the chain head, when it is not this hand-off's own requester.
+  const hint = originHint(origin, requester);
+  const head = String(origin?.sid ?? '').trim();
+  if (hint && head) {
+    lines.push(
+      `   ${hint} —— 跨层结论可直接发给它：collab_send {target:"${head}", text:"[handoff] DONE ${bid} <摘要>", confirm:true}` +
+        `（同一条 [handoff] 行也能闭环本单，不必再经发起方转发；仅限本单发起方或对接人，第三方发送不会闭环）`
+    );
+  }
   if (!spawn) {
     lines.push(
       `   没余力/不接：collab_send {target:"${target}", text:"DECLINE ${bid} <理由>", confirm:true}` +

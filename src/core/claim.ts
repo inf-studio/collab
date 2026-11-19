@@ -12,9 +12,179 @@ import {
   MAX_STORED
 } from '../constants.ts';
 import { errCode, errText, log } from '../log.ts';
-import type { BroadcastRecord, JsonObject } from '../types.ts';
+import type { BroadcastOrigin, BroadcastRecord, CollabContext, JsonObject } from '../types.ts';
 import { asObject, dedupe, randToken, readJsonFile } from '../util.ts';
 import { sanitizePathText } from './followup.ts';
+
+/** The three display-only roles a chain head may claim (`origin.role`). */
+const ORIGIN_ROLES: BroadcastOrigin['role'][] = ['requester', 'implementer', 'observer'];
+
+/**
+ * 0.7.0 (R1, `11-19-collab-origin`): read `origin` tolerantly. A record written
+ * by a newer version, a hand-edited file or a junk value must never make the
+ * whole hand-off unreadable — an unusable `origin` simply means "no 对接人".
+ */
+export function normalizeOrigin(raw: unknown): BroadcastOrigin | undefined {
+  const value = asObject(raw);
+  const sid = String(value.sid ?? '').trim();
+  if (!sid) return undefined;
+  const role = ORIGIN_ROLES.includes(value.role) ? (value.role as BroadcastOrigin['role']) : undefined;
+  const directory = typeof value.directory === 'string' ? value.directory.trim() : '';
+  return {
+    sid,
+    ...(role ? { role } : {}),
+    ...(directory ? { directory } : {})
+  };
+}
+
+/**
+ * The origin to **store**: only a real upstream is persisted. A record whose
+ * `origin.sid` equals its own `from.sid` adds nothing (the requester *is* the
+ * chain head), and keeping it out is what makes every pre-0.7.0 output byte for
+ * byte identical for a single-hop hand-off.
+ */
+export function storedOrigin(
+  origin: BroadcastOrigin | undefined,
+  from: string | undefined
+): BroadcastOrigin | undefined {
+  const value = normalizeOrigin(origin);
+  const sid = String(value?.sid ?? '').trim();
+  const requester = String(from ?? '').trim();
+  if (!sid || sid === requester) return undefined;
+  return value;
+}
+
+export interface OriginResolution {
+  ok: boolean;
+  /** The origin to use (`undefined` = this record has no 对接人). */
+  origin?: BroadcastOrigin;
+  /** `true` when it came from an upstream record instead of the caller/`me`. */
+  inherited?: boolean;
+  /** The bid the inheritance came from (only when `inherited`). */
+  via?: string;
+  /** Readable refusal (only when `ok === false`) — the caller throws it as-is. */
+  reason?: string;
+}
+
+/** `sid` of a hand-off that still needs an answer (`open` included). */
+const unresolved = (record: BroadcastRecord): boolean => !BCAST_DONE_STATES.includes(String(record.state));
+
+/** Session id shape — `ses_` plus a non-empty token (aliases are resolved first). */
+const SESSION_ID_RE = /^ses_[A-Za-z0-9_-]+$/;
+
+/**
+ * 0.7.0 (R2/R4): resolve the `origin` of a hand-off being written or forwarded.
+ *
+ * - explicit `requested` (`ses_…` or an alias) wins — an unknown alias is a
+ *   readable refusal, never a silently dropped field;
+ * - otherwise **one level of inheritance**: if this session is the claimant of
+ *   an unresolved hand-off (`claim.by === me`, newest first), the chain head is
+ *   that record's `origin ?? from` — i.e. B forwarding A's task only has to pass
+ *   `origin` when it wants to *override* A;
+ * - with nothing to inherit the origin is the calling session itself (and
+ *   `storedOrigin` drops it when that equals `from`).
+ *
+ * `directory` is best-effort: it is taken from the argument, then from any
+ * record that names this sid as its requester or its chain head. An unknown
+ * directory renders as `(未知目录)` rather than failing the call.
+ */
+export function resolveOrigin(input: {
+  me?: string;
+  directory?: string;
+  requested?: unknown;
+  aliases?: Record<string, string>;
+  records?: BroadcastRecord[];
+}): OriginResolution {
+  const me = String(input.me ?? '').trim();
+  const requested = String(input.requested ?? '').trim();
+  const records = input.records ?? allBroadcasts();
+
+  const directoryOf = (sid: string): string | undefined =>
+    records
+      .slice()
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+      .map(record => {
+        const origin = normalizeOrigin(record.origin);
+        if (origin?.sid === sid && origin.directory) return origin.directory;
+        if (String(record.from?.sid ?? '') === sid && record.from?.directory) return record.from.directory;
+        return undefined;
+      })
+      .find(Boolean);
+
+  if (requested) {
+    let sid = requested;
+    if (!SESSION_ID_RE.test(sid)) {
+      const mapped = String(asObject(input.aliases)[sid] ?? '').trim();
+      if (!mapped) {
+        return {
+          ok: false,
+          reason:
+            `未知对接人 "${requested}"：既不是 ses_ 会话 id，也不在别名表里` +
+            '（collab.json 的 aliases，或 ~/.config/opencode/collab-aliases.json）。未写入任何内容。'
+        };
+      }
+      sid = mapped;
+    }
+    if (!SESSION_ID_RE.test(sid)) {
+      return {
+        ok: false,
+        reason: `对接人会话 id 不合法："${requested}"（期望 ses_… 或别名表里的别名）。未写入任何内容。`
+      };
+    }
+    const dir = directoryOf(sid);
+    return { ok: true, origin: { sid, ...(dir ? { directory: dir } : {}) } };
+  }
+
+  // Inheritance: the hand-off this session is *claiming* right now is the one
+  // being forwarded, so its chain head is the new origin.
+  const holder = me
+    ? records
+        .filter(record => unresolved(record) && String(record.claim?.by ?? '') === me)
+        .sort(
+          (a, b) =>
+            (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0) || String(a.bid).localeCompare(String(b.bid))
+        )[0]
+    : undefined;
+  if (holder) {
+    const upstream =
+      normalizeOrigin(holder.origin) ??
+      (String(holder.from?.sid ?? '').trim()
+        ? normalizeOrigin({ sid: holder.from?.sid, directory: holder.from?.directory })
+        : undefined);
+    if (upstream && upstream.sid !== me) {
+      return { ok: true, origin: upstream, inherited: true, via: holder.bid };
+    }
+  }
+
+  if (!me) return { ok: true, origin: undefined };
+  return {
+    ok: true,
+    origin: {
+      sid: me,
+      ...(input.directory ? { directory: String(input.directory) } : {})
+    }
+  };
+}
+
+/**
+ * Best-effort directory of an origin, like the 对接人 template wants
+ * (`ses_… @ <dir>`): a value resolved from the records wins, otherwise the
+ * host's own session info is asked once. Never throws — an unknown / gone
+ * session only means the line renders `@ (未知目录)`.
+ */
+export async function fillOriginDirectory(
+  origin: BroadcastOrigin | undefined,
+  ctx: CollabContext | undefined
+): Promise<BroadcastOrigin | undefined> {
+  if (!origin?.sid || origin.directory) return origin;
+  try {
+    const info = await ctx?.session?.get({ sessionID: origin.sid });
+    const directory = String(info?.location?.directory ?? '').trim();
+    return directory ? { ...origin, directory } : origin;
+  } catch {
+    return origin;
+  }
+}
 
 export function isValidBid(value: unknown): boolean {
   return /^b_[0-9a-f]{8,32}$/.test(String(value ?? '').trim());
@@ -60,6 +230,9 @@ export function normalizeBroadcast(record: JsonObject): BroadcastRecord {
     attempts: Number(record.attempts) || 0,
     // R8: retry stamp of the `acked` extraction (absent on old records).
     staleNoticedAt: Number(record.staleNoticedAt) || undefined,
+    // 0.7.0 (R1): the chain head of a forwarded hand-off — junk / missing is
+    // simply "no 对接人" (the field is dropped on write when undefined).
+    origin: normalizeOrigin(record.origin),
     // R1/R2 (0.1.6): delivery + ack bookkeeping. Absent on ≤0.1.5 records, which
     // is exactly the "already admitted, no ack capability" state (never resent).
     delivery: normalizeDelivery(delivery),

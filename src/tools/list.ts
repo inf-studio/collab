@@ -227,7 +227,14 @@ export function listTool(kit: ToolKit): ToolDefinition {
             `${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''
-            }${delivery}`
+            }${delivery}` +
+            // 0.7.0 (R3): the chain head, only when it is not this record's own
+            // requester (old records keep their exact line).
+            `${
+              record.origin?.sid && String(record.origin.sid) !== String(record.from?.sid ?? '')
+                ? ` via ${record.origin.sid}`
+                : ''
+            }`
           );
         });
 

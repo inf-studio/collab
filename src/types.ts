@@ -263,6 +263,27 @@ export interface BroadcastFollowUp {
   by?: string;
 }
 
+/**
+ * 0.7.0 (R1, `11-19-collab-origin`): the session that *really* started a
+ * collaboration chain — the upstream of a forwarded hand-off (`A → B → C`: the
+ * record B wrote for C carries A here, while `from` stays B, the hop that
+ * actually sent it).
+ *
+ * Display/plumbing only: it is never a delivery target by itself (a protected
+ * origin is never written to), it does not widen any guard, and it is absent on
+ * every record written by ≤0.6.0 (and on a single-hop hand-off, where
+ * `origin.sid === from.sid` would be noise).
+ */
+export interface BroadcastOrigin {
+  /** Session id of the chain head (`ses_…`). */
+  sid: string;
+  /** How that session relates to the chain; free-form for display only. */
+  role?: 'requester' | 'implementer' | 'observer';
+  /** Workspace of the chain head, when known (`from.directory` of its own record). */
+  directory?: string;
+  [key: string]: any;
+}
+
 /** One hand-off record (`~/.config/opencode/collab-broadcast/<bid>.json`). */
 export interface BroadcastRecord {
   bid: string;
@@ -286,6 +307,12 @@ export interface BroadcastRecord {
   declines?: Array<{ sid: string; at: number }>;
   attempts?: number;
   from?: { sid?: string; directory?: string };
+  /**
+   * 0.7.0 (R1): the upstream session of a forwarded chain (`A → B → C`).
+   * Absent on old records and on the first hop — read it through
+   * `normalizeOrigin` / `resolveOrigin` (both tolerate junk).
+   */
+  origin?: BroadcastOrigin;
   /**
    * R8: last time the requester looked at an `acked` claimant's answer and found
    * no verdict. Stamped so a reminder-less refresh does not re-read the

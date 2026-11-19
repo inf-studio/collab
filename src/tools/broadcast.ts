@@ -1,7 +1,24 @@
 import { readFileSync, realpathSync } from 'node:fs';
-import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, BROADCAST_DIR, EXPECTED } from '../constants.ts';
+import {
+  BCAST_DONE_STATES,
+  BCAST_LEASE_MS,
+  BCAST_THRESHOLD,
+  BROADCAST_DIR,
+  EXPECTED,
+  STORAGE_ALIASES
+} from '../constants.ts';
 import { invalid } from '../core/errors.ts';
-import { claimLock, persistRefresh, readBroadcast, releaseLock, updateLock, writeBroadcast } from '../core/claim.ts';
+import {
+  claimLock,
+  fillOriginDirectory,
+  persistRefresh,
+  readBroadcast,
+  releaseLock,
+  resolveOrigin,
+  storedOrigin,
+  updateLock,
+  writeBroadcast
+} from '../core/claim.ts';
 import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { grantFile } from '../core/grants.ts';
 import { createLineage } from '../core/lineage.ts';
@@ -12,11 +29,11 @@ import {
   sessionBusyMinutes,
   summarizeProposal
 } from '../core/score.ts';
-import { handoffActions } from '../core/verdict.ts';
+import { handoffActions, originHint } from '../core/verdict.ts';
 import { newCorrelationID } from '../ids.ts';
 import { errText } from '../log.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
-import { truncate } from '../util.ts';
+import { asObject, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
@@ -95,6 +112,13 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           type: 'boolean',
           description: 'Explicit per-call confirmation for spawning a non-explore agent. No whitelist, no default.'
         },
+        origin: {
+          type: 'string',
+          description:
+            '对接人（0.7.0）：这条协作链真正的起点会话（`ses_…` 或别名）。省略时自动继承——' +
+            '若当前会话是某条未闭环交接的承接方（claim.by = 本会话），取该记录的 origin ?? from；' +
+            '否则就是本会话。转发上一跳的活儿时无需手填。'
+        },
         confirm: {
           type: 'boolean',
           description: 'Must be true to write the broadcast / wake / spawn. false or omitted only previews.'
@@ -115,6 +139,30 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       if (frozenWorkspace) throw invalid(freezeDenyText(frozenWorkspace, `工作区 ${workspace} `));
       const expected = normalizeExpected(input?.expected);
       const agent = String(input?.agent ?? 'explore').trim() || 'explore';
+      // 0.7.0 (R2/R4, `11-19-collab-origin`): the chain head of this hand-off.
+      // Explicit `origin` wins; otherwise it is inherited from the unresolved
+      // hand-off this session is claiming (`A → B → C`: B passes nothing and C
+      // still sees A). An unknown alias is refused here — before the proposal is
+      // read and before anything is written.
+      let storedAliases: JsonObject = {};
+      try {
+        storedAliases = asObject(await ctx?.storage?.get(STORAGE_ALIASES));
+      } catch {
+        storedAliases = {}; // unreadable alias table = only collab.json's aliases
+      }
+      const resolvedOrigin = resolveOrigin({
+        me,
+        directory: ctx?.location?.directory,
+        requested: input?.origin,
+        aliases: { ...storedAliases, ...readConfig().aliases }
+      });
+      if (!resolvedOrigin.ok) throw invalid(resolvedOrigin.reason ?? '对接人无法解析');
+      // Only a real upstream is stored (`origin.sid === me` adds nothing).
+      const chainOrigin = storedOrigin(await fillOriginDirectory(resolvedOrigin.origin, ctx), me);
+      const originHintText = originHint(chainOrigin, me);
+      const originHead = originHintText
+        ? `${originHintText}${resolvedOrigin.inherited ? `（继承自 ${resolvedOrigin.via}）` : ''}`
+        : '';
       const content = readFileSync(abs, 'utf8');
       const proposal = summarizeProposal(content, issuePath);
       const bid = broadcastID({
@@ -138,7 +186,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         `bid=${bid}  scope=peer  workspace=${workspace}`,
         `提案: ${issuePath}  标题: "${proposal.title}"  期望: ${expected}` +
           (expected === 'research' ? '（只读排查：对端只读代码/提案并回结论，不改代码）' : ''),
-        `影响面(${proposal.files.length}): ${proposal.files.slice(0, 8).join(', ') || '(未在提案里找到文件路径)'}`
+        `影响面(${proposal.files.length}): ${proposal.files.slice(0, 8).join(', ') || '(未在提案里找到文件路径)'}`,
+        ...(originHead ? [`${originHead} —— 已写入记录 origin，对端注入/回执模板都会带上它`] : [])
       ];
 
       const existing = readBroadcast(bid);
@@ -305,6 +354,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           reminded: [],
           replies: [],
           from: { sid: me, directory: ctx?.location?.directory },
+          // 0.7.0 (R1): the chain head of a forwarded hand-off (`A → B → C`).
+          origin: chainOrigin,
           receiptMode,
           createdAt: Date.now()
         };
@@ -356,7 +407,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
               : '新会话已创建，但接管请求投递失败（用 collab_send 补发；下次刷新会重试 1 次）。',
             // R1: the same three actions the new session was told, so the
             // requester can re-send them verbatim if delivery failed.
-            ...handoffActions({ bid, requester: me, spawn: true, receiptMode, expected }),
+            ...handoffActions({ bid, requester: me, spawn: true, receiptMode, expected, origin: chainOrigin }),
             ...(mismatch ? [mismatch] : []),
             `该会话不会被删除（collab_list 标 [bootstrap]）；对端不动作时，租约到期会只读提取它的结论并自动闭环。`
           ].join('\n')
@@ -386,6 +437,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
         reminded: [],
         replies: [],
         from: { sid: me, directory: ctx?.location?.directory },
+        // 0.7.0 (R1): the chain head of a forwarded hand-off (`A → B → C`).
+        origin: chainOrigin,
         receiptMode,
         // R1/R2/R4 (0.1.6): the ask *is* the delivery for the injected path —
         // one cid per hand-off, refreshed when the ask advances to another
@@ -421,7 +474,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           // R1: the receiving side must accept *and* send a receipt; posting the
           // conclusion in its own session is explicitly not "done" (pilot G1).
           // In `pull` mode the receipt *is* the in-session conclusion instead.
-          ...handoffActions({ bid, requester: me, receiptMode, expected }),
+          ...handoffActions({ bid, requester: me, receiptMode, expected, origin: chainOrigin }),
           ...(mismatch ? [mismatch] : []),
           receiptMode === 'pull'
             ? `推辞: 不领取即可（5 分钟不答自动顺延下一候选；pull 模式没有推送，不需要 DECLINE 回执）`

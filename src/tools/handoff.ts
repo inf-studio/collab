@@ -1,13 +1,20 @@
-import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, EXPECTED } from '../constants.ts';
-import { persistRefresh, readBroadcast, writeBroadcast } from '../core/claim.ts';
+import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, EXPECTED, STORAGE_ALIASES } from '../constants.ts';
+import {
+  fillOriginDirectory,
+  persistRefresh,
+  readBroadcast,
+  resolveOrigin,
+  storedOrigin,
+  writeBroadcast
+} from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
 import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
-import { protocolHeader } from '../core/verdict.ts';
+import { originHint, protocolHeader } from '../core/verdict.ts';
 import { newThreadID } from '../ids.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
-import { hash16, sessionState, truncate } from '../util.ts';
+import { asObject, hash16, sessionState, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
 import type { Target, ToolKit } from './shared.ts';
 
@@ -38,6 +45,13 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
           type: 'string',
           description: 'Task body (no prefix needed). File paths in it drive the ranking.'
         },
+        origin: {
+          type: 'string',
+          description:
+            '对接人（0.7.0）：这条协作链真正的起点会话（`ses_…` 或别名）。省略时自动继承——' +
+            '若当前会话是某条未闭环交接的承接方（claim.by = 本会话），取该记录的 origin ?? from；' +
+            '否则就是本会话。默认无需填写，只在转发链里覆盖上一跳时才用。'
+        },
         expected: {
           type: 'string',
           enum: EXPECTED,
@@ -60,6 +74,37 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       const expected = normalizeExpected(input?.expected);
       const notes: string[] = [];
       const lineage = createLineage(ctx);
+      // 0.7.0 (R2/R4, `11-19-collab-origin`): who this collaboration chain really
+      // started with. An explicit `origin` wins; otherwise it is inherited from
+      // the *unresolved* hand-off this session is claiming (`A → B → C`: B passes
+      // nothing, C still sees A). A bad alias is refused here — before any
+      // delivery and before anything is written.
+      let storedAliases: JsonObject = {};
+      try {
+        storedAliases = asObject(await ctx?.storage?.get(STORAGE_ALIASES));
+      } catch {
+        storedAliases = {}; // unreadable alias table = only collab.json's aliases
+      }
+      const resolvedOrigin = resolveOrigin({
+        me,
+        directory: workspace,
+        requested: input?.origin,
+        aliases: { ...storedAliases, ...readConfig().aliases }
+      });
+      if (!resolvedOrigin.ok) throw invalid(resolvedOrigin.reason ?? '对接人无法解析');
+      // Only a real upstream is stored (`origin.sid === me` adds nothing).
+      const chainOrigin = storedOrigin(await fillOriginDirectory(resolvedOrigin.origin, ctx), me);
+      const originHintText = originHint(chainOrigin, me);
+      const originSuffix = originHintText
+        ? `${originHintText}${resolvedOrigin.inherited ? `（继承自 ${resolvedOrigin.via}）` : ''}`
+        : '';
+      // Tense matters: a preview writes nothing, the confirmed call already did.
+      const originPreviewNote = originSuffix
+        ? `${originSuffix} —— 会写进记录 origin，承接方的注入与回执模板都会带上它。`
+        : '';
+      const originNote = originSuffix
+        ? `${originSuffix} —— 已写入记录 origin，承接方的注入与回执模板都会带上它。`
+        : '';
 
       let target: Target;
       let ranking: Awaited<ReturnType<typeof chain.rankCandidates>> | undefined;
@@ -149,6 +194,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
             guard ? `拒绝提示: 目标在 protect 名单内（depth=${guard.depth}），确认后仍会被拒绝。` : '',
             freeze ? `拒绝提示: ${freezeHintText(freeze)}` : '',
             `kind=request mode=${forced ? 'queue(forced)' : mode} thread=${threadID} bid=${bid}`,
+            originPreviewNote,
             ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
             ...notes.map(note => `注: ${note}`),
             ...(ranking
@@ -170,7 +216,8 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         input: {
           // 0.7.0 (R2): the first two lines tell the receiver it is the claimant
           // and how to answer — the task body follows, unchanged.
-          text: [...protocolHeader({ bid, threadID }), '', body].join('\n'),
+          // 0.7.0 (R3): a forwarded chain appends the 对接人 line after them.
+          text: [...protocolHeader({ bid, threadID, origin: chainOrigin, requester: me }), '', body].join('\n'),
           confirm: true
         },
         kind: 'request',
@@ -209,6 +256,8 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         reminded: [],
         replies: [],
         from: { sid: me, directory: workspace },
+        // 0.7.0 (R1): the chain head when it is not this hop (`A → B → C`).
+        origin: chainOrigin,
         // R1 (0.1.6): the admission receipt of the very prompt `dispatch` sent —
         // the receiving plugin acks this `cid` from its inbox/context.
         delivery: delivered.delivery
@@ -221,6 +270,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         content: [
           delivered.content,
           `bid=${bid}  thread=${threadID}（local scope，回执用 collab_reply {threadID}）`,
+          ...(originNote ? [originNote] : []),
           ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
           `等结果: collab_wait {threadID:"${threadID}", timeoutMs:…}`
         ].join('\n')

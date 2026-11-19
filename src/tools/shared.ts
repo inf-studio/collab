@@ -54,7 +54,8 @@ const HANDOFF_LINE_RE = /\[handoff\]/i;
  * answer: the receipt of the session that claimed that very bid. Three
  * conditions must **all** hold:
  *   ① `kind` is `reply` — or, for a *legacy* receipt, `request` (see below);
- *   ② `target` is the `from.sid` of the record the bid names;
+ *   ② `target` is the `from.sid` of the record the bid names (or, with
+ *      `acceptOrigin`, its chain head `origin.sid` — 0.7.0);
  *   ③ `sender` is that record's `claim.by`.
  * A `note` / `steer`, a foreign bid, a bystander or an unknown sender stays
  * refused, and so does a **decided** record (`done` / `blocked` / `expired`): a
@@ -67,6 +68,13 @@ const HANDOFF_LINE_RE = /\[handoff\]/i;
  * push into a protected line. A post-closure conclusion is a *pull* — the
  * claimant writes `collab_followup` (and the proposal file), and the requester
  * sees one read-only hint in its own `context` injection.
+ *
+ * 0.7.0 (`11-19-collab-origin`, B): `acceptOrigin` widens **only** the target
+ * half of ②, so a receipt can also be addressed to the chain head of a forwarded
+ * hand-off (`A → B → C`: C answers A directly). It is deliberately an opt-in
+ * *per call site*: the protected-delivery whitelist (`allowProtectedReply`) is
+ * still decided by the untouched call (`acceptOrigin` absent), so a protected
+ * `origin` never gains a delivery path through this widening.
  *
  * The bid comes from the explicit `bid` argument first, then from the body
  * (`[handoff] DONE b_… …`), so an existing receipt command needs no new field.
@@ -90,7 +98,8 @@ export function canReplyToProtected({
   bid,
   text,
   mode,
-  legacyAllowed = false
+  legacyAllowed = false,
+  acceptOrigin = false
 }: {
   kind: unknown;
   target: unknown;
@@ -101,6 +110,12 @@ export function canReplyToProtected({
   mode?: unknown;
   /** True only when the tool input carried **no** `kind` (legacy receipt command). */
   legacyAllowed?: boolean;
+  /**
+   * 0.7.0 (B): also accept the record's chain head (`origin.sid`) as the receipt
+   * target. Used **only** to decide the `kind:reply` rewrite of a non-protected
+   * receipt; never passed where `allowProtectedReply` is decided.
+   */
+  acceptOrigin?: boolean;
 }): BroadcastRecord | undefined {
   const requested = normalizeKind(kind);
   if (requested !== 'reply' && requested !== 'request') return undefined;
@@ -125,7 +140,15 @@ export function canReplyToProtected({
   // A decided hand-off is not a receipt anymore: fail-closed again (R5: the
   // post-closure conclusion is a pull — `collab_followup` + the proposal file).
   if (BCAST_DONE_STATES.includes(String(record.state))) return undefined;
-  if (String(record.from?.sid ?? '') !== String(target ?? '')) return undefined;
+  // ② the receipt may be addressed to this hand-off's requester — or, when the
+  // caller opted in (`acceptOrigin`, 0.7.0 B), to the chain head of a forwarded
+  // one. A third target (or an empty one) never matches, so the widening is
+  // exactly two sids.
+  const targetSid = String(target ?? '').trim();
+  const requesterSid = String(record.from?.sid ?? '').trim();
+  const originSid = String(record.origin?.sid ?? '').trim();
+  if (!targetSid) return undefined;
+  if (targetSid !== requesterSid && !(acceptOrigin && originSid && targetSid === originSid)) return undefined;
   if (String(record.claim?.by ?? '') !== String(sender)) return undefined;
   return record;
 }

@@ -9793,6 +9793,455 @@ expect(
 // Restore the host list wrapper so nothing else observes S99's counter.
 ctx.session.list = s99RealList;
 
+// ================== S100 (0.7.0: 交接对接人 origin, `11-19-collab-origin`)
+// The real chain A → B → C could only record `from = B`, so a blocked C went
+// back to B, B forwarded to A, A answered in another thread — 4 hops for a
+// 2-hop question. `origin` records the chain head once, is inherited one level
+// (B forwards A's task without filling anything) and is rendered to the
+// claimant (`A @ <dir>`) plus the receipt guidance.
+const S100_A = 'ses_s100_a'; // chain head, lives in S100A_WS
+const S100_B = 'ses_s100_b'; // first hop, lives in S100B_WS (claims A's hand-off)
+const S100_B2 = 'ses_s100_b2'; // local target of B's same-workspace forward
+const S100_C = 'ses_s100_c'; // second hop (the one that used to be stuck)
+const S100_D = 'ses_s100_d'; // third workspace, for the explicit-override case
+const S100_E = 'ses_s100_e'; // a third *target*: neither the requester nor the chain head
+const S100A_WS = ws('s100a');
+const S100B_WS = ws('s100b');
+const S100C_WS = ws('s100c');
+const S100D_WS = ws('s100d');
+const S100_FILE = 'packages/s100/src/origin/chain.ts';
+const S100_ISSUE_B = issueFile(
+  S100B_WS,
+  'fix-origin-hop1.md',
+  `# 11-19-origin worker store 修复\n\n\`${S100_FILE}\` 需要按 origin 转发。\n`
+);
+const S100_ISSUE_C = issueFile(
+  S100C_WS,
+  'fix-origin-hop2.md',
+  '# 11-19-origin hop2 worker store 修复\n\n`packages/s100/src/origin/hop2.ts`\n'
+);
+const S100_ISSUE_D = issueFile(
+  S100D_WS,
+  'fix-origin-override.md',
+  '# 11-19-origin worker store 覆盖\n\n`packages/s100/src/origin/chain.ts`\n'
+);
+const s100Session = (id, directory, extra = {}) => ({
+  id,
+  agent: 'build',
+  title: id,
+  time: { updated: now - 60_000, busy: 0 },
+  location: { directory },
+  ...extra
+});
+contexts.set(S100_B, [toolMessage(S100_FILE)]);
+contexts.set(S100_C, [toolMessage('packages/s100/src/origin/hop2.ts')]);
+contexts.set(S100_D, [toolMessage(S100_FILE)]);
+const S100_MAP = {
+  [S100_A]: s100Session(S100_A, S100A_WS, { title: '11-19-origin A 链头' }),
+  [S100_B]: s100Session(S100_B, S100B_WS, { title: '11-19-origin worker store 修复' }),
+  [S100_B2]: s100Session(S100_B2, S100B_WS, { title: 'S100 同仓转发目标' }),
+  [S100_C]: s100Session(S100_C, S100C_WS, { title: '11-19-origin hop2 worker store 修复' }),
+  [S100_D]: s100Session(S100_D, S100D_WS, { title: '11-19-origin worker store 覆盖' }),
+  [S100_E]: s100Session(S100_E, S100D_WS, { title: 'S100 第三方（既非发起方也非对接人）' })
+};
+
+// --- S100a: A → B (first hop, no origin) — nothing is stored, nothing renders.
+let s100aText = '';
+let s100AbBid = '';
+await withAwarenessCase({ dir: S100A_WS, map: S100_MAP }, async () => {
+  s100aText = await call(
+    'collab_broadcast',
+    { workspace: S100B_WS, issuePath: S100_ISSUE_B, expected: 'implement', confirm: true },
+    { sessionID: S100_A, agent: 'build' }
+  );
+  s100AbBid = bidOf(s100aText) ?? '';
+});
+const s100Rec1 = s100AbBid ? bcRead(s100AbBid) : {};
+out('S100a A→B broadcast (first hop)', s100aText);
+expect(
+  'S100 a first-hop hand-off stores no origin (its own requester IS the chain head)',
+  Boolean(s100AbBid) && !s100Rec1.origin && !('origin' in s100Rec1),
+  JSON.stringify({ origin: s100Rec1.origin, keys: Object.keys(s100Rec1).filter(k => k === 'origin') })
+);
+expect(
+  'S100 … and the result / record keep `from` = A, with no 对接人 line',
+  s100Rec1.from?.sid === S100_A && s100Rec1.asked?.sid === S100_B && !s100aText.includes('对接人'),
+  JSON.stringify({ from: s100Rec1.from, asked: s100Rec1.asked })
+);
+
+// --- S100b: B accepts, then B → C **without** origin → inherits A (the key case).
+let s100AcceptText = '';
+let s100bText = '';
+let s100BcBid = '';
+await withAwarenessCase({ dir: S100B_WS, map: S100_MAP }, async () => {
+  s100AcceptText = await call('collab_accept', { bid: s100AbBid, confirm: true }, { sessionID: S100_B, agent: 'build' });
+  s100bText = await call(
+    'collab_broadcast',
+    { workspace: S100C_WS, issuePath: S100_ISSUE_C, expected: 'implement', confirm: true },
+    { sessionID: S100_B, agent: 'build' }
+  );
+  s100BcBid = bidOf(s100bText) ?? '';
+});
+const s100Rec1After = s100AbBid ? bcRead(s100AbBid) : {};
+const s100Rec2 = s100BcBid ? bcRead(s100BcBid) : {};
+out('S100b B→C broadcast without origin', s100bText);
+expect(
+  'S100 B really holds A\u2019s hand-off (claim.by = B, acked)',
+  s100AcceptText.includes('已领取') && s100Rec1After.state === 'acked' && s100Rec1After.claim?.by === S100_B,
+  `${s100AcceptText.split('\n')[0]} / ${JSON.stringify(s100Rec1After.claim)}`
+);
+expect(
+  'S100 B→C inherits A as origin without filling anything (4 hops → 2)',
+  s100Rec2.origin?.sid === S100_A && s100Rec2.origin?.directory === S100A_WS,
+  JSON.stringify({ origin: s100Rec2.origin, from: s100Rec2.from })
+);
+expect(
+  'S100 … while `from` stays B (the hop that actually sent it)',
+  s100Rec2.from?.sid === S100_B,
+  JSON.stringify(s100Rec2.from)
+);
+expect(
+  'S100 the requester result says the origin was inherited',
+  s100bText.includes(`（继承自 ${s100AbBid}）`),
+  s100bText.split('\n').find(line => line.includes('对接人')) ?? '(缺失)'
+);
+
+// --- S100c: C's injection names A; C can close the bid by answering A directly.
+let s100cText = '';
+await withAwarenessCase({ dir: S100C_WS, map: S100_MAP }, async () => {
+  const event = contextEvent(S100_C);
+  await hooks.context(event);
+  s100cText = textOf(event);
+});
+out('S100c C injection block', s100cText.split('\n').slice(0, 4).join('\n'));
+expect(
+  'S100 C sees the 对接人 line (A @ its workspace) next to the requester (B)',
+  s100cText.includes(`对接人（非本单发起方）：${S100_A} @ ${S100A_WS}`) &&
+    s100cText.includes(`发起方=${S100_B}`),
+  s100cText.split('\n').filter(line => line.includes('对接人') || line.includes('发起方')).join(' | ')
+);
+expect(
+  'S100 … and the receipt guidance names A as the direct recipient of a cross-layer answer',
+  s100cText.includes(`collab_send {target:"${S100_A}", text:"[handoff] DONE ${s100BcBid}`),
+  s100cText.split('\n').find(line => line.includes(`target:"${S100_A}"`)) ?? '(缺失)'
+);
+expect(
+  'S100 … while stating the boundary: only the requester or the 对接人 can close it',
+  s100cText.includes('仅限本单发起方或对接人，第三方发送不会闭环'),
+  s100cText.split('\n').find(line => line.includes('第三方发送'))?.slice(-80) ?? '(缺失)'
+);
+
+// C claims the bid (a receipt may only be written by the claimant), then the
+// status / list views show the origin, then C closes it by writing to A.
+let s100StatusOrigin = '';
+let s100ListVia = '';
+await withAwarenessCase({ dir: S100C_WS, map: S100_MAP }, async () => {
+  await call('collab_accept', { bid: s100BcBid, confirm: true }, { sessionID: S100_C, agent: 'build' });
+  s100StatusOrigin = await call('collab_status', { bid: s100BcBid }, { sessionID: S100_C, agent: 'build' });
+  s100ListVia = await call('collab_list', { directory: S100C_WS, limit: 10 }, { sessionID: S100_C, agent: 'build' });
+});
+out('S100c collab_status origin', s100StatusOrigin.split('\n').slice(0, 2).join('\n'));
+expect(
+  'S100 collab_status prints origin= (sid + directory)',
+  s100StatusOrigin.includes(`origin=${S100_A} @ ${S100A_WS}`),
+  s100StatusOrigin.split('\n')[0]
+);
+expect(
+  'S100 collab_list ends the hand-off line with `via <chain head>`',
+  s100ListVia.includes(`${s100BcBid}`) && s100ListVia.includes(`via ${S100_A}`),
+  s100ListVia.split('\n').find(line => line.includes(s100BcBid)) ?? '(缺失)'
+);
+
+// 真实回放（复核 §7）：C 按注入里的提示原文调 `collab_send`，再把宿主**实际收到**的
+// prompt（text + metadata.collab）回灌成 inbound —— 不用手写 `kind:'reply'`、不编造 thread。
+// 反向先做：同一行发给**第三方**（既不是发起方 B 也不是对接人 A）→ 仍是 request，不闭环。
+const replayPrompt = (prompt, inboxID) =>
+  inbound(prompt.sessionID, prompt.text, prompt.metadata?.collab, inboxID);
+let s100ThirdPrompt = {};
+let s100ReceiptPrompt = {};
+await withAwarenessCase({ dir: S100C_WS, map: S100_MAP }, async () => {
+  await call(
+    'collab_send',
+    { target: S100_E, text: `[handoff] BLOCKED ${s100BcBid} 发给第三方的回执`, confirm: true },
+    { sessionID: S100_C, agent: 'build' }
+  );
+  s100ThirdPrompt = prompts.at(-1) ?? {};
+  await call(
+    'collab_send',
+    { target: S100_A, text: `[handoff] DONE ${s100BcBid} 已按链头 A 的决策修好`, confirm: true },
+    { sessionID: S100_C, agent: 'build' }
+  );
+  s100ReceiptPrompt = prompts.at(-1) ?? {};
+});
+out(
+  'S100c delivered receipts (real collab_send)',
+  JSON.stringify({
+    third: { to: s100ThirdPrompt.sessionID, kind: s100ThirdPrompt.metadata?.collab?.kind },
+    origin: { to: s100ReceiptPrompt.sessionID, kind: s100ReceiptPrompt.metadata?.collab?.kind }
+  })
+);
+const s100StateBeforeThird = bcRead(s100BcBid).state;
+push(replayPrompt(s100ThirdPrompt, 's100_inbox_third'));
+await settle();
+const s100AfterThird = bcRead(s100BcBid);
+push(replayPrompt(s100ReceiptPrompt, 's100_inbox_receipt'));
+await settle();
+const s100Rec2Closed = s100BcBid ? bcRead(s100BcBid) : {};
+expect(
+  'S100 a receipt addressed to the 对接人 really travels as kind=reply (legacy shape, no kind in the input)',
+  s100ReceiptPrompt.sessionID === S100_A &&
+    s100ReceiptPrompt.metadata?.collab?.kind === 'reply' &&
+    String(s100ReceiptPrompt.text ?? '').includes(`[handoff] DONE ${s100BcBid}`),
+  JSON.stringify({
+    to: s100ReceiptPrompt.sessionID,
+    kind: s100ReceiptPrompt.metadata?.collab?.kind,
+    text: String(s100ReceiptPrompt.text ?? '').slice(0, 120)
+  })
+);
+expect(
+  'S100 … while a third target keeps kind=request and leaves the bid acked (only two targets open)',
+  s100ThirdPrompt.sessionID === S100_E &&
+    s100ThirdPrompt.metadata?.collab?.kind === 'request' &&
+    s100StateBeforeThird === 'acked' &&
+    s100AfterThird.state === 'acked' &&
+    !s100AfterThird.receipt,
+  JSON.stringify({
+    to: s100ThirdPrompt.sessionID,
+    kind: s100ThirdPrompt.metadata?.collab?.kind,
+    state: s100AfterThird.state,
+    receipt: s100AfterThird.receipt
+  })
+);
+out('S100c receipt written straight to A', JSON.stringify(s100Rec2Closed.receipt));
+expect(
+  'S100 C closes the bid by answering A directly (2 hops, no forwarder)',
+  s100Rec2Closed.state === 'done' && s100Rec2Closed.receipt?.from === S100_C,
+  JSON.stringify({ state: s100Rec2Closed.state, receipt: s100Rec2Closed.receipt })
+);
+expect(
+  'S100 the closed record still names A (the receipt carries the chain head)',
+  s100Rec2Closed.origin?.sid === S100_A,
+  JSON.stringify(s100Rec2Closed.origin)
+);
+
+// origin 指向 [protected*]：只是展示字段 —— 回执改写（acceptOrigin）**不**放宽投递，
+// `allowProtectedReply` 仍只看 from.sid，所以这条消息照旧被护栏拒绝、0 条 prompt。
+const S100_PROT = 'ses_e1eb91cebffeTv1467ubJLKebk'; // 内置硬名单（schema 线）
+const s100ProtBid = 'b_99999999999900f3';
+writeRaw(s100ProtBid, {
+  workspace: S100C_WS,
+  state: 'acked',
+  origin: { sid: S100_PROT, directory: WS_D },
+  claim: { by: S100_B, kind: 'accept', token: 'k_s100_prot', at: nowMs, leaseMs: 300_000 }
+});
+const s100PromptsBeforeProt = prompts.length;
+const s100ProtRefusal = await expectFail(
+  'S100 a receipt addressed to a protected origin is still refused (the kind rewrite never widens delivery)',
+  () =>
+    call(
+      'collab_send',
+      { target: S100_PROT, text: `[handoff] DONE ${s100ProtBid} 发给受保护对接人`, confirm: true },
+      { sessionID: S100_B, agent: 'build' }
+    ),
+  /protect 名单/
+);
+expect(
+  'S100 … and nothing was delivered into the protected line',
+  prompts.length === s100PromptsBeforeProt && bcRead(s100ProtBid).state === 'acked',
+  `${prompts.length - s100PromptsBeforeProt} prompt(s) / state=${bcRead(s100ProtBid).state}`
+);
+out('S100 protected origin refusal', s100ProtRefusal.split('\n')[0]);
+rmSync(bcFile(s100ProtBid), { force: true });
+
+// --- S100d: an explicit origin overrides the inherited one.
+let s100dText = '';
+await withAwarenessCase({ dir: S100B_WS, map: S100_MAP }, async () => {
+  s100dText = await call(
+    'collab_broadcast',
+    {
+      workspace: S100D_WS,
+      issuePath: S100_ISSUE_D,
+      expected: 'implement',
+      origin: S100_C,
+      confirm: true
+    },
+    { sessionID: S100_B, agent: 'build' }
+  );
+});
+const s100dBid = bidOf(s100dText) ?? '';
+const s100Rec3 = s100dBid && bcExists(s100dBid) ? bcRead(s100dBid) : {};
+out('S100d explicit override', s100dText.split('\n').slice(0, 3).join('\n'));
+expect(
+  'S100 an explicit origin overrides the inherited one (C, not the inherited A)',
+  s100Rec3.origin?.sid === S100_C && s100Rec3.origin?.directory === S100C_WS,
+  JSON.stringify({ origin: s100Rec3.origin, from: s100Rec3.from })
+);
+expect(
+  'S100 the explicit origin is resolved through the host (sid → workspace) and printed',
+  s100dText.includes(`对接人（非本单发起方）：${S100_C} @ ${S100C_WS}`),
+  s100dText.split('\n').find(line => line.includes('对接人')) ?? '(缺失)'
+);
+
+// --- S100e: 旧记录（无 origin / origin == from）→ 输出与 0.6.0 逐字一致.
+const S100_OLD = 'b_99999999999900f1';
+writeRaw(S100_OLD, { workspace: S100B_WS });
+const s100OldStatus = await call('collab_status', { bid: S100_OLD }, { sessionID: S100_B, agent: 'build' });
+writeRaw(S100_OLD, { workspace: S100B_WS, origin: { sid: 'ses_req', directory: WS_A } });
+const s100OldStatusSelf = await call('collab_status', { bid: S100_OLD }, { sessionID: S100_B, agent: 'build' });
+out('S100e old record status', s100OldStatus.split('\n')[0]);
+expect(
+  'S100 an old record (no origin) prints no origin= and no 对接人 line',
+  !s100OldStatus.includes('origin=') && !s100OldStatus.includes('对接人'),
+  s100OldStatus.split('\n')[0]
+);
+expect(
+  'S100 … and origin == from renders byte for byte the same status (self-origin is noise)',
+  s100OldStatusSelf === s100OldStatus,
+  s100OldStatusSelf.split('\n')[0]
+);
+const S100_OLD_INJ = 'b_99999999999900f2';
+writeRaw(S100_OLD_INJ, {
+  workspace: S100B_WS,
+  asked: { sid: S100_B, at: nowMs, leaseMs: 300_000 },
+  origin: { sid: 'ses_req', directory: WS_A }
+});
+let s100OldInjection = '';
+await withAwarenessCase({ dir: S100B_WS, map: S100_MAP }, async () => {
+  const event = contextEvent(S100_B);
+  await hooks.context(event);
+  s100OldInjection = textOf(event);
+});
+rmSync(bcFile(S100_OLD), { force: true });
+rmSync(bcFile(S100_OLD_INJ), { force: true });
+expect(
+  'S100 an old record (origin == from) injects no 对接人 line',
+  s100OldInjection.includes(`接管请求 ${S100_OLD_INJ}`) && !s100OldInjection.includes('对接人（'),
+  s100OldInjection.split('\n').slice(0, 3).join(' | ')
+);
+
+// --- S100f: an unknown origin alias is refused readably, before any write.
+const s100BidsBefore = bcBids().length;
+const s100PromptsBefore = prompts.length;
+const s100AliasBroadcast = await expectFail(
+  'S100 an unknown origin alias on collab_broadcast is refused (readable, no write)',
+  () =>
+    call(
+      'collab_broadcast',
+      {
+        workspace: S100D_WS,
+        issuePath: S100_ISSUE_D,
+        origin: 's100-nobody',
+        confirm: true
+      },
+      { sessionID: S100_B, agent: 'build' }
+    ),
+  /未知对接人/
+);
+expect(
+  'S100 … and it wrote no record / delivered nothing',
+  bcBids().length === s100BidsBefore && prompts.length === s100PromptsBefore,
+  `bids ${s100BidsBefore}→${bcBids().length}, prompts ${s100PromptsBefore}→${prompts.length}`
+);
+out('S100f unknown alias', s100AliasBroadcast.split('\n')[0]);
+await expectFail(
+  'S100 an unknown origin alias on collab_handoff is refused (readable, no delivery)',
+  () =>
+    call(
+      'collab_handoff',
+      { target: S100_B2, text: 'S100 未知对接人', origin: 's100-nobody', confirm: true },
+      { sessionID: S100_B, agent: 'build' }
+    ),
+  /未知对接人/
+);
+await expectFail(
+  'S100 an unknown origin alias on collab_send is refused (readable, no delivery)',
+  () =>
+    call(
+      'collab_send',
+      { target: S100_B2, text: 'S100 未知对接人', origin: 's100-nobody', confirm: true },
+      { sessionID: S100_B, agent: 'build' }
+    ),
+  /未知对接人/
+);
+expect(
+  'S100 … both refused calls delivered nothing',
+  prompts.length === s100PromptsBefore,
+  `${prompts.length - s100PromptsBefore} prompt(s)`
+);
+
+// --- S100g: collab_handoff (local) and collab_send (body) render the same line.
+let s100HandoffText = '';
+let s100HandoffPrompt = '';
+let s100SendPrompt = '';
+await withAwarenessCase({ dir: S100B_WS, map: S100_MAP }, async () => {
+  s100HandoffText = await call(
+    'collab_handoff',
+    { target: S100_B2, text: 'S100 同仓转发：请按 origin 处理', origin: S100_A, confirm: true },
+    { sessionID: S100_B, agent: 'build' }
+  );
+  s100HandoffPrompt = prompts.at(-1)?.text ?? '';
+  await call(
+    'collab_send',
+    { target: S100_B2, text: 'S100 send 转发正文', origin: S100_A, confirm: true },
+    { sessionID: S100_B, agent: 'build' }
+  );
+  s100SendPrompt = prompts.at(-1)?.text ?? '';
+  await call(
+    'collab_send',
+    { target: S100_B2, text: 'S100 send 不带标注', confirm: true },
+    { sessionID: S100_B, agent: 'build' }
+  );
+});
+const s100HandoffBid = bidOf(s100HandoffText) ?? '';
+const s100HandoffRecord = s100HandoffBid ? bcRead(s100HandoffBid) : {};
+out('S100g local hand-off prompt (first 4 lines)', s100HandoffPrompt.split('\n').slice(0, 4).join('\n'));
+expect(
+  'S100 collab_handoff writes the origin and puts the line in the delivered prompt',
+  s100HandoffRecord.origin?.sid === S100_A &&
+    s100HandoffPrompt.includes(`对接人（非本单发起方）：${S100_A} @ ${S100A_WS}`),
+  JSON.stringify({ origin: s100HandoffRecord.origin, line: s100HandoffPrompt.split('\n')[3] })
+);
+expect(
+  'S100 the local header keeps its first three lines (no insert before the receipt commands)',
+  s100HandoffPrompt.split('\n')[1].startsWith('完成后回执：') &&
+    s100HandoffPrompt.split('\n')[2].startsWith('阻塞回执：') &&
+    s100HandoffPrompt.split('\n')[3].startsWith('对接人（非本单发起方）：'),
+  s100HandoffPrompt.split('\n').slice(1, 4).join(' | ')
+);
+expect(
+  'S100 collab_send puts the line as the first body line (explicit origin only)',
+  s100SendPrompt.includes(`对接人（非本单发起方）：${S100_A} @ ${S100A_WS}`) &&
+    s100SendPrompt.indexOf('对接人（非本单发起方）') < s100SendPrompt.indexOf('S100 send 转发正文'),
+  s100SendPrompt.replace(/\s+/g, ' ').slice(0, 160)
+);
+expect(
+  'S100 collab_send without origin keeps the body unchanged (no 对接人 line)',
+  prompts.at(-1)?.text?.includes('S100 send 不带标注') && !prompts.at(-1)?.text?.includes('对接人（'),
+  prompts.at(-1)?.text?.replace(/\s+/g, ' ').slice(0, 120)
+);
+// A self-origin is noise: explicit `origin` naming the sender adds nothing, so a
+// single-hop hand-off keeps the pre-0.7.0 output byte for byte.
+let s100SelfText = '';
+let s100SelfPrompt = '';
+await withAwarenessCase({ dir: S100B_WS, map: S100_MAP }, async () => {
+  s100SelfText = await call(
+    'collab_handoff',
+    { target: S100_B2, text: 'S100 自称对接人', origin: S100_B, confirm: true },
+    { sessionID: S100_B, agent: 'build' }
+  );
+  s100SelfPrompt = prompts.at(-1)?.text ?? '';
+});
+const s100SelfBid = bidOf(s100SelfText) ?? '';
+const s100SelfRecord = s100SelfBid && bcExists(s100SelfBid) ? bcRead(s100SelfBid) : {};
+if (s100SelfBid) rmSync(bcFile(s100SelfBid), { force: true });
+expect(
+  'S100 a self-origin (origin == sender) is dropped: no record field, no line',
+  Boolean(s100SelfBid) && !s100SelfRecord.origin && !s100SelfPrompt.includes('对接人（'),
+  s100SelfPrompt.split('\n').slice(0, 4).join(' | ')
+);
+if (s100HandoffBid) rmSync(bcFile(s100HandoffBid), { force: true });
+
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);
 if (failed.length) {
