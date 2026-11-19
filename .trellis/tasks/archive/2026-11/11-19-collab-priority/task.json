@@ -1,0 +1,32 @@
+{
+  "id": "collab-priority",
+  "name": "collab-priority",
+  "title": "高优先级协作（0.6.0）：加急 / 回执 / 冻结",
+  "description": "父任务：统一 urgent 优先级语义、即时状态回执与冻结标记；三个子任务独立验收，合并发 0.6.0",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "@长久同学^v^",
+  "assignee": "@长久同学^v^",
+  "createdAt": "2026-11-19",
+  "completedAt": "2026-11-19",
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-19-collab-escalate",
+    "11-19-collab-status",
+    "11-19-collab-freeze",
+    "11-19-collab-consistency",
+    "11-19-collab-board"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

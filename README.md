@@ -260,7 +260,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 735 项 harness + 12 项只读默认 + 48 项快照/产物 + 32 项 TUI 渲染 + 47 项 GUI 入口 + 7 项 GUI 面板渲染
+pnpm test          # build + 735 项 harness + 12 项只读默认 + 13 项看板派生 + 50 项快照/产物 + 44 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -320,7 +320,7 @@ pnpm test          # build + 735 项 harness + 12 项只读默认 + 48 项快照
   变异验证：`server?.client` 改回 `ctx.client` → 7 条失败；去掉回包前的 key 比对 → 迟到回包那条失败；
   去掉 `adopt()` 的清屏 → 「切走即清」那条失败。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（十九个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照）、`src/tools`（二十个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill + 命令 + `session.header` 计数条 + 标题栏 pill 探针，只在 `setup` 里跑）、
 `src/tui.tsx`（`./tui`：`collab.status` 面板 + 可展开的侧栏摘要 + `/collab` 命令，只读）、

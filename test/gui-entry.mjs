@@ -430,7 +430,7 @@ expect(
 expect(
   'R2 the probe toast names the plugin, version, panel key, app/platform and source server',
   probeToast?.variant === 'success' &&
-    /v0\.5\.3/.test(probeToast.description) &&
+    /v\d+\.\d+\.\d+/.test(probeToast.description) &&
     /id=collab/.test(probeToast.description) &&
     /panel=collab:main/.test(probeToast.description) &&
     /app=2\.5\.0\(desktop\)/.test(probeToast.description) &&
