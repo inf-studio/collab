@@ -3,7 +3,7 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.8.0] - 2026-11-19
 
 > 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节已收 `board2-layout`
 > （主从布局）、`board2-graph`（三级关系图）、`board2-actions`（加急/冻结/解冻/归档，四个需确认的写动作）

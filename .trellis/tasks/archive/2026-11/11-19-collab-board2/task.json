@@ -1,0 +1,31 @@
+{
+  "id": "collab-board2",
+  "name": "collab-board2",
+  "title": "0.8.0：看板主从布局 + 关系图 + 快捷动作",
+  "description": "GUI 左右分栏（右：上图下 items）；TUI 树 + 下方详情；三级关系图（全局/工作区/会话）；加急/冻结/解冻/归档四个写动作（确认 + 复用门禁）",
+  "status": "completed",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "@长久同学^v^",
+  "assignee": "@长久同学^v^",
+  "createdAt": "2026-11-19",
+  "completedAt": "2026-11-19",
+  "branch": "main",
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-19-collab-board2-layout",
+    "11-19-collab-board2-graph",
+    "11-19-collab-board2-actions",
+    "11-19-collab-sender-name"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

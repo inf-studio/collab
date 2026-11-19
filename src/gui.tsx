@@ -72,7 +72,7 @@ const PANEL_TAB = 'main';
  * where neither exists. It appears in exactly one place (the probe toast's
  * description); `test/gui-entry.mjs` asserts all three agree.
  */
-const PLUGIN_VERSION = '0.7.0';
+const PLUGIN_VERSION = '0.8.0';
 
 /** What the probe calls the app's own server: there is no `ServerRef.id` to show. */
 const LOCAL_SERVER = 'this computer';
