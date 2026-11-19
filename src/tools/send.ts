@@ -1,12 +1,15 @@
 import { KINDS, STORAGE_ALIASES } from '../constants.ts';
-import { fillOriginDirectory, resolveOrigin } from '../core/claim.ts';
+import { fillOriginDirectory, readBroadcast, resolveOrigin, writeBroadcast } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
-import { originHint } from '../core/verdict.ts';
+import { appendBlocked, BLOCKED_KEEP, blockedLines, canWriteBlocked, normalizeBlocked, originHint } from '../core/verdict.ts';
 import { isValidThreadID, newThreadID, normalizeKind, normalizeThreadID } from '../ids.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
 import { asObject } from '../util.ts';
 import { canReplyToProtected, jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
+
+/** A `bid` written inside the body (`[handoff] BLOCKED b_… …`). */
+const BODY_BID_RE = /\b(b_[0-9a-f]{8,32})\b/;
 
 /**
  * `collab_send` — the raw delivery primitive: envelope + thread bookkeeping via
@@ -72,6 +75,31 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             '`对接人（非本单发起方）：ses_… @ <dir>`，让对端不必再问「该找谁」。' +
             '不写记录，也不继承（本工具没有记录可继承；回执不该被追加一行）；与发送者相同则不写。'
         },
+        blocked: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            'BLOCKED 结构化（0.7.0，可选）：把「缺什么 / 已排除什么 / 最小判别实验」写成三段，追加在正文之后' +
+            '（正文自由，仍是人话）。有可解析的 `bid`（入参或正文的 b_…）时写进记录（保留最近 3 次），' +
+            '接收方注入与 collab_status 会聚合展示；没有 bid 就只渲染进正文、不落库。不传 = 输出与旧版逐字一致。' +
+            '超限一律可读拒绝（不静默截断）。',
+          properties: {
+            need: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '需要对方提供什么：≤10 条，每条 ≤120 字（控制字符剥成空格）。'
+            },
+            excluded: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '已经排除的方向：≤20 条，每条 ≤120 字。'
+            },
+            minimalTest: {
+              type: 'string',
+              description: '让对端一次就能判别的最小实验 / 判别式：≤200 字。'
+            }
+          }
+        },
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false/omitted only returns the preview.'
@@ -89,6 +117,11 @@ export function sendTool(kit: ToolKit): ToolDefinition {
     async execute(input, context) {
       const notes: string[] = [];
       const me = context?.sessionID;
+      // 0.7.0 (`11-19-collab-blocked`): validate up front — an over-long or
+      // over-count `blocked` is a readable refusal before anything is delivered
+      // or written (never a silent truncation).
+      const blocked = normalizeBlocked(input?.blocked);
+      const blockedText = blocked ? blockedLines(blocked) : [];
       // R2: the *requested* kind decides whether a bounded receipt applies; the
       // reply-without-threadID downgrade below must not hide it.
       // R7 (0.1.4): `legacy` means the caller declared **no** kind at all — the
@@ -140,6 +173,70 @@ export function sendTool(kit: ToolKit): ToolDefinition {
           : raw;
       if (originLineText) notes.push(`${originLineText} → 已写在正文首行`);
 
+      /**
+       * 0.7.0 (`11-19-collab-blocked`): the delivered body = 对接人 line (when
+       * asked) + the caller's text + the structured BLOCKED block at the **end**
+       * of the body (the free-form text above it is untouched). No origin and no
+       * `blocked` → the input object is passed through as-is, so the old output
+       * is byte for byte what it was.
+       */
+      const withMeta = (raw: JsonObject | undefined): JsonObject | undefined => {
+        const next = withOrigin(raw);
+        if (!blockedText.length) return next;
+        const head = String(next?.text ?? '').trim();
+        return { ...next, text: head ? `${head}\n\n${blockedText.join('\n')}` : blockedText.join('\n') };
+      };
+
+      /**
+       * Record the structured BLOCKED when the message names a live hand-off.
+       * Design §2: a resolvable `bid` (argument or the `[handoff]` body line)
+       * appends to `record.blocked` (newest 3); with no bid the block only rides
+       * in the body and the result says it was not stored. `state` / `claim` /
+       * `receipt` are never touched and no guard is relaxed — this is a display
+       * field. A sender that is not part of the hand-off may render it into its
+       * own message but never write it into the record (`canWriteBlocked`, the
+       * same rule `collab_handoff` uses).
+       *
+       * A **de-dupe hit** delivered nothing (the earlier copy already carried
+       * this exact block), so it must not append again: that only burns one of
+       * the three kept slots and can push an older, *different* report out
+       * (review F3).
+       */
+      const recordBlocked = (bid: string, confirmed: boolean, duplicate: boolean): string => {
+        if (!bid) {
+          return '注: blocked 未关联单据（bid 入参与正文都没有 b_…）—— 已渲染进正文，未落库。';
+        }
+        if (!confirmed) {
+          return `注: 预览（confirm 不为 true）—— blocked 未落库；确认后会写进记录 ${bid}。`;
+        }
+        const record = readBroadcast(bid);
+        if (!record) {
+          return `注: 没有交接单 ${bid}（拼错或已过 7 天保留期）—— blocked 已渲染进正文，未落库。`;
+        }
+        if (!canWriteBlocked(record, me)) {
+          return `注: 当前会话不是 ${bid} 的参与方（from / claim.by / asked / origin）—— 已渲染进正文，未落库。`;
+        }
+        if (duplicate) {
+          return `注: blocked 未落库（同文去重命中、本次未投递；记录里已有的那一条已含这段）。`;
+        }
+        writeBroadcast(appendBlocked(record, { ...blocked!, at: Date.now(), by: String(me ?? '') }));
+        return `注: blocked 已写入记录 ${bid}（保留最近 ${BLOCKED_KEEP} 次；state / claim / receipt 未改）。`;
+      };
+
+      /**
+       * `dispatch` + the structured-BLOCKED bookkeeping (only when `blocked` was given).
+       * `dispatch` returns a `delivery` receipt **only** for a real admission, so
+       * `confirm:true && !delivery` is exactly the de-dup read-back path.
+       */
+      const finish = async (args: Parameters<typeof dispatch>[0]) => {
+        const result = await dispatch(args);
+        if (!blocked) return result;
+        const body = String(args.input?.text ?? '');
+        const bid = String(input?.bid ?? '').trim() || BODY_BID_RE.exec(body)?.[1] || '';
+        const duplicate = args.input?.confirm === true && result.delivery === undefined;
+        return { ...result, content: `${result.content}\n${recordBlocked(bid, args.input?.confirm === true, duplicate)}` };
+      };
+
       // Reply routing: caller must be a participant and the target must be the
       // thread's counterpart. Without both checks a leaked threadID is enough
       // to forge a reply (T1) or to write it into someone else's thread (T2).
@@ -165,9 +262,9 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             );
           }
           const { mode, forced } = resolveMode(input?.mode, context?.agent);
-          return dispatch({
+          return finish({
             context,
-            input: withOrigin(input),
+            input: withMeta(input),
             kind,
             threadID,
             mode,
@@ -183,7 +280,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
                 target: resolved.sessionID,
                 sender: me,
                 bid: input?.bid,
-                text: withOrigin(input)?.text,
+                text: withMeta(input)?.text,
                 mode: input?.mode
               })
             )
@@ -206,7 +303,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         target: target.sessionID,
         sender: me,
         bid: input?.bid,
-        text: withOrigin(input)?.text,
+        text: withMeta(input)?.text,
         mode: input?.mode,
         legacyAllowed: legacyKind
       });
@@ -227,7 +324,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             target: target.sessionID,
             sender: me,
             bid: input?.bid,
-            text: withOrigin(input)?.text,
+            text: withMeta(input)?.text,
             mode: input?.mode,
             legacyAllowed: legacyKind,
             acceptOrigin: true
@@ -248,9 +345,9 @@ export function sendTool(kit: ToolKit): ToolDefinition {
           );
         }
       }
-      return dispatch({
+      return finish({
         context,
-        input: withOrigin(input),
+        input: withMeta(input),
         kind,
         threadID,
         mode,

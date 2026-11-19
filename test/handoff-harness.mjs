@@ -10841,6 +10841,482 @@ delete sessions[S102_ME];
 delete sessions[S102_PEER];
 
 
+// ================== S105 (0.7.0: structured BLOCKED — the `blocked` field)
+//   S105  `collab_send` / `collab_handoff` 的可选 `blocked`
+//   （`need` / `excluded` / `minimalTest`）：三段同时出现在**投递正文**、
+//   **承接方注入**（`takeoverBody`）与 `collab_status`；无 bid 只上正文不落库；
+//   超条数 / 超长是可读拒绝（0 投递、0 写入）；记录保留最近 3 次，且
+//   `state` / `claim` / `receipt` 一律不变（纯展示字段）。
+const S105_ME = 'ses_s105me';
+const S105_TO = 'ses_s105to';
+const S105_THIRD = 'ses_s105third';
+const S105_L_CAND = 'ses_s105l';
+sessions[S105_ME] = {
+  id: S105_ME,
+  agent: 'build',
+  title: 'S105 发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S105_TO] = {
+  id: S105_TO,
+  agent: 'build',
+  title: 'S105 对端（承接方）',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S105_THIRD] = {
+  id: S105_THIRD,
+  agent: 'build',
+  title: 'S105 第三方',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+const as105 = sid => ({ sessionID: sid, agent: 'build' });
+const shortOf = sid => `${sid.slice(0, 8)}…${sid.slice(-4)}`;
+const lastPrompt = () => String(prompts[prompts.length - 1]?.text ?? '');
+
+// --- S105a: `collab_handoff` 带 blocked → 三段追加在正文之后，并写进记录。
+const S105_NEED = ['把房态改成「在住」后再触发一次入住', '给出 09:00–10:00 的后端推送日志'];
+const S105_EXCLUDED = ['不是权限问题（已用 admin 复现）', '不是时钟偏移（NTP 正常）'];
+const S105_MINIMAL = '改一次房态，看有没有帧下发：有帧 = 前端问题，无帧 = 后端推送未触发。';
+const s105a = await call(
+  'collab_handoff',
+  {
+    target: S105_TO,
+    text: 'S105 卡在房态刷新：需要一次最小判别',
+    blocked: { need: S105_NEED, excluded: S105_EXCLUDED, minimalTest: S105_MINIMAL },
+    confirm: true
+  },
+  as105(S105_ME)
+);
+const s105aBid = bidOf(s105a);
+const s105aPrompt = lastPrompt();
+out('S105a handoff delivered body', s105aPrompt);
+expect(
+  'S105 handoff 正文：需要对方 / 已排除 / 最小判别 三段都在，且追加在正文之后',
+  Boolean(s105aBid) &&
+    s105aPrompt.includes(`需要对方：① ${S105_NEED[0]} ② ${S105_NEED[1]}`) &&
+    s105aPrompt.includes(`已排除：${S105_EXCLUDED.join('；')}`) &&
+    s105aPrompt.endsWith(`最小判别：${S105_MINIMAL}`) &&
+    s105aPrompt.indexOf('S105 卡在房态刷新') < s105aPrompt.indexOf('需要对方：'),
+  `${s105aBid} / ${s105aPrompt.split('\n').length} lines`
+);
+const s105aRecord = bcRead(s105aBid);
+expect(
+  'S105 handoff 记录：blocked 一条（need/excluded/minimalTest + at/by），state 仍是 acked',
+  Array.isArray(s105aRecord.blocked) &&
+    s105aRecord.blocked.length === 1 &&
+    s105aRecord.blocked[0].need.length === 2 &&
+    s105aRecord.blocked[0].excluded.length === 2 &&
+    s105aRecord.blocked[0].minimalTest === S105_MINIMAL &&
+    s105aRecord.blocked[0].by === S105_ME &&
+    Number(s105aRecord.blocked[0].at) > 0 &&
+    s105aRecord.state === 'acked',
+  JSON.stringify(s105aRecord.blocked?.[0] ?? null).slice(0, 160)
+);
+
+// --- S105b: 不传 blocked → 输出与旧版逐字一致（消息正文 = 信封 + 正文，零追加）。
+const S105_PLAIN_THREAD = 't_s105plain';
+const s105b = await call(
+  'collab_send',
+  { target: S105_TO, kind: 'note', threadID: S105_PLAIN_THREAD, text: 'S105 无 blocked 的正文', confirm: true },
+  as105(S105_ME)
+);
+expect(
+  'S105 不传 blocked：投递正文与旧版逐字一致（信封 + 正文，零追加行）',
+  lastPrompt() === `[collab:${shortOf(S105_ME)}][note:${S105_PLAIN_THREAD}] S105 无 blocked 的正文` &&
+    s105b.startsWith('已投递'),
+  lastPrompt()
+);
+const s105bHandoff = await call(
+  'collab_handoff',
+  { target: S105_TO, text: 'S105 无 blocked 的交接', confirm: true },
+  as105(S105_ME)
+);
+const s105bBid = bidOf(s105bHandoff);
+expect(
+  'S105 不传 blocked 的 handoff：正文之后没有任何追加（旧版协议头 + 正文）',
+  lastPrompt().endsWith('\n\nS105 无 blocked 的交接') &&
+    !lastPrompt().includes('需要对方：') &&
+    !lastPrompt().includes('最小判别：') &&
+    !('blocked' in bcRead(s105bBid)),
+  `${s105bBid} / ${lastPrompt().split('\n').length} lines`
+);
+
+// --- S105c: 超条数 / 超长 / 形状不对 → 可读拒绝，0 投递、0 写入。
+const s105cBeforeBids = bcBids().sort().join(',');
+const s105cBeforePrompts = prompts.length;
+const s105cExcluded = await expectFail(
+  'S105 blocked.excluded 21 条 → 可读拒绝（不静默截断）',
+  () =>
+    call(
+      'collab_send',
+      {
+        target: S105_TO,
+        text: 'S105 超条数',
+        blocked: { excluded: Array.from({ length: 21 }, (_, index) => `已排除方向 ${index + 1}`) },
+        confirm: true
+      },
+      as105(S105_ME)
+    ),
+  /blocked\.excluded 最多 20 条/
+);
+const s105cLong = await expectFail(
+  'S105 blocked.need 单条 121 字 → 可读拒绝',
+  () =>
+    call(
+      'collab_send',
+      { target: S105_TO, text: 'S105 超长条目', blocked: { need: ['长'.repeat(121)] }, confirm: true },
+      as105(S105_ME)
+    ),
+  /blocked\.need\[0\] 最长 120 字/
+);
+const s105cTest = await expectFail(
+  'S105 blocked.minimalTest 201 字 → 可读拒绝',
+  () =>
+    call(
+      'collab_send',
+      { target: S105_TO, text: 'S105 超长判别', blocked: { minimalTest: '判'.repeat(201) }, confirm: true },
+      as105(S105_ME)
+    ),
+  /blocked\.minimalTest 最长 200 字/
+);
+const s105cEmpty = await expectFail(
+  'S105 blocked 全空 → 可读拒绝（不会静默当没传）',
+  () => call('collab_send', { target: S105_TO, text: 'S105 空 blocked', blocked: {}, confirm: true }, as105(S105_ME)),
+  /blocked 不能为空/
+);
+const s105cShape = await expectFail(
+  'S105 blocked 不是对象 → 可读拒绝',
+  () =>
+    call('collab_send', { target: S105_TO, text: 'S105 形状', blocked: 'need: 日志', confirm: true }, as105(S105_ME)),
+  /blocked 必须是对象/
+);
+expect(
+  'S105 五类非法输入都是可读拒绝：0 投递、0 写入（广播目录一字未变）',
+  Boolean(s105cExcluded && s105cLong && s105cTest && s105cEmpty && s105cShape) &&
+    prompts.length === s105cBeforePrompts &&
+    bcBids().sort().join(',') === s105cBeforeBids,
+  `${prompts.length - s105cBeforePrompts} deliveries / bids ${bcBids().length}`
+);
+
+// --- S105d: 无 bid → 三段仍进正文，回执注明未落库，广播目录不变。
+const s105dBeforeBids = bcBids().sort().join(',');
+const s105dBeforePrompts = prompts.length;
+const s105d = await call(
+  'collab_send',
+  {
+    target: S105_TO,
+    kind: 'note',
+    threadID: 't_s105nobid',
+    text: 'S105 没有 bid 的 BLOCKED',
+    blocked: { excluded: ['不是网络'], minimalTest: '只改一处配置看是否复现' },
+    confirm: true
+  },
+  as105(S105_ME)
+);
+expect(
+  'S105 无 bid：三段仍进正文，回执注明「未关联单据 / 未落库」，0 写入',
+  lastPrompt().includes('已排除：不是网络') &&
+    lastPrompt().includes('最小判别：只改一处配置看是否复现') &&
+    s105d.includes('未关联单据') &&
+    s105d.includes('未落库') &&
+    prompts.length === s105dBeforePrompts + 1 &&
+    bcBids().sort().join(',') === s105dBeforeBids,
+  `${s105d.split('\n').pop()}`
+);
+
+// --- S105e: 有 bid → 写入记录（保留最近 3 次），state / claim / receipt 不变；
+//            status 展示「最新一次 + 历史 N 次」，各段 ≤3 条 + 「还有 N 条」。
+const S105_REC = 'b_dd05000000001051';
+mkdirSync(broadcastDir, { recursive: true });
+writeFileSync(
+  bcFile(S105_REC),
+  JSON.stringify(
+    {
+      bid: S105_REC,
+      state: 'acked',
+      title: 'S105 结构化 blocked fixture',
+      from: { sid: S105_ME, directory: HARNESS_LOCATION },
+      claim: { by: S105_TO, kind: 'accept', at: 1, token: 'k_s105' },
+      receipt: { from: S105_TO, at: 2, note: '初始回执，保持不动' },
+      replies: [],
+      updatedAt: 3
+    },
+    null,
+    2
+  )
+);
+const s105StateOf = () => {
+  const record = bcRead(S105_REC);
+  return JSON.stringify({ state: record.state, claim: record.claim, receipt: record.receipt });
+};
+const s105StateBefore = s105StateOf();
+const s105eSend = (text, blocked) =>
+  call(
+    'collab_send',
+    { target: S105_ME, kind: 'note', bid: S105_REC, text, blocked, confirm: true },
+    as105(S105_TO)
+  );
+await s105eSend('S105 BLOCKED #1', { minimalTest: '判别一' });
+await s105eSend('S105 BLOCKED #2', { excluded: ['方向 A'], minimalTest: '判别二' });
+await s105eSend('S105 BLOCKED #3', { need: ['给日志'], minimalTest: '判别三' });
+const S105_FULL = {
+  need: ['给 09:00 的推送日志', '把房态改回在住', '给出设备 id', '贴一次失败请求', '确认 app 版本'],
+  excluded: ['不是权限', '不是时钟', '不是网络', '不是缓存'],
+  minimalTest: '改房态看有没有帧：有帧 = 前端，无帧 = 后端'
+};
+const s105eLast = await s105eSend('S105 BLOCKED #4', S105_FULL);
+const s105eRecord = bcRead(S105_REC);
+expect(
+  'S105 连续 4 次：记录只保留最近 3 次（最旧的一条被挤掉）',
+  s105eLast.includes(`已写入记录 ${S105_REC}`) &&
+    s105eRecord.blocked.length === 3 &&
+    s105eRecord.blocked.map(entry => entry.minimalTest).join('|') ===
+      `判别二|判别三|${S105_FULL.minimalTest}`,
+  JSON.stringify(s105eRecord.blocked.map(entry => entry.minimalTest))
+);
+expect(
+  'S105 state / claim / receipt 前后完全一致（blocked 是纯展示字段）',
+  s105StateOf() === s105StateBefore,
+  `${s105StateOf()} / ${s105StateBefore}`
+);
+const s105eStatus = await call('collab_status', { bid: S105_REC }, as105(S105_ME));
+out('S105 status', s105eStatus);
+expect(
+  'S105 collab_status：最新一次的三段（各 ≤3 条 + 「还有 N 条」）+ 历史次数',
+  s105eStatus.includes('BLOCKED（结构化，最新一次 / 历史 3 次') &&
+    s105eStatus.includes('需要对方：① 给 09:00 的推送日志 ② 把房态改回在住 ③ 给出设备 id（还有 2 条）') &&
+    s105eStatus.includes('已排除：不是权限；不是时钟；不是网络（还有 1 条）') &&
+    s105eStatus.includes(`最小判别：${S105_FULL.minimalTest}`),
+  s105eStatus.split('\n').filter(line => line.includes('需要对方：') || line.includes('已排除：')).join(' | ')
+);
+
+// --- S105f: 非参与方 → 只渲染进自己的正文，绝不写别人的记录。
+const s105RecJsonBefore = JSON.stringify(bcRead(S105_REC));
+const s105fThird = await call(
+  'collab_send',
+  {
+    target: S105_TO,
+    kind: 'note',
+    bid: S105_REC,
+    text: 'S105 第三方也来写 blocked',
+    blocked: { minimalTest: '第三方判别' },
+    confirm: true
+  },
+  as105(S105_THIRD)
+);
+expect(
+  'S105 非参与方：正文照渲染，但记录一字不动（不落库）',
+  s105fThird.includes(`不是 ${S105_REC} 的参与方`) &&
+    s105fThird.includes('未落库') &&
+    JSON.stringify(bcRead(S105_REC)) === s105RecJsonBefore,
+  `${s105fThird.split('\n').pop()}`
+);
+
+// --- S105i: handoff 幂等分支的两道门（复核 F1）：预览不写，确认后才写。
+const S105_IDEM_TEXT = 'S105 幂等分支：预览不写、确认才写';
+const s105iFirst = await call(
+  'collab_handoff',
+  { target: S105_TO, text: S105_IDEM_TEXT, confirm: true },
+  as105(S105_ME)
+);
+const s105iBid = bidOf(s105iFirst);
+const s105iBefore = JSON.stringify(bcRead(s105iBid).blocked ?? []);
+const s105iPromptBefore = prompts.length;
+const s105iPreview = await call(
+  'collab_handoff',
+  {
+    target: S105_TO,
+    text: S105_IDEM_TEXT,
+    blocked: { minimalTest: '预览不该写进去的判别' },
+    confirm: false
+  },
+  as105(S105_ME)
+);
+const s105iAfterPreview = JSON.stringify(bcRead(s105iBid).blocked ?? []);
+const s105iConfirm = await call(
+  'collab_handoff',
+  {
+    target: S105_TO,
+    text: S105_IDEM_TEXT,
+    blocked: { minimalTest: '预览不该写进去的判别' },
+    confirm: true
+  },
+  as105(S105_ME)
+);
+const s105iAfterConfirm = bcRead(s105iBid).blocked ?? [];
+out('S105i idempotent preview', `${s105iPreview.split('\n').pop()}\n${s105iConfirm.split('\n').pop()}`);
+expect(
+  'S105 handoff 幂等分支：confirm:false 预览不落库，确认后才写（复核 F1）',
+  s105iAfterPreview === s105iBefore &&
+    s105iPreview.includes('预览') &&
+    s105iPreview.includes('未落库') &&
+    prompts.length === s105iPromptBefore && // 幂等分支本来就不重投（预览与确认都不投）
+    s105iConfirm.includes('已写入记录') &&
+    s105iAfterConfirm.length === 1 &&
+    s105iAfterConfirm[0].minimalTest === '预览不该写进去的判别',
+  `before=${JSON.parse(s105iBefore).length} preview=${JSON.parse(s105iAfterPreview).length} confirm=${s105iAfterConfirm.length} / ${prompts.length - s105iPromptBefore} prompt(s)`
+);
+
+// --- S105j: 同一个幂等分支不得让非参与方写别人的记录（复核 F2）。
+const s105jBefore = JSON.stringify(bcRead(s105iBid));
+const s105jThird = await call(
+  'collab_handoff',
+  {
+    target: S105_TO,
+    text: S105_IDEM_TEXT,
+    blocked: { minimalTest: '第三方经 handoff 幂等分支塞进来的判别' },
+    confirm: true
+  },
+  as105(S105_THIRD)
+);
+expect(
+  'S105 handoff 幂等分支：非参与方不写别人的记录（复核 F2）',
+  s105jThird.includes(`不是 ${s105iBid} 的参与方`) &&
+    s105jThird.includes('未落库') &&
+    JSON.stringify(bcRead(s105iBid)) === s105jBefore,
+  `${s105jThird.split('\n').pop()}`
+);
+
+// --- S105k: 去重命中（未投递）不再追加同一条 blocked，避免白占「最近 3 次」（复核 F3）。
+const S105_DUP_TEXT = 'S105 去重命中：同一段不重复追加';
+const s105kBefore = JSON.stringify(bcRead(S105_REC).blocked);
+const s105k1 = await call(
+  'collab_send',
+  {
+    target: S105_ME,
+    kind: 'note',
+    bid: S105_REC,
+    text: S105_DUP_TEXT,
+    blocked: { minimalTest: '去重命中的判别' },
+    confirm: true
+  },
+  as105(S105_TO)
+);
+const s105kAfterFirst = JSON.stringify(bcRead(S105_REC).blocked);
+const s105k2 = await call(
+  'collab_send',
+  {
+    target: S105_ME,
+    kind: 'note',
+    bid: S105_REC,
+    text: S105_DUP_TEXT,
+    blocked: { minimalTest: '去重命中的判别' },
+    confirm: true
+  },
+  as105(S105_TO)
+);
+const s105kAfterSecond = JSON.stringify(bcRead(S105_REC).blocked);
+expect(
+  'S105 去重命中：不重复追加 blocked（不白占最近 3 次名额，复核 F3）',
+  s105k1.includes('已写入记录') &&
+    s105k2.includes('未重复投递') &&
+    s105k2.includes('去重命中') &&
+    s105kAfterFirst !== s105kBefore &&
+    s105kAfterSecond === s105kAfterFirst &&
+    JSON.parse(s105kAfterSecond).at(-1).minimalTest === '去重命中的判别',
+  `${JSON.parse(s105kBefore).length} → ${JSON.parse(s105kAfterFirst).length} → ${JSON.parse(s105kAfterSecond).length} / ${s105k2.split('\n').pop()}`
+);
+
+// --- S105g: 承接方注入（takeoverBody：叫醒 / spawn / 重发）同样聚合三段。
+const WS_X = ws('x');
+const ISSUE_X = issueFile(
+  WS_X,
+  'fix-blocked-inject.md',
+  '# blocked 注入（11-17-worker-store）\n\n`packages/state/src/machine/worker/store.ts`\n'
+);
+sessions[S105_L_CAND] = {
+  id: S105_L_CAND,
+  agent: 'build',
+  title: 'worker store state machine 修复（11-17-worker-store）',
+  time: { updated: now - 60_000, busy: 0 },
+  location: { directory: WS_X }
+};
+contexts.set(S105_L_CAND, [toolMessage('packages/state/src/machine/worker/store.ts')]);
+const s105gBefore = prompts.length;
+const s105g = await call(
+  'collab_broadcast',
+  { workspace: WS_X, issuePath: ISSUE_X, confirm: true },
+  as105(S105_ME)
+);
+const s105gBid = bidOf(s105g);
+const s105gRecord = bcRead(s105gBid);
+expect(
+  'S105 注入前置：广播问询到唯一候选（候选 idle → 无 prompt，只有注入）',
+  Boolean(s105gBid) && s105gRecord.asked?.sid === S105_L_CAND && prompts.length === s105gBefore,
+  `${s105gBid} asked=${s105gRecord.asked?.sid} / ${prompts.length - s105gBefore} prompts`
+);
+const S105_L_BLOCK = {
+  need: ['给出 09:00 的后端日志'],
+  excluded: ['不是权限'],
+  minimalTest: '改房态看有没有帧'
+};
+const s105gSend = await call(
+  'collab_send',
+  {
+    target: S105_ME,
+    kind: 'note',
+    bid: s105gBid,
+    text: 'S105 上一跳卡住了（结构化判别见下）',
+    blocked: S105_L_BLOCK,
+    confirm: true
+  },
+  as105(S105_L_CAND)
+);
+const s105gMid = bcRead(s105gBid);
+expect(
+  'S105 注入前置：承接方把结构化 BLOCKED 写进记录，state 仍是 open（未闭环）',
+  s105gSend.includes('已写入记录') && s105gMid.state === 'open' && s105gMid.blocked?.length === 1,
+  `state=${s105gMid.state} blocked=${s105gMid.blocked?.length}`
+);
+sessions[S105_L_CAND].time = { updated: now, busy: now - 45 * 60_000, idle: 0 };
+const s105gWakeBefore = prompts.length;
+await call('collab_broadcast', { workspace: WS_X, issuePath: ISSUE_X, confirm: true }, as105(S105_ME));
+const s105gWake = lastPrompt();
+out('S105g takeover (wake)', s105gWake);
+expect(
+  'S105 承接方注入（叫醒 / takeoverBody）含三段，且在「按顺序完成」之前',
+  prompts.length === s105gWakeBefore + 1 &&
+    s105gWake.includes('上一位承接方的 BLOCKED（结构化') &&
+    s105gWake.includes('需要对方：① 给出 09:00 的后端日志') &&
+    s105gWake.includes('已排除：不是权限') &&
+    s105gWake.includes('最小判别：改房态看有没有帧') &&
+    s105gWake.indexOf('最小判别：') < s105gWake.indexOf('按顺序完成'),
+  `${prompts.length - s105gWakeBefore} prompt(s)`
+);
+expect(
+  'S105 … 叫醒的 read-merge-write 不会丢掉 blocked',
+  bcRead(s105gBid).blocked?.length === 1,
+  `${bcRead(s105gBid).blocked?.length}`
+);
+
+// --- S105h: 两个入参都声明 blocked（结构 + 界值写在描述里），工具面仍是 21 个。
+const s105SendSchema = tool('collab_send').input.properties.blocked;
+const s105HandoffSchema = tool('collab_handoff').input.properties.blocked;
+expect(
+  'S105 collab_send / collab_handoff 都声明了 blocked（need/excluded/minimalTest），工具面仍 21 个',
+  Boolean(s105SendSchema) &&
+    Boolean(s105HandoffSchema) &&
+    s105SendSchema.properties.excluded.items.type === 'string' &&
+    /≤20 条/.test(String(s105SendSchema.properties.excluded.description)) &&
+    /≤10 条/.test(String(s105SendSchema.properties.need.description)) &&
+    /≤200 字/.test(String(s105SendSchema.properties.minimalTest.description)) &&
+    tools.length === 21,
+  `${tools.length} tools / ${JSON.stringify(Object.keys(s105SendSchema?.properties ?? {}))}`
+);
+
+// Cleanup: S105 records / fixtures / threads.
+for (const bid of [s105aBid, s105bBid, s105gBid, s105iBid].filter(Boolean)) rmSync(bcFile(bid), { force: true });
+rmSync(bcFile(S105_REC), { force: true });
+for (const thread of [S105_PLAIN_THREAD, 't_s105nobid']) store.delete(`collab/threads/${thread}`);
+contexts.delete(S105_L_CAND);
+delete sessions[S105_ME];
+delete sessions[S105_TO];
+delete sessions[S105_THIRD];
+delete sessions[S105_L_CAND];
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);
 if (failed.length) {

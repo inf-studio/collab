@@ -21,13 +21,13 @@
 | `collab_list`      | 列可协作会话（id/agent/state/loc/title/parent/别名）+ 未闭环交接           | 只读              |
 | `collab_inbox`     | 本会话收到的跨会话消息全文（单条 ≤4000 字）                                | 只读              |
 | `collab_wait`      | 等某 thread 的回执，或等某会话空闲                                         | 只读              |
-| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 下一步（非阻塞、零写入）；消息 thread（`collab_send`/`collab_reply` 建立）降级为 `kind=messages` + 出入站摘要，不再报错 | 只读              |
+| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 承接方报过的结构化 BLOCKED（需要对方 / 已排除 / 最小判别）/ 下一步（非阻塞、零写入）；消息 thread（`collab_send`/`collab_reply` 建立）降级为 `kind=messages` + 出入站摘要，不再报错 | 只读              |
 | `collab_threads`   | 与**一个** target 的全部 thread：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 建议继续哪个（默认只列未闭环，≤20 条） | 只读              |
 | `collab_escalate` | 加急一单：默认 `delivery:steer` 进对方当前轮（只读 agent / 受保护目标自动降级：queue 或 owner-queue 项），回执打印**实际** delivery；只追加 `priority/urgentAt/urgentReason/urgentBy` | 发消息 / 写队列 |
 | `collab_freeze`   | **临时冻结**一个会话（含子会话）/ 工作区 / 一单：`handoff`/`broadcast`/`accept`/`escalate` 对它的**新建**协作可读拒绝（0 写入），`until` 到期自动失效；通知一次（受保护目标 → urgent 队列项）；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
-| `collab_send`      | 往另一个会话投递消息（`queue` 默认，不打断）                               | 发消息            |
+| `collab_send`      | 往另一个会话投递消息（`queue` 默认，不打断）；`blocked?` = BLOCKED 结构化三段（正文之后，有 bid 时落库） | 发消息            |
 | `collab_reply`     | 按 thread 自动路由的回执                                                   | 发消息            |
-| `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread；`origin?` 记录转发链链头   | 发消息            |
+| `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread；`origin?` 记录转发链链头；`blocked?` 把「卡住了」的结构化三段交给下一跳 | 发消息            |
 | `collab_broadcast` | 跨工作区交接：读提案 → 打分 → 写全局交接文件 → 只问 top-1 / 必要时拉新会话；`origin?` 缺省继承上一跳 | 发消息 + 可建会话 |
 | `collab_accept`    | 原子领取广播（`<bid>.lock`，只有一个 winner）                              | 写交接记录        |
 | `collab_request_owner` | 给**受保护**会话（`[protected]`/`[protected-child]`）排队一条请求：只写队列文件，目标下次运行时看到 ≤3 行只读提示（**不投递**、不建 bid/thread、`revoke` 仅发起方） | 写本地队列        |
@@ -54,6 +54,13 @@
 边界：只有本单**发起方或对接人**能让这条行闭环（发给第三方仍是普通 `request`），
 且受保护投递规则不变（`origin` 指向 `[protected*]` 时照旧拒投）。没有 `origin` 的旧记录输出与 0.6.0
 逐字一致；`origin` 本身不产生任何投递。
+0.7.0 起 `collab_send` / `collab_handoff` 还有可选的 **`blocked`（结构化 BLOCKED）**：
+`{ need?: string[], excluded?: string[], minimalTest?: string }`（≤10 / ≤20 / ≤200 字，条目 ≤120 字）。
+三段落渲染在**投递正文之后**（`需要对方：① …` / `已排除：…` / `最小判别：…`），有可解析 `bid` 且你是本单参与方时
+写进记录 `blocked[]`（保留最近 3 次），下一跳的承接方注入与 `collab_status` 聚合展示（各段 ≤3 条 + 「还有 N 条」）。
+没有 bid / 预览（`confirm:false`）/ 非参与方 / 同文去重命中（未投递）→ 只上正文、回执注明「未落库」；超条数 / 超长是可读拒绝（0 投递 0 写入），
+不传时输出与旧版**逐字一致**；`state` / `claim` / `receipt` 一律不动。
+
 受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
 （每条一次，不含指令、不产生投递；两类合计 ≤3 行，同一提案只渲染 `at` 最新的一条）。
 
@@ -309,6 +316,9 @@ pnpm test          # build + 823 项 harness + 12 项只读默认 + 20 项看板
   0.7.0 追加 S101：跨 thread 正文去重（同一 target 的 3 个 thread 同文只投 1 次、回执写明「已在 thread … 发过」）、
   `force:true` 三投三中且标 `dedupeOverridden`（带 `bid` 时记录标 `dedupeOverriddenAt` 且状态字段不变）、
   窗口边界（59s 拦 / 61s 放行，`Date.now` 前跳）、不同 target / 预览 / `dedupeWindowMs:0` 各一条。
+  0.7.0 追加 S105：BLOCKED 结构化——投递正文 / 承接方注入（真实叫醒链路）/ `collab_status` 三处都含三段、
+  不传时投递正文与信封+正文精确相等、五类非法输入可读拒绝且 0 投递 0 写入、无 bid 与非参与方都不落库、
+  连续 4 次只留最近 3 次、`state/claim/receipt` 前后一致、工具面仍 21 个。
   0.7.0 追加 S102：thread 聚合（`collab_threads` 一次列出 1 handoff + 2 消息 thread、kind/bid/出入站摘要、
   唯一「← 建议继续」、`includeClosed` 才列已闭环 ≤3）与 `collab_status` 降级（消息 thread → `kind=messages`
   + 摘要、未知 thread 保留原错误）；索引只在该消息**真的投递成功**后写（预览零写入）、上限 500 按 `lastAt` 淘汰、

@@ -12,7 +12,15 @@ import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
 import { recordThread } from '../core/thread-index.ts';
-import { originHint, protocolHeader } from '../core/verdict.ts';
+import {
+  appendBlocked,
+  BLOCKED_KEEP,
+  blockedLines,
+  canWriteBlocked,
+  normalizeBlocked,
+  originHint,
+  protocolHeader
+} from '../core/verdict.ts';
 import { newThreadID } from '../ids.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
 import { asObject, hash16, sessionState, truncate } from '../util.ts';
@@ -60,6 +68,30 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
             'implement (default) / review / research — the last one is read-only investigation + a conclusion; ' +
             'it drives the ranking and is written into the record.'
         },
+        blocked: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            'BLOCKED 结构化（0.7.0，可选）：转发一个「卡住了」的活儿时，把「缺什么 / 已排除什么 / 最小判别实验」' +
+            '写成三段，追加在正文之后（正文自由）。会写进记录 blocked（保留最近 3 次），' +
+            '下一跳的承接方注入与 collab_status 都聚合展示；不传 = 输出与旧版逐字一致；超限一律可读拒绝。',
+          properties: {
+            need: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '需要对方提供什么：≤10 条，每条 ≤120 字。'
+            },
+            excluded: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '已经排除的方向：≤20 条，每条 ≤120 字。'
+            },
+            minimalTest: {
+              type: 'string',
+              description: '让对端一次就能判别的最小实验 / 判别式：≤200 字。'
+            }
+          }
+        },
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false or omitted only returns the preview.'
@@ -72,6 +104,10 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       const workspace = ctx?.location?.directory;
       const body = String(input?.text ?? '').trim();
       if (!body) throw invalid('text 不能为空');
+      // 0.7.0 (`11-19-collab-blocked`): validate before any delivery / write — an
+      // over-long or over-count `blocked` is a readable refusal, never truncated.
+      const blocked = normalizeBlocked(input?.blocked);
+      const blockedText = blocked ? blockedLines(blocked) : [];
       const expected = normalizeExpected(input?.expected);
       const notes: string[] = [];
       const lineage = createLineage(ctx);
@@ -170,16 +206,36 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       // resurrect a `done` hand-off and drop its receipt (S1).
       const previous = readBroadcast(bid);
       if (previous) {
-        const record = persistRefresh(previous, await chain.refresh(previous, Date.now(), { actor: me }));
+        let record = persistRefresh(previous, await chain.refresh(previous, Date.now(), { actor: me }));
         const state = BCAST_DONE_STATES.includes(String(record.state))
           ? `已闭环（state=${record.state}）：${record.receipt?.note ?? '-'}。不重复投递、不改状态。`
           : `已存在同一交接（bid 幂等，不重复投递）：state=${record.state}，thread=${record.threadID ?? '-'}。` +
             `等结果用 collab_wait {threadID:"${record.threadID ?? '…'}"}。`;
+        // 0.7.0 (`11-19-collab-blocked`): a repeat that carries `blocked` still
+        // records it — nothing is re-delivered, but the next ask / the other
+        // side's `collab_status` has to be able to see what was already ruled
+        // out. Two gates, the same two the fresh path and `collab_send` use:
+        //   ① `confirm:true` — a preview writes nothing (review F1: this branch
+        //      sits *before* the preview return below, so it needs its own gate);
+        //   ② `canWriteBlocked` — `blocked` is rendered into the *next*
+        //      claimant's takeover, so a bystander must never append (review F2).
+        // `state` / `claim` / `receipt` stay exactly as they are either way.
+        let blockedNote = '';
+        if (blocked && input?.confirm !== true) {
+          blockedNote = `注: 预览（confirm 不为 true）—— blocked 未落库；确认后会写进记录 ${bid}。`;
+        } else if (blocked && !canWriteBlocked(record, me)) {
+          blockedNote = `注: 当前会话不是 ${bid} 的参与方（from / claim.by / asked / origin）—— blocked 未落库。`;
+        } else if (blocked) {
+          record = writeBroadcast(appendBlocked(record, { ...blocked, at: Date.now(), by: String(me ?? '') }));
+          blockedNote =
+            `注: blocked 已写入记录 ${bid}（保留最近 ${BLOCKED_KEEP} 次；未重复投递，state / claim / receipt 未改）。`;
+        }
         return {
           content: [
             state,
             `bid=${bid}  thread=${record.threadID ?? '-'}  承接=${record.claim?.by ?? '-'}`,
-            `目标: ${target.sessionID}（local scope，回执用 collab_reply {threadID} 或 [handoff] DONE ${bid}）`
+            `目标: ${target.sessionID}（local scope，回执用 collab_reply {threadID} 或 [handoff] DONE ${bid}）`,
+            ...(blockedNote ? [blockedNote] : [])
           ].join('\n')
         };
       }
@@ -196,6 +252,12 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
             freeze ? `拒绝提示: ${freezeHintText(freeze)}` : '',
             `kind=request mode=${forced ? 'queue(forced)' : mode} thread=${threadID} bid=${bid}`,
             originPreviewNote,
+            ...(blockedText.length
+              ? [
+                  'BLOCKED 结构化（确认后会追加在正文之后，并写入记录 blocked）:',
+                  ...blockedText.map(line => `  ${line}`)
+                ]
+              : []),
             ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
             ...notes.map(note => `注: ${note}`),
             ...(ranking
@@ -218,7 +280,15 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
           // 0.7.0 (R2): the first two lines tell the receiver it is the claimant
           // and how to answer — the task body follows, unchanged.
           // 0.7.0 (R3): a forwarded chain appends the 对接人 line after them.
-          text: [...protocolHeader({ bid, threadID, origin: chainOrigin, requester: me }), '', body].join('\n'),
+          // 0.7.0 (`11-19-collab-blocked`): the structured BLOCKED block comes
+          // **after** the free-form body (nothing is inserted into it), so an
+          // existing body reads exactly as it did.
+          text: [
+            ...protocolHeader({ bid, threadID, origin: chainOrigin, requester: me }),
+            '',
+            body,
+            ...(blockedText.length ? ['', ...blockedText] : [])
+          ].join('\n'),
           confirm: true
         },
         kind: 'request',
@@ -259,6 +329,10 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         from: { sid: me, directory: workspace },
         // 0.7.0 (R1): the chain head when it is not this hop (`A → B → C`).
         origin: chainOrigin,
+        // 0.7.0 (`11-19-collab-blocked`): the structured half of this report —
+        // display only (`state` / `claim` / `receipt` untouched). Omitted when
+        // the caller gave nothing, so an old record shape is unchanged.
+        ...(blocked ? { blocked: [{ ...blocked, at: Date.now(), by: String(me ?? '') }] } : {}),
         // R1 (0.1.6): the admission receipt of the very prompt `dispatch` sent —
         // the receiving plugin acks this `cid` from its inbox/context.
         delivery: delivered.delivery

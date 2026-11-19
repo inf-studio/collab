@@ -262,18 +262,18 @@ opencode plugin add @inf-studio/collab@0.1.0
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
 | `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9；带 `origin` 的转发单行尾再加 ` via ses_…`，见 §11.16）；本会话持有 / 排队中的资源租约（§11.10）；本会话**提交给受保护会话的队列项**（条数 + ≤3 行明细 + `queueId`，见 §11.12）。`directory` 只看一个工作区（省略 = 旧行为） |
-| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, force?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16）。`force?`（0.7.0）：窗口内已有同文仍要投递时用，跳过两级判定、回执标注 `dedupeOverridden`（§11.9.4） |
+| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, force?, blocked?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16）。`force?`（0.7.0）：窗口内已有同文仍要投递时用，跳过两级判定、回执标注 `dedupeOverridden`（§11.9.4）。`blocked?`（0.7.0）：BLOCKED 结构化 `{ need?, excluded?, minimalTest? }`，三段追加在正文之后；有可解析 bid 且你是本单参与方时写进记录 `blocked[]`（保留最近 3 次），没有就只上正文、回执注明未落库；超限可读拒绝，不传时输出逐字不变（§11.18） |
 | `collab_reply` | `{ threadID, text, bid?, force?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定）；`force?` 同 `collab_send`（§11.9.4） |
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
-| `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。带 `origin` 的转发单还会显示 `origin=ses_… @ <dir>`（§11.16）。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**消息 thread 不再报错**（0.7.0）：没有广播记录的 thread 降级为 `kind=messages` + 目标 + 最近出入站摘要（≤5 条）——只有索引与 thread store 都不认识的 thread 才保持原错误（§11.17）。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
+| `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。带 `origin` 的转发单还会显示 `origin=ses_… @ <dir>`（§11.16）。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。承接方报过结构化 BLOCKED 时多一段`BLOCKED（结构化，最新一次 / 历史 N 次）` + `需要对方` / `已排除` / `最小判别` 三行（各 ≤3 条，§11.18）。**消息 thread 不再报错**（0.7.0）：没有广播记录的 thread 降级为 `kind=messages` + 目标 + 最近出入站摘要（≤5 条）——只有索引与 thread store 都不认识的 thread 才保持原错误（§11.17）。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
 | `collab_threads` | `{ target, includeClosed? }` | **thread 聚合（0.7.0，只读）**：列出与**一个** target 的全部 thread（`threadID` / `kind` handoff\|messages / 状态 / 最近活动 / 最近出入站摘要各 ≤120 字 / 交接单的 `bid`），并给出**建议继续哪个**（最新未闭环那条，附可直接复制的 `collab_reply` 或 `collab_status`）。默认只列未闭环，`includeClosed:true` 再列最近 3 条已闭环；≤20 条，超出给「还有 N 个」。数据 = thread 索引（`~/.config/opencode/collab-threads.json`，只在该消息**真的投递成功**后写）join 广播记录 + thread store。**零写入**（读前后索引 mtime/hash 不变）。见 §11.17 |
 | `collab_escalate` | `{ bid?, threadID?, session?, reason, mode?, confirm }` | **加急（0.6.0）**：让被加急的一单**现在就进对方当前轮**——复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递。`bid` / `threadID` / `session` 三选一；`reason` 必填（≤200，剥控制字符）。`mode` 默认 **`steer`**（显式 `"queue"` 才排队），只读 agent（`explore`/`plan`）目标**强制 `queue`**（回执标 `forced`）；回执打印**宿主实际采用**的 `delivery`（空闲目标会降级为 `queue`）与 `messageID`。记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state` / `claim` / `receipt`。受保护目标（含血缘）**0 条 prompt** → 写一条 `priority:"urgent"` 的 owner-queue 项，回执 `canPush:false` + 队列位置。同 `bid + reason` 5 分钟内只刷新 `urgentAt`、不重复投递。`confirm:false` 零写入预览。见 §11.14.1 |
 | `collab_freeze` | `{ scope, target?, reason, until?, freeze?, confirm }` | **临时冻结（0.6.0）**：让协作层自己遵守「先别动」。`scope` = `session`（覆盖其子会话，血缘）/ `workspace`（目录）/ `bid`（一单）；`target` 除 `workspace` 外必填（`session` 收别名，`workspace` 缺省 = 当前工作区）。`until` 支持相对 `"30m"`/`"2h"`/`"45s"` 或绝对 ISO，默认 **30 分钟**、上限 30 天；**到期在读取时失效**（无定时器、无清理）。写入 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename + 短锁，并发不丢条目）。被冻结对象上的**新建**协作一律可读拒绝（0 写入）：`collab_handoff`（目标 / 祖先 / 目标工作区）、`collab_broadcast`（工作区，spawn 前再判一次）、`collab_accept`（该单或本会话）、`collab_escalate`（冻结优先）；读取类 `collab_list` / `collab_status` 只标 `[frozen]`。通知一次：非受保护 → 1 条 `queue` prompt（回执 `cid` / `messageId` 存 `delivery[]`）；受保护（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项。被冻会话自己的 `context` 只提示一次（写 `notifiedAt`）。`freeze:false` 解冻（幂等 no-op）；`confirm:false` 零写入预览。冻结 ≠ 归档 ≠ 删除。见 §11.14.2 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话）。`origin?`（0.7.0）：转发链的起点，缺省从「本会话正在承接的未闭环交接」继承一层（§11.16） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
-| `collab_handoff` | `{ target?, text, expected?, origin?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投。`origin?`（0.7.0）：转发链起点，写进记录并在投递正文协议头后加「对接人」行（§11.16） |
+| `collab_handoff` | `{ target?, text, expected?, origin?, blocked?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投。`origin?`（0.7.0）：转发链起点，写进记录并在投递正文协议头后加「对接人」行（§11.16）。`blocked?`（0.7.0）：转发「卡住了」的活儿时带 `{ need?, excluded?, minimalTest? }`——追加在投递正文之后、写进记录（保留最近 3 次），下一跳的承接方注入与 `collab_status` 都聚合展示（§11.18） |
 | `collab_request_owner` | `{ target?, text?, issuePath?, bid?, id?, revoke?, confirm }` | **受保护目标请求队列（0.4.0）**：只允许「非受保护 → `[protected]`/`[protected-child]`」，写入 `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`（`tmp+rename`，每目标上限 **50 条未读**，满则拒新；已读项不计、7 天后回收）。**不投递、不唤醒、不建 bid/thread、不改任何协作状态**（0 条 prompt）；`confirm:false` 零写入。`text` → `summary`（去控制字符、≤500）；`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。目标会话只在自己 `context` 注入里看到 ≤3 行只读提示（与「闭环后追加」合计 ≤3、同一提案一行，§11.12.1）；`revoke:true` + `id` 只允许发起方撤回自己的一条。见 §11.12 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
 | `collab_report` | `{ note?, bid?, threadID?, confirm }` | **缺陷上报（旁路，不改任何协作状态）**：把现场写到 `~/.config/opencode/collab-reports/<signature>/<ts>.{json,md}`（版本/工具/分类/错误名与消息≤2KB/stackTop 5 帧/短 id/工作区/记录快照；**不含正文、文件内容、token**），配了 `report.to` 时额外 `collab_send`（`note`+`queue`）通知维护方；同签名 1 小时最多 1 条。任何非参数校验类错误都会在错误文案末尾提示这个入口（见 §11.8） |
@@ -1511,6 +1511,59 @@ collab_reply 建立」）。
 
 **回滚**：删 `~/.config/opencode/collab-threads.json` 即失效（工具回到「只有广播记录」）；
 代码 `git restore -- src/core/thread-index.ts src/tools/{threads,status,shared,handoff,index}.ts`。
+
+### 11.18 结构化 BLOCKED（`blocked` 字段，0.7.0）
+
+**为什么**：实测一条跨仓链路里，真正推动进展的是 BLOCKED 正文里的**一句**「做一次最小判别实验（改房态看有没有帧）」——
+接收方要读完长正文才提炼得出来，转发一跳还要再复述一遍。所以把这段做成**可选结构化字段**，正文仍然自由（人话照写）。
+
+```jsonc
+blocked: {
+  "need":        ["给出 09:00–10:00 的后端推送日志"],                      // ≤10 条，每条 ≤120 字
+  "excluded":    ["不是权限（已用 admin 复现）", "不是时钟偏移（NTP 正常）"], // ≤20 条，每条 ≤120 字
+  "minimalTest": "改一次房态看有没有帧：有帧 = 前端，无帧 = 后端推送未触发"   // ≤200 字
+}
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 入参 | `collab_send` / `collab_handoff` 可选 `blocked`；**不传 = 输出与旧版逐字一致**（正文、协议头、回执一字不改） |
+| 校验 | 超条数 / 单条超长 / 不是对象 / 三段全空 → **可读拒绝**，例如 `blocked.need[0] 最长 120 字（本次 121 字）—— 未发送任何内容（不静默截断）`；0 投递、0 写入 |
+| 清洗 | 控制字符（含换行）→ 空格、空白折叠：三段都是单行，不能借换行伪造注入块的第二行 |
+| 存储 | 有可解析 `bid`（入参或正文里的 `b_…`）**且** `confirm:true` **且**调用方是本单参与方（`from` / `claim.by` / `asked` / `origin`，单一实现 = `canWriteBlocked`）→ 写进 `record.blocked[]`（**保留最近 3 次**）；`state` / `claim` / `receipt` 一律不动。`collab_handoff` 的**幂等分支**（同 target + 同正文的重复调用）走同样的两道门，不会因「记录已存在」而绕过 |
+| 不落库 | 没有 bid / `confirm:false` 预览 / 记录不存在 / 非参与方 / **同文去重命中（本次未投递）** → 只渲染进正文，回执写明「未落库」（去重命中的那一条已含在同一段里，不重复占名额） |
+| 渲染①投递正文 | 正文**之后**追加三段：`需要对方：① … ② …` / `已排除：…；…` / `最小判别：…`（正文本身一字不改） |
+| 渲染②承接方注入 | `takeoverBody`（spawn / 叫醒 / 重发）在「期望」之后、「按顺序完成」之前展示**最新一次**：各段 ≤3 条 + `（还有 N 条）` + 历史次数 |
+| 渲染③`collab_status` | `BLOCKED（结构化，最新一次 / 历史 N 次；sid @ HH:MM:SS）` + 同样三行（各 ≤3 条 + `（还有 N 条）`） |
+| 兼容 | 旧记录没有该字段 → 三处都渲染为空；`blocked` 不强制 kind（建议与 `[handoff] BLOCKED` 同行，回执才真的闭环） |
+| 护栏 | 纯展示字段：不放宽任何投递许可（受保护目标照旧拒投），不因它改 `state` / `claim` / `receipt` |
+
+示例（承接方把「卡住了」写成可复用的判别）：
+
+```text
+collab_send { target:"ses_发起方", text:"[handoff] BLOCKED b_14528d828f9df27b 缺后端推送日志",
+              blocked:{ need:["09:00–10:00 推送日志"], excluded:["不是权限","不是时钟"],
+                        minimalTest:"改房态看有没有帧：有帧 = 前端，无帧 = 后端未触发" }, confirm:true }
+```
+
+对端（发起方 / 下一个承接方）看到的是：
+
+```text
+需要对方：① 09:00–10:00 推送日志
+已排除：不是权限；不是时钟
+最小判别：改房态看有没有帧：有帧 = 前端，无帧 = 后端未触发
+```
+
+**测试**：`test/handoff-harness.mjs` S105（23 条）——投递正文 / 承接方注入 / `collab_status` 三处都含三段；
+不传时逐字一致；五类非法输入可读拒绝且 0 投递 0 写入；无 bid、「非参与方」（`collab_send` 与 `collab_handoff`
+幂等分支各一条）、`confirm:false` 预览、同文去重命中都不落库；连续 4 次只留最近 3 次；
+`state` / `claim` / `receipt` 前后一致；叫醒注入含三段且排在「按顺序完成」之前；工具面仍 21 个。
+变异必做：`blockedLines` 丢 `minimalTest` → 4 条用例失败；去掉无 bid 早退 → 「无 bid」用例失败；
+去掉参与方判定 → 「非参与方」用例失败（`send` 与 `handoff` 两条各一）；去掉幂等分支的 `confirm` 门 → 「预览不落库」失败；
+去掉去重命中的跳过 → 「去重命中不重复追加」失败。
+
+**回滚**：`git restore -- src/types.ts src/core/verdict.ts src/tools/{send,handoff,status}.ts`；旧记录没有 `blocked`，
+回滚后只是不展示（正文里的三段仍留在历史消息里）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

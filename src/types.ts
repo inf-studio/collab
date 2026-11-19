@@ -284,6 +284,32 @@ export interface BroadcastOrigin {
   [key: string]: any;
 }
 
+/**
+ * 0.7.0 (`11-19-collab-blocked`): the structured half of a `BLOCKED` report.
+ *
+ * The line that actually unblocks a hand-off ("do one minimal experiment: flip
+ * the room state and see whether a frame arrives") used to live in the middle of
+ * a long free-form body: the receiver had to read everything and the forwarding
+ * hop had to retype it. `need` / `excluded` / `minimalTest` are **display only**
+ * — they never touch `state` / `claim` / `receipt` and never widen a guard.
+ *
+ * Every field is capped (`need` ≤10, `excluded` ≤20, each entry ≤120 chars,
+ * `minimalTest` ≤200) and only the newest three reports are kept on a record.
+ */
+export interface BroadcastBlocked {
+  /** What the counterpart must provide (≤10, each ≤120 chars). */
+  need: string[];
+  /** Directions already ruled out (≤20, each ≤120 chars). */
+  excluded: string[];
+  /** The one experiment that settles it (≤200 chars). */
+  minimalTest: string;
+  at: number;
+  by: string;
+}
+
+/** The caller-supplied half of a `blocked` (no stamp — the writer adds it). */
+export type BlockedSpec = Pick<BroadcastBlocked, 'need' | 'excluded' | 'minimalTest'>;
+
 /** One hand-off record (`~/.config/opencode/collab-broadcast/<bid>.json`). */
 export interface BroadcastRecord {
   bid: string;
@@ -313,6 +339,14 @@ export interface BroadcastRecord {
    * `normalizeOrigin` / `resolveOrigin` (both tolerate junk).
    */
   origin?: BroadcastOrigin;
+  /**
+   * 0.7.0 (`11-19-collab-blocked`): the structured `BLOCKED` reports written by
+   * `collab_send` / `collab_handoff` (`{ need, excluded, minimalTest, at, by }`),
+   * newest last, at most three kept. Absent on every record written before this
+   * field existed — a record without it renders byte for byte as it used to.
+   * Read it through `blockedHistoryOf` (tolerant) rather than directly.
+   */
+  blocked?: BroadcastBlocked[];
   /**
    * R8: last time the requester looked at an `acked` claimant's answer and found
    * no verdict. Stamped so a reminder-less refresh does not re-read the

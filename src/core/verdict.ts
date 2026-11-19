@@ -1,7 +1,15 @@
 import { VERDICT_MESSAGE_LIMIT, VERDICT_NOTE_LIMIT, BCAST_LEASE_MS } from '../constants.ts';
+import { invalid } from './errors.ts';
 import { normalizeThreadID } from '../ids.ts';
-import type { BroadcastOrigin, BroadcastRecord, SessionMessageLike } from '../types.ts';
-import { truncateRaw } from '../util.ts';
+import type {
+  BlockedSpec,
+  BroadcastBlocked,
+  BroadcastOrigin,
+  BroadcastRecord,
+  JsonObject,
+  SessionMessageLike
+} from '../types.ts';
+import { asObject, shortID, truncate, truncateRaw } from '../util.ts';
 
 /**
  * Receipt line, written by the session that took the hand-off:
@@ -312,6 +320,253 @@ export function originHint(origin: BroadcastOrigin | undefined, requester: strin
   return `对接人（非本单发起方）：${sid} @ ${directory}`;
 }
 
+// ------------------------------------------- structured BLOCKED (0.7.0)
+
+/**
+ * 0.7.0 (`11-19-collab-blocked`): the caps of a structured `BLOCKED` report
+ * (design §1). Over the cap is a **readable refusal**, never a silent truncation
+ * — a silently dropped "已经排除的方向" is worse than no field at all.
+ */
+export const BLOCKED_KEEP = 3;
+export const BLOCKED_NEED_LIMIT = 10;
+export const BLOCKED_EXCLUDED_LIMIT = 20;
+export const BLOCKED_ITEM_CHARS = 120;
+export const BLOCKED_TEST_CHARS = 200;
+/** Per section in the aggregate view (接收方注入 / `collab_status`). */
+export const BLOCKED_AGGREGATE_ITEMS = 3;
+
+/**
+ * Same sanitation as `sanitizeReason`: control characters (newlines included)
+ * become spaces and runs collapse. Every rendered block is line-oriented, so a
+ * caller's stray newline must never be able to forge a second line.
+ */
+const BLOCKED_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g;
+
+function blockedText(value: unknown): string {
+  return String(value ?? '')
+    .replace(BLOCKED_CONTROL_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Code points, so "120 字" counts what a human calls a character. */
+const charCount = (text: string): number => [...text].length;
+
+/** `①`…`⑳` — the numbering the design shows (`需要对方：① … ② …`). */
+const circled = (index: number): string => String.fromCodePoint(0x2460 + index);
+
+/** One capped string field (`minimalTest`): sanitised, then length-checked. */
+function blockedOne(value: unknown, field: string, limit: number): string {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') throw invalid(`blocked.${field} 必须是字符串 —— 未发送任何内容`);
+  const text = blockedText(value);
+  const chars = charCount(text);
+  if (chars > limit) {
+    throw invalid(
+      `blocked.${field} 最长 ${limit} 字（本次 ${chars} 字）—— 未发送任何内容（不静默截断）`
+    );
+  }
+  return text;
+}
+
+/** One capped string list (`need` / `excluded`): sanitised, then checked. */
+function blockedList(value: unknown, field: string, limit: number): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw invalid(`blocked.${field} 必须是字符串数组 —— 未发送任何内容`);
+  if (value.length > limit) {
+    throw invalid(
+      `blocked.${field} 最多 ${limit} 条（本次 ${value.length} 条）—— 未发送任何内容（不静默截断）`
+    );
+  }
+  return value
+    .map((item, index) => {
+      if (typeof item !== 'string') {
+        throw invalid(`blocked.${field}[${index}] 必须是字符串 —— 未发送任何内容`);
+      }
+      const text = blockedText(item);
+      const chars = charCount(text);
+      if (chars > BLOCKED_ITEM_CHARS) {
+        throw invalid(
+          `blocked.${field}[${index}] 最长 ${BLOCKED_ITEM_CHARS} 字（本次 ${chars} 字）—— 未发送任何内容（不静默截断）`
+        );
+      }
+      return text;
+    })
+    .filter(Boolean);
+}
+
+/**
+ * Validate the caller's `blocked` input (design §2). Missing field → `undefined`
+ * and the call behaves exactly as before; anything unusable is a **readable
+ * refusal** before a single byte is delivered or written.
+ */
+export function normalizeBlocked(raw: unknown): BlockedSpec | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw invalid(
+      'blocked 必须是对象：{ need?: string[], excluded?: string[], minimalTest?: string } —— 未发送任何内容'
+    );
+  }
+  const value = raw as JsonObject;
+  const need = blockedList(value.need, 'need', BLOCKED_NEED_LIMIT);
+  const excluded = blockedList(value.excluded, 'excluded', BLOCKED_EXCLUDED_LIMIT);
+  const minimalTest = blockedOne(value.minimalTest, 'minimalTest', BLOCKED_TEST_CHARS);
+  if (!need.length && !excluded.length && !minimalTest) {
+    throw invalid('blocked 不能为空：need / excluded / minimalTest 至少给一项 —— 未发送任何内容');
+  }
+  return { need, excluded, minimalTest };
+}
+
+/** Tolerant read of one stored list: sanitised, capped, junk dropped. */
+function storedList(value: unknown, limit: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => (typeof item === 'string' ? truncate(blockedText(item), BLOCKED_ITEM_CHARS) : ''))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+/**
+ * The stored structured `BLOCKED` reports of a record, oldest first. Read
+ * tolerantly (a hand-edited / newer file must never break `collab_status`) and
+ * re-sanitised here, because a record can also be written by a version that did
+ * not validate it. Records written before this field existed simply have none.
+ */
+export function blockedHistoryOf(record: BroadcastRecord | undefined): BroadcastBlocked[] {
+  const raw = asObject(record).blocked;
+  if (!Array.isArray(raw)) return [];
+  const out: BroadcastBlocked[] = [];
+  for (const entry of raw) {
+    const value = asObject(entry);
+    const need = storedList(value.need, BLOCKED_NEED_LIMIT);
+    const excluded = storedList(value.excluded, BLOCKED_EXCLUDED_LIMIT);
+    const minimalTest = String(value.minimalTest ?? '')
+      ? truncate(blockedText(value.minimalTest), BLOCKED_TEST_CHARS)
+      : '';
+    if (!need.length && !excluded.length && !minimalTest) continue;
+    out.push({
+      need,
+      excluded,
+      minimalTest,
+      at: Number(value.at) || 0,
+      by: String(value.by ?? '')
+    });
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * Append one structured `BLOCKED` to a record, keeping the newest
+ * `BLOCKED_KEEP`. **Only** `blocked` changes: `state` / `claim` / `receipt` are
+ * exactly what they were (design §4 — the field is display only).
+ *
+ * Callers must have cleared {@link canWriteBlocked} first — this function does
+ * not judge who is writing.
+ */
+export function appendBlocked(
+  record: BroadcastRecord,
+  entry: BlockedSpec & { at?: number; by?: string }
+): BroadcastRecord {
+  const next: BroadcastBlocked = {
+    need: entry.need.slice(0, BLOCKED_NEED_LIMIT),
+    excluded: entry.excluded.slice(0, BLOCKED_EXCLUDED_LIMIT),
+    minimalTest: entry.minimalTest,
+    at: Number(entry.at) || Date.now(),
+    by: String(entry.by ?? '')
+  };
+  return { ...record, blocked: [...blockedHistoryOf(record), next].slice(-BLOCKED_KEEP) };
+}
+
+/**
+ * Whether `who` may write a structured `BLOCKED` onto this record — the **one**
+ * implementation of that rule, shared by `collab_send` and `collab_handoff`
+ * (the review found the second copy drifting: the hand-off's idempotent branch
+ * had no check at all).
+ *
+ * Why the rule exists: `blocked` is free text that is rendered into the **next**
+ * claimant's takeover injection (`blockedInjectionLines`), while a `bid` is
+ * visible in bodies, receipts and documents. Without a gate any session that can
+ * name the hand-off could push words into somebody else's prompt — the same
+ * "write into a line you were not given" shape the `protect` guard closes by
+ * hand.
+ *
+ * The four participants are the requester (`from.sid`), the claimant
+ * (`claim.by`), the session currently being asked (`asked.sid`) and the chain
+ * head (`origin.sid`) — that covers every real use: the requester annotating its
+ * own hand-off, the claimant reporting, and a forwarded hop passing it on. It is
+ * deliberately **fail-open when nothing can be judged** (no session context, or
+ * a hand-written record with none of the four fields), which keeps the old
+ * "no sessionID = no identity check" behaviour.
+ */
+export function canWriteBlocked(record: BroadcastRecord | undefined, who: string | undefined): boolean {
+  const sid = String(who ?? '').trim();
+  if (!sid) return true;
+  const participants = [
+    record?.from?.sid,
+    record?.claim?.by,
+    record?.asked?.sid,
+    record?.origin?.sid
+  ]
+    .map(value => String(value ?? '').trim())
+    .filter(Boolean);
+  return !participants.length || participants.includes(sid);
+}
+
+/**
+ * The three sections (design §3):
+ *
+ * ```
+ * 需要对方：① … ② …
+ * 已排除：…
+ * 最小判别：…
+ * ```
+ *
+ * `max` caps each section at N items and appends `（还有 N 条）` — the aggregate
+ * view (receiving injection / `collab_status`) uses 3; the delivered body keeps
+ * everything the caller sent (already capped by `normalizeBlocked`).
+ */
+export function blockedLines(
+  entry: BlockedSpec,
+  { max = Number.POSITIVE_INFINITY }: { max?: number } = {}
+): string[] {
+  const lines: string[] = [];
+  if (entry.need.length) {
+    const shown = entry.need.slice(0, max);
+    const rest = entry.need.length - shown.length;
+    lines.push(
+      `需要对方：${shown.map((text, index) => `${circled(index)} ${text}`).join(' ')}` +
+        `${rest > 0 ? `（还有 ${rest} 条）` : ''}`
+    );
+  }
+  if (entry.excluded.length) {
+    const shown = entry.excluded.slice(0, max);
+    const rest = entry.excluded.length - shown.length;
+    lines.push(`已排除：${shown.join('；')}${rest > 0 ? `（还有 ${rest} 条）` : ''}`);
+  }
+  if (entry.minimalTest) lines.push(`最小判别：${entry.minimalTest}`);
+  return lines;
+}
+
+/**
+ * The same three lines for a **receiving** session (`takeoverBody`: spawn /
+ * wake / resend) or for `collab_status`: the latest report plus how many older
+ * ones the record keeps. An empty list means "render nothing" — a record without
+ * `blocked` keeps every pre-0.7.0 output byte for byte.
+ */
+export function blockedInjectionLines(record: BroadcastRecord | undefined): string[] {
+  const entries = blockedHistoryOf(record);
+  if (!entries.length) return [];
+  const latest = entries[entries.length - 1];
+  const who = latest.by ? shortID(latest.by) : '';
+  const history = entries.length > 1 ? `历史 ${entries.length} 次，展示最新一次` : '';
+  const suffix = [who, history].filter(Boolean).join('，');
+  return [
+    `上一位承接方的 BLOCKED（结构化${suffix ? `，${suffix}` : ''}）:`,
+    ...blockedLines(latest, { max: BLOCKED_AGGREGATE_ITEMS }).map(line => `  ${line}`)
+  ];
+}
+
+
 /**
  * R1: the takeover message body, shared by the three places that deliver it:
  * the `busy > 30min` wake prompt, the freshly spawned session and the 0.1.6
@@ -351,6 +606,11 @@ export function takeoverBody({
     ...(record.expected === 'research'
       ? ['（本次期望是「只读排查」：只读代码/提案并给出结论，不要改代码；要改代码需发起方另发 implement。）']
       : []),
+    // 0.7.0 (`11-19-collab-blocked`, R3): what the previous claimant already
+    // ruled out and the one experiment that settles it — before the three steps
+    // (there is nothing to act on yet, this is context). A record without
+    // `blocked` renders nothing here, so old output is unchanged.
+    ...blockedInjectionLines(record),
     // R1-2: full requester sid (no `collab_inbox` lookup needed to say no).
     `发起方：${requester || '(记录里没有发起方 sid，回执用 collab_inbox 查)'}`,
     '按顺序完成（三步都不要省略）：',

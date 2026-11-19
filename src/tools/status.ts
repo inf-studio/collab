@@ -30,6 +30,7 @@ import { createLineage } from '../core/lineage.ts';
 import { fmtTtl } from '../core/locks.ts';
 import { listFor, mineFor } from '../core/owner-queue.ts';
 import { threadEntry } from '../core/thread-index.ts';
+import { BLOCKED_AGGREGATE_ITEMS, blockedHistoryOf, blockedLines } from '../core/verdict.ts';
 import type { BroadcastRecord, CollabContext, OwnerQueueItem, ThreadRecord, ToolDefinition } from '../types.ts';
 import { asObject, fmtTime, shortID, truncate } from '../util.ts';
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
@@ -200,6 +201,20 @@ function formatBlock({ record, items, addressee, canPush }: Pick, now: number): 
 
   lines.push(`  投递: ${deliveryText(record, now)}`);
 
+  // 0.7.0 (`11-19-collab-blocked`, R3): the claimant's structured BLOCKED — the
+  // three lines design §3 names (需要对方 / 已排除 / 最小判别), newest report only
+  // (each section ≤3 items + 「还有 N 条」) plus how many the record keeps. A record
+  // without `blocked` prints nothing at all, so old output is unchanged.
+  const blocked = blockedHistoryOf(record);
+  if (blocked.length) {
+    const latest = blocked[blocked.length - 1];
+    const who = [latest.by ? shortID(latest.by) : '', latest.at ? fmtTime(latest.at) : ''].filter(Boolean).join(' @ ');
+    lines.push(
+      `  BLOCKED（结构化，最新一次${blocked.length > 1 ? ` / 历史 ${blocked.length} 次` : ''}${who ? `；${who}` : ''}）:`
+    );
+    for (const line of blockedLines(latest, { max: BLOCKED_AGGREGATE_ITEMS })) lines.push(`    ${line}`);
+  }
+
   if (items.length) {
     const target = String(items[items.length - 1]?.target ?? addressee ?? '');
     let unread = 0;
@@ -330,7 +345,8 @@ export function statusTool(kit: ToolKit): ToolDefinition {
     description:
       'Read-only, non-blocking status of a hand-off: state, claim (holder + what is left of the lease), priority, ' +
       'delivery (admitted / seen / ack-unavailable), the owner-queue items of its target with the queue position, ' +
-      'the last reply summary, the receipt of a closed hand-off and one suggested next step. Input is exactly one ' +
+      'the last reply summary, the receipt of a closed hand-off, the structured BLOCKED a claimant reported ' +
+      '(需要对方 / 已排除 / 最小判别, newest only) and one suggested next step. Input is exactly one ' +
       'of `bid` / `threadID` / `session`; with none it lists the unresolved hand-offs this session started or ' +
       'claimed (at most 5, newest first). A thread created by collab_send / collab_reply (no hand-off record) is ' +
       'described as kind=messages — its counterpart, state and last in/out summaries — instead of being an error ' +

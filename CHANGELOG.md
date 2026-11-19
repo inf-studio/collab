@@ -11,7 +11,9 @@
 > 同一发布窗口还收了 **协作自动感知**（`11-19-collab-awareness`）：一行双计数提示 + 承接方两行协议头，
 > 以及 **交接对接人 `origin`**（`11-19-collab-origin`）：转发链不再丢链头（实测 4 跳 → 2 跳），
 > 以及 **thread 聚合 + 状态降级**（`11-19-collab-threads`）：一对会话的 7 个并行 thread 一眼看清，
-> 消息 thread 的 `collab_status` 不再报错（工具 20 → 21）。
+> 消息 thread 的 `collab_status` 不再报错（工具 20 → 21）；
+> 以及 **BLOCKED 结构化**（`11-19-collab-blocked`）：真正推动进展的那一句「最小判别实验」不再埋在长正文里
+> （投递正文 / 承接方注入 / `collab_status` 三处同显，工具面不变）。
 
 ### Added
 
@@ -62,6 +64,26 @@
   `collab_send` / `collab_reply` 的 60s 同文幂等不再只看 thread——同一 **target 会话**收到同一句（换 thread
   也算）只投一次，回执写明「已在 thread `t_…` 发过同文」；确需重发用新增的 `force:true`（回执标
   `dedupeOverridden`，带 `bid` 时记录标 `dedupeOverriddenAt`）。详见下方 Fixed。
+
+- **BLOCKED 结构化（R1–R4，`11-19-collab-blocked`）**：实测一次跨仓链路里，真正推动进展的是 BLOCKED 正文里的
+  **一句**「做一次最小判别实验（改房态看有无帧）」——接收方要读完长正文才提炼得出，转发一跳还要再复述一遍。
+  `collab_send` / `collab_handoff` 增加**可选** `blocked: { need?, excluded?, minimalTest? }`，正文仍然自由。
+  - **字段与上限（R1）**：`need` ≤10 条、`excluded` ≤20 条（每条 ≤120 字）、`minimalTest` ≤200 字；控制字符
+    （含换行）剥成空格、空白折叠——三段都是单行，不能借换行伪造注入块的第二行。超条数 / 超长 / 不是对象 /
+    三段全空 → **可读拒绝**（`blocked.need[0] 最长 120 字（本次 121 字）—— 未发送任何内容（不静默截断）`），
+    0 投递、0 写入。
+  - **存储（R2）**：记录新增 `blocked?: [{ need, excluded, minimalTest, at, by }]`，**保留最近 3 次**。写入条件 =
+    有可解析 `bid`（入参或正文里的 `b_…`）**且** `confirm:true` **且**调用方是本单参与方
+    （`from` / `claim.by` / `asked` / `origin`，单一实现 `canWriteBlocked`，`collab_send` 与 `collab_handoff`
+    的**幂等分支**共用）；没有 bid / 预览 / 记录不存在 / 非参与方 / 同文去重命中 → 只渲染进正文，回执写明「未落库」
+    （去重命中的那一条已含在同一段里，不重复占名额）。
+  - **渲染（R3，三处）**：① 投递正文**之后**追加 `需要对方：① … ② …` / `已排除：…；…` / `最小判别：…`；
+    ② 承接方注入（`takeoverBody`：spawn / 叫醒 / 重发）在「期望」之后、「按顺序完成」之前展示**最新一次**
+    （各段 ≤3 条 + `（还有 N 条）` + 历史次数）；③ `collab_status` 多一段
+    `BLOCKED（结构化，最新一次 / 历史 N 次；sid @ HH:MM:SS）` + 同样三行。
+  - **兼容（R4）**：不传 `blocked` → 正文、协议头、回执**逐字不变**（`git` 外的旧记录也没有该字段，三处渲染为空）；
+    纯展示字段——`state` / `claim` / `receipt` 一律不动，也不放宽任何投递许可（受保护目标照旧拒投）。
+  - **测试**：S105（23 条，见 Tests）。
 
 ### Changed
 
@@ -185,6 +207,23 @@
   交接链 **805 → 823 项**，注册表 **20 → 21**。
 - 两组变异验证（原始输出见 `research/impl-notes.md`）：① 索引 key 写成 `bid` → 消息 thread 的列出行消失
   （3 条断言红）；② 降级直接返回原错误 → `kind=messages` 两条断言红。
+- **BLOCKED 结构化（S105，`test/handoff-harness.mjs`，23 条）**：`collab_handoff { blocked }` 的投递正文含三段
+  且排在正文之后、记录里有一条 `{need, excluded, minimalTest, at, by}`；**不传 `blocked` 时投递正文与信封
+  + 正文逐字相等**（`[collab:…][note:t_…] <text>`，零追加行）、handoff 正文后无任何追加、记录里没有该字段；
+  五类非法输入（21 条 `excluded` / 121 字条目 / 201 字 `minimalTest` / 三段全空 / 不是对象）都是可读拒绝且
+  0 投递 0 写入；无 bid 只上正文（回执「未关联单据 / 未落库」，广播目录不变）；同一记录连续 4 次只保留最近 3 次；
+  `state` / `claim` / `receipt` 前后完全一致；非参与方不落库（记录 JSON 一字不动）；`collab_status` 给
+  「最新一次 / 历史 3 次」+ 各段 ≤3 条 + `（还有 N 条）`；**真实叫醒链路**（广播 → 候选把结构化 BLOCKED 写进记录的
+  `open` 单 → 候选转 busy 45min → 再广播）让下一跳的 `takeoverBody` 注入含三段且排在「按顺序完成」之前，
+  且叫醒的 read-merge-write 不丢 `blocked`；`collab_handoff` **幂等分支**的两道门（`confirm:false` 预览不写、
+  非参与方不写）、`collab_send` **同文去重命中**不重复追加；两个入参的 schema 都声明了三段与界值，工具面仍 **21**。
+  交接链 **823 → 843 → 846 项**（复核修复 +3）。
+- 变异验证（原始输出见 `research/impl-notes.md` §7 / §10）：① `blockedLines` 丢 `minimalTest` → 4 条断言红
+  （843→839：投递正文 / 无 bid / status / 叫醒注入）；② 去掉 `recordBlocked` 的无 bid 早退 → 「无 bid」断言红
+  （843→842）；③ 去掉 `collab_send` 的参与方判定 → 「非参与方不落库」断言红（843→842）；
+  ④ 去掉 `collab_handoff` 幂等分支的 `confirm` 门 → 「预览不落库」断言红（846→845）；
+  ⑤ 去掉 `collab_handoff` 的 `canWriteBlocked` 判定 → 「非参与方不写」断言红（846→845）；
+  ⑥ 去掉去重命中的跳过 → 「去重命中不重复追加」断言红（846→845）。
 
 ### Docs
 

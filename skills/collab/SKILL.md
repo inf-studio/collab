@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -24,13 +24,13 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_list` | `limit?`, `directory?` | 列会话（id/agent/state/`loc=`/`parent=`/title）+ 未闭环交接 | 只读 |
 | `collab_inbox` | `limit?` | 本会话收到的跨会话消息全文 | 只读 |
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
-| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false`；**消息 thread 降级**为 `kind=messages` + 出入站摘要（不再报错） | 只读 |
+| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false`；**消息 thread 降级**为 `kind=messages` + 出入站摘要（不再报错）；承接方报过结构化 BLOCKED 时多三行「需要对方 / 已排除 / 最小判别」 | 只读 |
 | `collab_threads` | `target`, `includeClosed?` | **与一个 target 的全部 thread**：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 唯一「← 建议继续」；默认只列未闭环，≤20 条 | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
-| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`） | 发消息 |
+| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, blocked?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`）；`blocked?` 结构化 BLOCKED（0.7.0，见一点八·再补） | 发消息 |
 | `collab_reply` | `threadID, text, force?, confirm` | 回执糖，target 由 thread 解析；`force?` 同上 | 发消息 |
-| `collab_handoff` | `target?, text, expected?, origin?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承） | 发消息 |
+| `collab_handoff` | `target?, text, expected?, origin?, blocked?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承）；`blocked?` = 把「卡住了」的结构化三段一起交给下一跳 | 发消息 |
 | `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
 | `collab_request_owner` | `target?, text?, issuePath?, id?, revoke?, confirm` | **受保护目标请求队列**：只写队列文件（非保护 → 受保护），0 投递 | 写本地队列（旁路） |
 | `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
@@ -180,6 +180,27 @@ collab_status { threadID:"t_…" }                  # 单条详情
   出入站摘要；只有拼错的 thread 才报「没有 thread … 对应的交接单」。
 - 索引（`~/.config/opencode/collab-threads.json`）**只在该消息真的投递成功后**写：预览 / 护栏拒绝 /
   投递失败都不写；上限 500 条按 `lastAt` 淘汰、读时过滤 7 天、坏文件按空处理。两个读命令零写入。
+
+### 一点八·再补：结构化 BLOCKED（`blocked`，0.7.0）
+
+「卡住了」真正的信息量常常只有一句：**做哪个最小实验就能判别**。别把它埋进长文——用可选结构化字段，正文照写人话。
+
+```text
+collab_send { target:"ses_发起方", text:"[handoff] BLOCKED b_… 缺后端推送日志",
+              blocked:{ need:["09:00–10:00 推送日志"],            # ≤10 条，每条 ≤120 字
+                        excluded:["不是权限","不是时钟"],          # ≤20 条，每条 ≤120 字
+                        minimalTest:"改房态看有没有帧：有帧=前端，无帧=后端未触发" },  # ≤200 字
+              confirm:true }
+```
+
+- 三段渲染在**投递正文之后**（`需要对方：① … ② …` / `已排除：…；…` / `最小判别：…`）；承接方注入
+  （spawn / 叫醒 / 重发）与 `collab_status` 同样聚合（各段 ≤3 条 + 「还有 N 条」，status 只展示最新一次 + 历史次数）。
+- 有可解析 bid、`confirm:true` 且你是本单参与方（`from` / `claim.by` / `asked` / `origin`）→ 写进记录 `blocked[]`，
+  **保留最近 3 次**；没有 bid / 预览 / 非参与方 / 同文去重命中（未投递）→ 只上正文，回执注明「未落库」。
+  `collab_handoff` 的幂等重复（同 target + 同正文）也走这两道门，不会因为「记录已存在」而绕过。
+- 超条数 / 超长 / 三段全空 → **可读拒绝**（不静默截断，0 投递 0 写入）；控制字符（含换行）剥成空格。
+- **不传就逐字不变**；`state` / `claim` / `receipt` 一律不动，也不放宽任何投递许可。
+- 转发一个「卡住了」的活儿给下一跳时用 `collab_handoff { blocked }`：下一跳的注入里直接有「已排除什么、该做哪个实验」。
 
 ## 一点九、加急（`collab_escalate`，0.6.0）
 

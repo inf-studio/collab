@@ -403,3 +403,12 @@ opencode api get "/api/plugin?location%5Bdirectory%5D=/data/project/muke-interfa
 - **回执可发给两个人**：本单发起方（`from.sid`）或对接人（`origin.sid`）。发给第三方仍是 `kind=request`，不会闭环。
 - **受保护白名单没有因此放宽**：能否向 `[protected*]` 投递，仍只看 `target === from.sid`
   且发送者是领取人；`origin` 只影响「kind 改写」，不影响放行。
+
+## 结构化 BLOCKED（`blocked`）
+
+- 可选字段：`blocked { need[], excluded[], minimalTest }`（need ≤10、excluded ≤20、单条 ≤120 字、minimalTest ≤200 字）；
+  超限**可读拒绝**（0 投递 0 写入），不静默截断。
+- 三处渲染：投递正文（协议头之前）、承接方注入（`takeoverBody`，spawn/叫醒/重发）、`collab_status`（最新一次 + 历史次数）。
+- 落库条件**全部满足**才写：解析出 `bid`、`confirm:true`、记录存在、**调用方是参与方**（`from`/`claim.by`/`asked`/`origin`，
+  唯一实现 `canWriteBlocked`）；否则只上正文并注明未落库。保留最近 3 次。
+- 预览（`confirm:false`）与「同文去重命中（未投递）」**都不写**——否则会污染记录或白占最近 3 次名额。
