@@ -1,8 +1,8 @@
 /**
  * C2 (0.3.0): the desktop sidebar — `./gui-experimental`.
  *
- * A **read-only** view of the same state the tools expose: who holds a
- * resource, who is queued behind it, which hand-off is still open. It owns no
+ * A view of the same state the tools expose: who holds a resource, who is
+ * queued behind it, which hand-off is still open. It keeps no collaboration
  * state of its own; every number comes from `collab.state.snapshot` (the RPC in
  * `src/rpc.ts`, implemented in `src/index.ts`), which reads what `collab_locks`
  * and `collab_list` read.
@@ -10,9 +10,12 @@
  * Deliberate choices:
  *   - **No `main`**: only `setup` (the window half). Nothing here needs Electron
  *     or Node, so the bundle stays free of both and of their placeholders.
- *   - **No write path**: the panel has no lock/release button (R5). Leasing stays
- *     with the tools and the skills; a mis-click in a status pane must never
- *     change what another session can do.
+ *   - **No lock/release button**: leasing stays with the tools and the skills; a
+ *     mis-click in a status pane must never change who may take a resource. The
+ *     one write half is the 0.8.0 **action row** (加急 / 冻结 / 解冻 / 归档):
+ *     four buttons that each ask in a dialog first and call `collab.state.*`,
+ *     which runs the same core functions as the native tools — the panel decides
+ *     no gate itself (`ActionRow`).
  *   - **Poll, do not subscribe**: one 2 s poll while a session is mounted. The
  *     pill and the panel are fed by the same store, so the composer pill is
  *     never a second RPC stream, and a rejected call (server down) shows
@@ -53,7 +56,7 @@ import {
   type PanelTab
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
-import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
+import type { ActionReceipt, Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
@@ -366,6 +369,14 @@ const CSS = `
 .collab-ws:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
 .collab-ws:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
 .collab-ws-selected{background:color-mix(in srgb, currentColor 10%, transparent);}
+.collab-actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0;}
+.collab-action{appearance:none;border:1px solid color-mix(in srgb, currentColor 22%, transparent);background:transparent;color:inherit;font:inherit;font-size:11px;line-height:16px;padding:1px 8px;border-radius:999px;cursor:pointer;}
+.collab-action:hover{background:color-mix(in srgb, currentColor 8%, transparent);}
+.collab-action:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+.collab-action:disabled{opacity:.5;cursor:default;}
+.collab-action-armed{border-color:#d29922;color:#d29922;background:color-mix(in srgb, #d29922 12%, transparent);}
+.collab-action-danger{border-color:color-mix(in srgb, #f85149 45%, transparent);}
+.collab-action-danger:hover{background:color-mix(in srgb, #f85149 12%, transparent);}
 `;
 
 /* ----------------------------------------------------------------------- rows */
@@ -630,10 +641,11 @@ function OrphanView(props: { orphans: BoardOrphans; current: string }) {
 }
 
 /**
- * R2 (0.8.0): the right pane, top to bottom — header, graph slot, action row,
- * items. The two empty sections are **insertion points** for `board2-graph` and
- * `board2-actions`: they are real elements (so a later component mounts in place
- * instead of reshaping the layout) but they occupy no height today.
+ * R2 (0.8.0): the right pane, top to bottom — header, graph, action row,
+ * items. Both insertions are real elements with a stable
+ * `data-collab-slot` (`graph` / `actions`), so a later component mounts in place
+ * instead of reshaping the layout; the action row is hidden (not removed) when
+ * `snapshot.actions === false`.
  */
 function DetailHeader(props: { session: BoardSession; current: string }) {
   const ctx = usePlugin();
@@ -661,8 +673,8 @@ function DetailHeader(props: { session: BoardSession; current: string }) {
  * attributes (unquoted, no separator), and the test host's template parser
  * needs the class set at runtime, like every other class in this file. The
  * `data-collab-slot` attribute is the slot's stable identity: `board2-graph`
- * now renders inside `graph` (see `GraphSlot`); `board2-actions` still mounts
- * in the empty `actions` element.
+ * renders inside `graph` (see `GraphSlot`); `board2-actions` renders inside
+ * `actions` (see `ActionRow`, hidden when `snapshot.actions === false`).
  */
 function slotClass(kind: 'graph' | 'actions'): string {
   return `collab-detail-section collab-${kind}-slot`;
@@ -929,9 +941,208 @@ function GraphSlot(props: {
   );
 }
 
-/** `board2-actions` mounts here; today empty (R5 of this task: read-only). */
-function ActionRow() {
-  return <div class={slotClass('actions')} data-collab-slot="actions" />;
+/** `board2-actions`: the action row — four confirmed writes (0.8.0). */
+type BoardActionId = 'escalate' | 'freeze' | 'unfreeze' | 'archive';
+const BOARD_ACTIONS: BoardActionId[] = ['escalate', 'freeze', 'unfreeze', 'archive'];
+
+/** The slice of `collab.state` the board calls (the write half of `CollabState`). */
+interface BoardActionApi {
+  escalate(input: { target: string; reason?: string; session?: string }): Promise<ActionReceipt>;
+  freeze(input: {
+    target: string;
+    scope?: string;
+    until?: number | string;
+    reason?: string;
+    session?: string;
+  }): Promise<ActionReceipt>;
+  unfreeze(input: { target: string; scope?: string; session?: string }): Promise<ActionReceipt>;
+  archive(input: { target: string; restore?: boolean; session?: string }): Promise<ActionReceipt>;
+}
+
+/**
+ * `ctx.dialogs` is missing in a test host and in an older window. Reading a
+ * missing key on the probe-proxied context throws, so this is the one place that
+ * answers "does this window have confirmation dialogs?" safely.
+ */
+function dialogsOf(ctx: Context): Context['dialogs'] | undefined {
+  try {
+    return ctx.dialogs;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * R1/R4 (0.8.0, `board2-actions`): the detail pane's action row —
+ * `加急` / `冻结` / `解冻` / `归档`.
+ *
+ * Each click asks first, then calls the server (`collab.state.escalate|freeze|
+ * unfreeze|archive`), then shows the **server's** verdict in a toast. The panel
+ * never decides a gate itself: protected / frozen / read-only / refused-host
+ * outcomes all arrive as `ActionReceipt { ok, detail }` from the same core
+ * functions the tools run.
+ *
+ * Fallback (known limitation, docs/collab.md §11.20): a window without
+ * `ctx.dialogs` confirms with **two clicks** on the same button (`再点一次`),
+ * because the alternative — silently writing on one click — is exactly what R4
+ * forbids. The arm is keyed by `(action, session)` and the target is captured
+ * before any await, so switching the selection can never turn one click into an
+ * execution on another session. Escalation then uses a fixed one-line reason.
+ *
+ * A failed call (server down, a thrown RPC) only shows an error toast: the panel
+ * stays interactive (R6).
+ */
+function ActionRow(props: { session: BoardSession; enabled: boolean }) {
+  const ctx = usePlugin();
+  const [busy, setBusy] = createSignal<BoardActionId | null>(null);
+  /**
+   * The two-step fallback's armed state — **keyed by the target session**.
+   * `ActionRow` is not recreated when the selection changes (the detail pane is
+   * a non-keyed child), so an armed button that only remembered the action id
+   * would let a single click on *another* session execute the action. An arm
+   * therefore belongs to `(id, sid)`: switching sessions simply shows no armed
+   * button, and the new target must be armed (and confirmed) on its own.
+   */
+  const [armed, setArmed] = createSignal<{ id: BoardActionId; sid: string } | null>(null);
+
+  // Switching sessions drops the arm: coming back to A must not execute on a
+  // single click (review R-1: A→B→A resurrection).
+  createEffect(() => {
+    void props.session.sid;
+    setArmed(null);
+  });
+
+  const label = (id: BoardActionId): string => ctx.t(`action.${id}`);
+  const defaultFreezeReason = (): string => ctx.t('action.freezeDefaultReason');
+  /** Is this button armed **for the session on screen right now**? */
+  const armedHere = (id: BoardActionId): boolean => armed()?.id === id && armed()?.sid === props.session.sid;
+
+  /**
+   * The confirmation a click must pass. `null` = cancelled (0 writes); a string
+   * = go (the escalation reason; `''` for the other three). `sid` is the target
+   * captured by `run()` **before** any await, so a dialog that is still open when
+   * the selection changes can never retarget the action.
+   */
+  const prepare = async (id: BoardActionId, sid: string): Promise<string | null> => {
+    const dialogs = dialogsOf(ctx);
+    if (!dialogs) {
+      // Two-step fallback: the first click only arms this button — on the
+      // target captured by `run()`. An arm left on another target is ignored.
+      const sameTarget = (): boolean => armed()?.id === id && armed()?.sid === sid;
+      if (!sameTarget()) {
+        setArmed({ id, sid });
+        ctx.toast.show({ title: label(id), description: ctx.t('action.armHint'), variant: 'default' });
+        return null;
+      }
+      setArmed(null);
+      return id === 'escalate' ? ctx.t('action.escalateDefaultReason') : '';
+    }
+    if (id === 'escalate') {
+      const reason = await dialogs.prompt({
+        title: ctx.t('action.escalateReasonTitle'),
+        description: ctx.t('action.escalateReasonDesc'),
+        placeholder: ctx.t('action.escalatePlaceholder'),
+        value: ctx.t('action.escalateDefaultReason'),
+        submit: label(id)
+      });
+      if (reason === undefined) return null;
+      const go = await dialogs.confirm({
+        title: ctx.t('action.escalateConfirm', { sid }),
+        description: reason,
+        confirm: label(id)
+      });
+      return go ? reason : null;
+    }
+    const question =
+      id === 'freeze' ? 'action.freezeConfirm' : id === 'unfreeze' ? 'action.unfreezeConfirm' : 'action.archiveConfirm';
+    const note = id === 'freeze' ? 'action.freezeDesc' : id === 'unfreeze' ? 'action.unfreezeDesc' : 'action.archiveDesc';
+    const go = await dialogs.confirm({
+      title: ctx.t(question, { sid }),
+      description: ctx.t(note),
+      confirm: label(id),
+      danger: id === 'archive'
+    });
+    return go ? '' : null;
+  };
+
+  const run = async (id: BoardActionId): Promise<void> => {
+    if (busy()) return;
+    // Captured **once**, before the confirmation: everything below (dialogs,
+    // RPC, toasts) belongs to the session that was on screen when the click
+    // happened, even if the selection changes while a dialog is open.
+    const target = props.session.sid;
+    let reason: string | null;
+    try {
+      reason = await prepare(id, target);
+    } catch (error) {
+      setArmed(null);
+      ctx.toast.show({ title: label(id), description: describe(error), variant: 'error' });
+      return;
+    }
+    if (reason === null) return; // cancelled: nothing is written
+    // The routed session's client — the same source the snapshot came from.
+    const api = sourceFor(ctx).client.rpc(CollabState) as unknown as BoardActionApi;
+    const base = { target, session: ctx.sessions.current()?.id };
+    setBusy(id);
+    try {
+      const receipt =
+        id === 'escalate'
+          ? await api.escalate({ ...base, reason })
+          : id === 'freeze'
+            ? await api.freeze({ ...base, scope: 'session', reason: reason || defaultFreezeReason() })
+            : id === 'unfreeze'
+              ? await api.unfreeze({ ...base, scope: 'session' })
+              : await api.archive({ ...base });
+      const ok = receipt?.ok !== false;
+      ctx.toast.show({
+        title: ok ? ctx.t('action.done', { action: label(id) }) : ctx.t('action.failed', { action: label(id) }),
+        description: receipt?.detail ?? '',
+        variant: ok ? 'success' : 'error'
+      });
+      // R4: one refresh after a successful write — the existing poller is not
+      // duplicated and no new interval is created.
+      if (ok) void storeFor(ctx).load();
+    } catch (error) {
+      // R6: a thrown RPC never breaks the panel — a toast, and it stays usable.
+      ctx.toast.show({
+        title: ctx.t('action.failed', { action: label(id) }),
+        description: describe(error),
+        variant: 'error'
+      });
+    } finally {
+      setBusy(null);
+      setArmed(null);
+    }
+  };
+
+  return (
+    <div class={slotClass('actions')} data-collab-slot="actions">
+      <Show when={props.enabled}>
+        <div class="collab-actions" title={ctx.t('action.rowTitle')}>
+          <For each={BOARD_ACTIONS}>
+            {id => (
+              <button
+                type="button"
+                class={`collab-action${armedHere(id) ? ' collab-action-armed' : ''}${
+                  id === 'archive' ? ' collab-action-danger' : ''
+                }`}
+                data-collab-action={id}
+                disabled={busy() !== null}
+                aria-busy={busy() === id}
+                title={`${label(id)} · ${props.session.sid}`}
+                onClick={() => void run(id)}
+              >
+                {armedHere(id) ? `${ctx.t('action.armed')} ${label(id)}` : label(id)}
+              </button>
+            )}
+          </For>
+          <Show when={busy()}>
+            <span class="collab-muted">{ctx.t('action.running')}</span>
+          </Show>
+        </div>
+      </Show>
+    </div>
+  );
 }
 
 /** Leases → hand-offs → owner queue → `↳` spawned (the same derivation the row badges use). */
@@ -970,6 +1181,7 @@ function BoardDetail(props: {
   current: string;
   narrow: boolean;
   snapshot?: Snapshot;
+  actions: boolean;
   onBack: () => void;
   onPickSession: (sid: string) => void;
   onPickWorkspace: (workspace: string) => void;
@@ -992,7 +1204,7 @@ function BoardDetail(props: {
         onPickSession={props.onPickSession}
         onPickWorkspace={props.onPickWorkspace}
       />
-      <ActionRow />
+      <ActionRow session={props.session} enabled={props.actions} />
       <DetailItems session={props.session} current={props.current} />
     </section>
   );
@@ -1193,6 +1405,7 @@ function PanelView(props: { session: { id: string } }) {
                     current={props.session.id}
                     narrow={narrow()}
                     snapshot={store.state.data}
+                    actions={store.state.data?.actions !== false}
                     onPickSession={pickSession}
                     onPickWorkspace={selectWorkspace}
                     onBack={() => {
@@ -1307,7 +1520,7 @@ export default Plugin.define({
       'panel.unreachable': 'server unreachable',
       'panel.remaining': 'left {{ttl}}',
       'panel.updated': 'updated {{time}}',
-      'panel.readonly': 'read-only',
+      'panel.readonly': 'read-only views · actions ask first',
       'panel.sessions.one': '{{count}} session',
       'panel.sessions.other': '{{count}} sessions',
       'panel.workspaceCounts': '{{sessions}} sessions · {{locks}} leases · {{handoffs}} hand-offs · {{archived}} archived',
@@ -1355,7 +1568,29 @@ export default Plugin.define({
       'graph.truncated': '{{count}} more node(s) not shown',
       'graph.level.global': 'global',
       'graph.level.workspace': 'workspace',
-      'graph.level.session': 'session'
+      'graph.level.session': 'session',
+      'action.rowTitle': 'Actions (each asks first)',
+      'action.escalate': 'Escalate',
+      'action.freeze': 'Freeze',
+      'action.unfreeze': 'Unfreeze',
+      'action.archive': 'Archive',
+      'action.armed': 'Click again:',
+      'action.running': 'working…',
+      'action.armHint': 'This window has no confirmation dialog: click the same button again to confirm (nothing was written yet).',
+      'action.escalateReasonTitle': 'Why now?',
+      'action.escalateReasonDesc': 'One line (≤200 chars). Cancel sends nothing.',
+      'action.escalatePlaceholder': 'e.g. store.ts is blocked, wait for the schema line',
+      'action.escalateDefaultReason': 'Escalated from the board',
+      'action.escalateConfirm': 'Escalate {{sid}}?',
+      'action.freezeConfirm': 'Freeze {{sid}}?',
+      'action.freezeDesc': 'Default 30 minutes; it expires by itself. New hand-offs / escalations are refused until then.',
+      'action.freezeDefaultReason': 'Frozen from the board (30 min)',
+      'action.unfreezeConfirm': 'Unfreeze {{sid}}?',
+      'action.unfreezeDesc': 'New collaboration is accepted again immediately (nobody is notified).',
+      'action.archiveConfirm': 'Archive {{sid}}?',
+      'action.archiveDesc': 'Archive is not delete: the session and its messages stay, and restore brings it back.',
+      'action.done': '{{action}} done',
+      'action.failed': '{{action}} failed'
     },
     zh: {
       'panel.title': '协作',
@@ -1371,7 +1606,7 @@ export default Plugin.define({
       'panel.unreachable': 'server 不可达',
       'panel.remaining': '剩余 {{ttl}}',
       'panel.updated': '更新于 {{time}}',
-      'panel.readonly': '只读',
+      'panel.readonly': '视图只读 · 动作需确认',
       'panel.sessions.other': '{{count}} 个会话',
       'panel.workspaceCounts': '{{sessions}} 会话 · {{locks}} 锁 · {{handoffs}} 交接 · {{archived}} 已归档',
       'panel.archived': '已归档 {{count}}',
@@ -1415,7 +1650,29 @@ export default Plugin.define({
       'graph.truncated': '另有 {{count}} 个节点未显示',
       'graph.level.global': '全局',
       'graph.level.workspace': '工作区',
-      'graph.level.session': '会话'
+      'graph.level.session': '会话',
+      'action.rowTitle': '动作（每次点击都会先确认）',
+      'action.escalate': '加急',
+      'action.freeze': '冻结',
+      'action.unfreeze': '解冻',
+      'action.archive': '归档',
+      'action.armed': '再点一次：',
+      'action.running': '执行中…',
+      'action.armHint': '该窗口没有确认对话框：再点同一个按钮即执行（此前未写入任何内容）。',
+      'action.escalateReasonTitle': '加急理由',
+      'action.escalateReasonDesc': '一句话（≤200 字）。取消则不投递。',
+      'action.escalatePlaceholder': '如：store.ts 先别动，等 schema 线确认',
+      'action.escalateDefaultReason': '看板加急',
+      'action.escalateConfirm': '加急 {{sid}}？',
+      'action.freezeConfirm': '冻结 {{sid}}？',
+      'action.freezeDesc': '默认 30 分钟，到期自动失效；期间新的交接 / 加急会被拒绝。',
+      'action.freezeDefaultReason': '看板冻结（30 分钟）',
+      'action.unfreezeConfirm': '解冻 {{sid}}？',
+      'action.unfreezeDesc': '解冻后新建协作立即可用（不通知任何人）。',
+      'action.archiveConfirm': '归档 {{sid}}？',
+      'action.archiveDesc': '归档 ≠ 删除：会话与消息都保留，restore 可恢复。',
+      'action.done': '{{action}}完成',
+      'action.failed': '{{action}}失败'
     }
   },
 

@@ -1,13 +1,3 @@
-import { archiveSession, spawnedSessionID } from '../core/archive.ts';
-import { allBroadcasts, isValidBid, mergeArchive, readBroadcast } from '../core/claim.ts';
-import { invalid } from '../core/errors.ts';
-import { createLineage } from '../core/lineage.ts';
-import { errText } from '../log.ts';
-import type { BroadcastRecord, SessionInfoLike, ToolDefinition } from '../types.ts';
-import { fmtTime, sessionState, truncate } from '../util.ts';
-import { jsonInput } from './shared.ts';
-import type { ToolKit } from './shared.ts';
-
 /**
  * `collab_archive` (0.5.0) — the **manual** half of the archive feature.
  *
@@ -19,38 +9,28 @@ import type { ToolKit } from './shared.ts';
  * this tool deliberately ignores those gates — a human asking for it is the
  * decision — but it still refuses `[protected*]` (the one-way hard boundary is
  * not negotiable, same as `collab_grant` / `collab_promote`).
+ *
+ * 0.8.0 (`board2-actions`): the orchestration moved to `core/actions.ts`
+ * (`archiveAction`), shared with the board's `collab.state.archive`. This file
+ * keeps the tool contract (description + schema + `confirm` wiring).
  */
-export function archiveTool(kit: ToolKit): ToolDefinition {
-  const { deps } = kit;
-  const { ctx, readConfig } = deps;
+import { archiveAction } from '../core/actions.ts';
+import type { ActionContext } from '../core/actions.ts';
+import type { ToolDefinition } from '../types.ts';
+import { jsonInput } from './shared.ts';
+import type { ToolKit } from './shared.ts';
 
-  /** `<bid>` → its session, or the session the record's claimant really is. */
-  function resolveSession(input: { bid: string; session: string }): {
-    record?: BroadcastRecord;
-    sessionID: string;
-  } {
-    const { bid, session } = input;
-    if (!bid) return { sessionID: session };
-    if (!isValidBid(bid)) throw invalid(`bid 格式不合法："${bid}"（期望 b_<8–32 位十六进制>）`);
-    const record = readBroadcast(bid);
-    if (!record) {
-      throw invalid(`没有 ${bid} 的记录（可能拼错，或已过 7 天保留期被清理）`);
-    }
-    const claimed = spawnedSessionID(record);
-    if (!claimed) {
-      const holder = String(record.claim?.by ?? '').trim();
-      throw invalid(
-        `${bid} 不是本插件拉起的会话（claim.kind=${String(record.claim?.kind)}${
-          holder ? `，当前领取方 ${holder} 是人自己的会话` : ''
-        }）：` +
-          '按 bid 归档只针对本插件 spawn 的会话；确实要归档某个会话请用 session 直接指定'
-      );
-    }
-    if (session && session !== claimed) {
-      throw invalid(`bid ${bid} 的领取会话是 ${claimed}，与 session=${session} 不一致；请只传其中一个`);
-    }
-    return { record, sessionID: claimed };
-  }
+export function archiveTool(kit: ToolKit): ToolDefinition {
+  const { deps, resolveTarget, resolveMode, senderLabel } = kit;
+  const { ctx, readConfig, chain } = deps;
+  const actions: ActionContext = {
+    ctx,
+    readConfig,
+    resolveTarget,
+    resolveMode,
+    senderLabel,
+    listSessions: input => chain.listSessions(input)
+  };
 
   return {
     name: 'collab_archive',
@@ -85,108 +65,15 @@ export function archiveTool(kit: ToolKit): ToolDefinition {
       },
       required: []
     }),
-    async execute(input) {
-      const bid = String(input?.bid ?? '').trim();
-      const sessionRaw = String(input?.session ?? '').trim();
-      const restore = input?.restore === true;
-      if (!bid && !sessionRaw) {
-        throw invalid('collab_archive 需要 bid（取该单领取的会话）或 session（直接指定会话 id）之一');
-      }
-      const { record, sessionID } = resolveSession({ bid, session: sessionRaw });
-
-      let info: SessionInfoLike;
-      try {
-        info = await ctx.session.get({ sessionID });
-      } catch (error) {
-        throw invalid(`会话不存在或不可读：${sessionID}（${errText(error)}）`, error);
-      }
-      // The hard boundary applies to every write path in this plugin: a
-      // protected line is never hidden, restored or patched by a tool.
-      const guard = await createLineage(ctx).protectedAncestor(sessionID, readConfig().protect);
-      if (guard) {
-        const where = guard.depth === 0 ? '本身' : `的祖先（第 ${guard.depth} 级）${guard.sessionID} `;
-        throw invalid(
-          `拒绝归档：${sessionID} ${where}在 protect 名单内（collab.json 的 protect + 内置硬名单）。未做任何修改。`
-        );
-      }
-
-      const state = sessionState(info);
-      const already = state === 'archived';
-      const action = restore ? '恢复（archived:false）' : '归档（archived:true）';
-      const targetLine =
-        `目标: ${sessionID}  agent=${info?.agent ?? '?'}  state=${state}  ` +
-        `标题="${truncate(info?.title ?? '(untitled)', 60)}"`;
-
-      if (input?.confirm !== true) {
-        return {
-          content: [
-            '未执行（confirm 不为 true，仅预览）。归档 ≠ 删除：会话与消息都保留，restore:true 可恢复。',
-            targetLine,
-            `动作: ${action}`,
-            ...(record
-              ? [
-                  `记录: ${record.bid} state=${String(record.state)} ` +
-                    `archivedAt=${record.archivedAt ? fmtTime(record.archivedAt) : '-'}`
-                ]
-              : []),
-            '确认后在同样参数下传 confirm:true。'
-          ].join('\n')
-        };
-      }
-
-      const lines: string[] = [];
-      if (!restore && already) {
-        // Idempotent: the host already hides it. Do **not** PATCH again — only
-        // adopt the state into the record so the auto pass stops looking at it.
-        lines.push('目标已是归档状态（幂等，未重复 PATCH）。');
-      } else if (restore && !already) {
-        lines.push('目标当前未归档（幂等，未重复 PATCH）。');
-      } else {
-        const result = await archiveSession(ctx, sessionID, !restore);
-        if (!result.ok) {
-          // A refused host (403 / 404 / no update + no URL) is a readable
-          // outcome, not a plugin defect: nothing was written.
-          return {
-            content: [
-              `${restore ? '恢复' : '归档'}失败：${result.reason ?? 'unknown'}`,
-              targetLine,
-              `记录: ${record ? record.bid : '(未关联 bid，未改任何记录)'}`,
-              '未做任何修改。'
-            ].join('\n')
-          };
-        }
-        lines.push(`${restore ? '已恢复' : '已归档'}：${sessionID}（via ${result.via ?? '?'}）`);
-      }
-
-      // Stamp / clear the record **after** the host write. Without `bid`, adopt
-      // every record that names this session as its claimant (a session may be
-      // the claimant of several hand-offs; only the stamped ones stop the pass).
-      const now = Date.now();
-      const bids = record
-        ? [record.bid]
-        : allBroadcasts()
-            .filter(other => spawnedSessionID(other) === sessionID || String(other.claim?.by ?? '') === sessionID)
-            .map(other => other.bid);
-      const stamped: string[] = [];
-      for (const targetBid of bids) {
-        const merged = mergeArchive(targetBid, restore ? null : now);
-        if (merged) stamped.push(merged.bid);
-      }
-
-      return {
-        content: [
-          '归档 ≠ 删除：会话与消息都保留，restore:true 可恢复。',
-          targetLine,
-          `动作: ${action}`,
-          ...lines,
-          stamped.length
-            ? `记录 archivedAt: ${stamped.map(id => `${id}=${restore ? '清空' : fmtTime(now)}`).join(', ')}`
-            : '记录: 未关联 bid（只改了会话本身）',
-          restore
-            ? '恢复后它会重新出现在会话列表里；如需再次归档：collab_archive { session, confirm:true }。'
-            : `恢复：collab_archive { session:"${sessionID}", restore:true, confirm:true }。`
-        ].join('\n')
-      };
+    async execute(input, context) {
+      const result = await archiveAction(actions, {
+        actor: context?.sessionID,
+        bid: input?.bid,
+        session: input?.session,
+        restore: input?.restore,
+        confirm: input?.confirm === true
+      });
+      return { content: result.content };
     }
   };
 }

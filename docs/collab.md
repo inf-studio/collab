@@ -320,6 +320,7 @@ opencode plugin add @inf-studio/collab@0.1.0
   "waiterHeartbeat": true,
   "dedupeWindowMs": 60000,
   "awareness": "line",
+  "boardActions": true,
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -341,6 +342,10 @@ opencode plugin add @inf-studio/collab@0.1.0
 
 `awareness`（默认 **`"line"`**，`"off"` 关闭）是**自动感知**提示：`context` 注入末尾每会话每 10 分钟最多
 一行「本工作区候选 N · 其它工作区候选 M」，只读、不写记录、不投递（§11.15）。
+
+`boardActions`（默认 **`true`**）控制 Desktop 面板右详情的**动作行**（加急 / 冻结 / 解冻 / 归档，§11.20）：
+`false` 只隐藏按钮（快照 `actions:false`），`collab.state.escalate|freeze|unfreeze|archive` 仍然可调
+——这是回滚开关，不是权限开关；门禁始终在服务端。
 
 `report.to`（别名或 `ses_…`）是**缺陷上报的主通道**：插件把上报当作 `note`（`queue`）投给该会话，
 空闲也会被唤醒；文件只作证据与兜底。`report.enabled:false` 关闭投递但仍落盘（回滚开关）。
@@ -825,8 +830,9 @@ collab_unlock { resource:"test-window", confirm:true }
 排了哪些请求。数据来自插件 **server 部分**自己，不经过第三方端口：
 
 ```text
-src/index.ts (server part)  ── ctx.rpc.register(CollabState, { snapshot }) ──▶  HTTP RPC
+src/index.ts (server part)  ── ctx.rpc.register(CollabState, { snapshot, escalate, freeze, unfreeze, archive }) ──▶  HTTP RPC
         │                       collab.state.snapshot({ workspace?, session? })
+        │                       collab.state.escalate|freeze|unfreeze|archive  （0.8.0，§11.20）
         │                                        │
         └── stateOf(allLocks) + allBroadcasts + mineFor(session) ──────────────┘
                                                  │        （与 collab_locks / collab_list 同一读取层）
@@ -1721,6 +1727,81 @@ collab_decisions {
 
 **回滚**：`git restore -- src/types.ts src/core/verdict.ts src/tools/{decisions,index,status,list}.ts`；
 旧记录没有 `decisions`，回滚后只是不展示（写过的决策仍留在文件里）。
+
+### 11.20 看板快捷动作（加急 / 冻结 / 解冻 / 归档，0.8.0，`board2-actions`）
+
+**为什么**：0.8.0 的看板已经把「谁在等、谁被冻结、哪些交接没闭环」画出来了，但要做点什么仍得回终端敲
+`collab_escalate` / `collab_freeze` / `collab_archive`。这一节给面板右详情的动作行：四个按钮，
+**点一下先确认**，再走和工具**同一份**实现。
+
+#### RPC（additive）
+
+```ts
+// src/rpc.ts — `collab.state` 新增四个写方法（读方法 snapshot 不变）
+escalate(input: { target: string; reason?: string; mode?: string; session?: string }): Promise<ActionReceipt>
+freeze(input:   { target: string; scope?: string; until?: number|string; reason?: string; session?: string }): Promise<ActionReceipt>
+unfreeze(input: { target: string; scope?: string; session?: string }): Promise<ActionReceipt>
+archive(input:  { target: string; restore?: boolean; session?: string }): Promise<ActionReceipt>
+
+interface ActionReceipt { ok: boolean; action: string; target: string; detail: string }
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 目标 | `target` = 会话 id（`ses_…`）/ 交接单（`b_…`）/ thread（`t_…`，仅 escalate）/ 绝对路径（`scope:"workspace"`）。`scope` 省略时按 target 推断：`b_…` → `bid`、`/…` → `workspace`、其余 → `session` |
+| 发起方 | `session` = 调用方会话（面板传当前路由会话），只用于**审计 actor**；拿不到记 `actor:"gui"`。RPC handler 本身拿不到 sessionID（宿主只在工具里给），所以由 GUI 显式带入。**加急必须有真实 `session`**：缺失时直接 `ok:false`（否则 prompt 的 `fromSessionID="gui"`，对方无处回执）；`freeze` / `unfreeze` / `archive` 不受影响（仍记 `gui`） |
+| 确认 | GUI 先弹 `ctx.dialogs`（confirm / prompt），确认后才调 RPC；服务端因此**总是执行**（`confirm:true`），不存在「GUI 漏确认但服务端也拒绝」的第二套语义 |
+| 复用 | 四个方法调用 `src/core/actions.ts` 的 `escalateAction` / `freezeAction` / `archiveAction`——工具（`collab_escalate` / `collab_freeze` / `collab_archive`）调用的**同一批函数**，没有第二份规则 |
+| 失败 | 可读拒绝（protected / 冻结 / 校验 / 宿主拒绝写入）返回 `ok:false` + `detail`（不抛）；只有传输层失败才让 RPC reject。面板对两种都只弹 toast，不崩（R6） |
+
+#### 门禁（服务端强制，GUI 不可绕过）
+
+| 动作 | 门禁 |
+| --- | --- |
+| `escalate` | **protected（含血缘）→ 拒绝**：`ok:false`、**0 条 prompt、0 个队列项**（看板点击不是 `collab_request_owner` 的请求，不代写队列）。**工具路径不变**：`collab_escalate` 对 protected 仍写 1 条 `priority:"urgent"` 队列项 + 0 prompt（0.6.0 语义）；两条入口由 `escalateAction({ protected:"queue"\|"refuse" })` 区分，名单 / 血缘 / 拒绝文本只有一份。只读 agent（`explore` / `plan`）→ 强制 `queue`（回执 `forced`）。目标被冻结（会话 / 工作区 / 该 bid）→ **拒绝**，先解冻。5 分钟同 `bid` + 同 `reason` 仍只刷新 `urgentAt` |
+| `freeze` / `unfreeze` | 复用 `freezeAction`：写 `~/.config/opencode/collab-freeze.json`（读-合并-写）；受保护目标**0 prompt**（改为一条 urgent owner-queue 项）；`unfreeze` = `freeze:false`（幂等 no-op） |
+| `archive` | 复用 `archiveAction`：`archived:true`（`archive ≠ delete`），`restore:true` 恢复；**`[protected*]` 拒绝**且不 PATCH；只写交接记录的 `archivedAt` |
+| 只读回归 | `snapshot` 仍然零写入（不写审计、不投递、不改任何文件），这条由 S108 用 mtime + 计数断言 |
+
+#### 审计（R5）
+
+每次写动作向 `~/.config/opencode/collab-audit.jsonl` **追加一行**（`COLLAB_AUDIT_FILE` 可覆盖路径）：
+
+```json
+{"at":1795094250174,"actor":"ses_…","action":"freeze","target":"ses_…","ok":true,"reason":"S108 冻结中"}
+{"at":1795094250179,"actor":"ses_…","action":"escalate","target":"ses_1eb…","ok":false,"reason":"拒绝加急：目标…在 protect 名单内…"}
+```
+
+- 成功与失败都写；**只追加、不轮转、不删除**。成功记调用方自己的 `reason`，失败记回执 `detail`。
+- 只由 RPC 入口写（GUI 动作）；工具保持自己的回执文本，不额外写这一行。
+- 写失败只打一条日志，不影响已经发生的动作（R6）。
+
+#### GUI
+
+- 右详情动作行四个按钮：`加急` / `冻结` / `解冻` / `归档`（`data-collab-action="…"`）；
+  加急弹 `dialogs.prompt`（理由，默认一行）→ `dialogs.confirm`；其余三个直接 `dialogs.confirm`（归档 `danger`）。
+- 确认 → RPC → **toast**（成功 `success` / 失败 `error`，描述用服务端 `detail`）；成功后 `store.load()`
+  **刷新一次**（不新增轮询，不复制 2 s 定时器）。
+- **已知限制**：窗口没有 `ctx.dialogs`（老宿主 / 测试宿主）时降级为**两步点击**——第一次点只「上膛」
+  （按钮变 `再点一次：加急`，toast 说明「此前未写入」），第二次点同一按钮才执行；加急用固定一行理由。
+  **上膛按 `(动作, 会话)` 记录**（`armed = { id, sid }`），且 `run()` 在任何 await 之前就捕获目标 sid：
+  在 A 上上膛后切到 B，按钮显示未上膛、单击**不会**执行，必须在 B 上重新上膛并确认。
+  这样既不违反 R4（不确认不写），也不假装有对话框，更不会把一次点击落到别的会话上。
+- `collab.json` 的 `boardActions:false` 只**隐藏动作行**（`snapshot.actions === false`）：RPC 仍然可调，
+  面板仍然是只读视图（回滚开关，设计 §5）。尾部文案相应改为「视图只读 · 动作需确认」。
+
+#### 测试
+
+- `test/handoff-harness.mjs` S108（16 条）：注册与 `snapshot.actions`、protected 拒绝且 0 prompt / 0 队列、
+  只读 agent 降级、冻结中加急被拒、解冻、归档/恢复、protected 归档拒绝、审计 8 行逐条字段、失败行 ok:false、
+  `boardActions:false` 仍可调用、snapshot 零写入。
+- `test/gui-panel.mjs` PN12（18 条）：四个按钮、加急 prompt→confirm→RPC、成功 toast + 一次刷新、
+  取消（两处）0 写入、拒绝 toast 且面板仍可用、RPC 抛错只 toast、无 dialogs 两步点击、`actions:false` 隐藏。
+- 变异必做：删掉 protected 拒绝分支 → S108 的 0 prompt / 0 队列断言失败；审计只写成功路径 →
+  「失败也有一行」断言失败。
+
+**回滚**：`collab.json` 设 `boardActions:false`（只隐藏动作行，RPC 保留）；
+彻底回退 `git restore -- src/rpc.ts src/index.ts src/core/actions.ts src/tools/{escalate,freeze,archive}.ts src/gui.tsx`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

@@ -119,6 +119,11 @@ export function loadConfig(options: unknown): CollabConfig {
   const rawAwareness = file.awareness ?? fromOptions.awareness;
   const awareness: 'line' | 'off' = rawAwareness === 'off' ? 'off' : DEFAULTS.awareness;
 
+  // 0.8.0 (`board2-actions`): the action row is on by default; only an explicit
+  // boolean turns it off (a typo must not silently remove a shipped feature).
+  const rawBoardActions = file.boardActions ?? fromOptions.boardActions;
+  const boardActions = typeof rawBoardActions === 'boolean' ? rawBoardActions : DEFAULTS.boardActions;
+
   return {
     aliases,
     autoDeliver,
@@ -132,6 +137,7 @@ export function loadConfig(options: unknown): CollabConfig {
     waiterHeartbeat,
     dedupeWindowMs,
     awareness,
+    boardActions,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

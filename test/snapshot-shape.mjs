@@ -485,10 +485,27 @@ expect(
 /* ---------------------------------------------------------------- 6. contract */
 
 expect(
-  'C2 the RPC definition is portable: one snapshot method, no events',
+  'C2 the RPC definition is portable: snapshot + the four board actions, no events',
   CollabState?.id === 'collab.state' &&
-    Object.keys(CollabState.methods) .join(',') === 'snapshot' &&
+    Object.keys(CollabState.methods).join(',') === 'snapshot,escalate,freeze,unfreeze,archive' &&
     Object.keys(CollabState.events).length === 0
+);
+expect(
+  'C2 every board action answers ActionReceipt { ok, action, target, detail }',
+  ['escalate', 'freeze', 'unfreeze', 'archive'].every(name => {
+    const method = CollabState?.methods?.[name] ?? {};
+    return ['ok', 'action', 'target', 'detail'].every(
+      key => method.output?.required?.includes(key) && Boolean(method.output?.properties?.[key])
+    );
+  }),
+  Object.keys(CollabState?.methods ?? {}).join(',')
+);
+expect(
+  'C2 the action inputs are whitelisted (no path/command field; `session` is the audit actor)',
+  ['escalate', 'freeze', 'unfreeze', 'archive'].every(name => {
+    const keys = Object.keys(CollabState?.methods?.[name]?.input?.properties ?? {});
+    return keys.includes('target') && keys.includes('session') && !keys.some(key => /path|command|shell/i.test(key));
+  })
 );
 const output = CollabState?.methods?.snapshot?.output ?? {};
 expect(

@@ -241,14 +241,15 @@ const snap = locks => ({
   queue: []
 });
 
-function fakeClient({ reply, delay = 0, fail = false, message = 'down' } = {}) {
+function fakeClient({ reply, delay = 0, fail = false, message = 'down', actions = {} } = {}) {
   return {
     rpc: () => ({
       snapshot: async () => {
         if (delay > 0) await sleep(delay);
         if (fail) throw new Error(message);
         return typeof reply === 'function' ? reply() : reply;
-      }
+      },
+      ...actions
     })
   };
 }
@@ -262,7 +263,7 @@ function serverSession(id, serverID, client, { local = false, withServer = true 
   };
 }
 
-function harness(session, { locale = 'en' } = {}) {
+function harness(session, { locale = 'en', dialogs, client } = {}) {
   const registered = [];
   const toasts = [];
   const [current, setCurrent] = createSignal(session);
@@ -281,14 +282,18 @@ function harness(session, { locale = 'en' } = {}) {
     app: { name: 'opencode', version: '2.5.0', channel: 'prod', platform: 'desktop', packaged: true },
     toast: {
       show: toast => {
-        // Recorded, never rendered: the panel has no button to click and no
-        // write it could make (R5) — a toast is the only thing it says out loud.
+        // Recorded, never rendered: a toast is the only visible outcome of a
+        // board action (the button itself only arms / runs).
         toasts.push(toast);
         return { dismiss() {} };
       }
     },
     sessions: { list: () => [session].filter(Boolean), current: () => current() },
-    client: fakeClient({ reply: snap(0) })
+    client: client ?? fakeClient({ reply: snap(0) }),
+    // 0.8.0 (`board2-actions`): only present when the test wants dialogs. The
+    // proxy below throws for an absent key, which is exactly the "older window"
+    // case the two-step fallback exists for.
+    ...(dialogs ? { dialogs } : {})
   };
   const context = new Proxy(target, {
     get(object, key) {
@@ -1222,6 +1227,311 @@ const GRAPH = {
     'PN11 the graph caps at 8 nodes and prints +N for the rest (never a silent drop)',
     nodes.length === 8 && more?.textContent === '+5',
     JSON.stringify({ nodes: nodes.length, more: more?.textContent })
+  );
+  dispose();
+}
+
+/* ---------------- 12. 0.8.0 (board2-actions): four confirmed write actions -- */
+
+const ACTION_BOARD = {
+  at: 1,
+  reachable: true,
+  actions: true,
+  sessions: [
+    { sid: 'ses_act_me', title: 'act me', agent: 'build', busy: true, workspace: '/data/project/collab' },
+    { sid: 'ses_act_peer', title: 'act peer', agent: 'build', busy: false, workspace: '/data/project/collab' }
+  ],
+  locks: [],
+  handoffs: [],
+  queue: []
+};
+
+/** A fake `collab.state` with the four writes recorded (and a load counter). */
+function boardClient({ board = ACTION_BOARD, handler } = {}) {
+  const calls = [];
+  let loads = 0;
+  const run = async (action, input) => {
+    calls.push({ action, input });
+    if (handler) return handler(action, input);
+    return { ok: true, action, target: input.target, detail: `${action} ok → ${input.target}` };
+  };
+  return {
+    calls,
+    loads: () => loads,
+    client: {
+      rpc: () => ({
+        snapshot: async () => {
+          loads += 1;
+          return { ...board, at: loads };
+        },
+        escalate: input => run('escalate', input),
+        freeze: input => run('freeze', input),
+        unfreeze: input => run('unfreeze', input),
+        archive: input => run('archive', input)
+      })
+    }
+  };
+}
+
+/** The app's own confirmation dialogs, recorded (R4). */
+function fakeDialogs({ confirm = true, reason = '看板理由：先处理这一单' } = {}) {
+  const calls = [];
+  return {
+    calls,
+    open: () => ({ close() {} }),
+    active: () => false,
+    alert: async options => {
+      calls.push({ kind: 'alert', options });
+    },
+    confirm: async options => {
+      calls.push({ kind: 'confirm', options });
+      return typeof confirm === 'function' ? confirm(options) : confirm;
+    },
+    prompt: async options => {
+      calls.push({ kind: 'prompt', options });
+      return typeof reason === 'function' ? reason(options) : reason;
+    },
+    select: async () => undefined
+  };
+}
+
+/** Mount one board with the given client/dialogs and select the peer session. */
+async function openBoard({ board = ACTION_BOARD, dialogs, handler, locale = 'zh' } = {}) {
+  const fake = boardClient({ board, handler });
+  const SESSION = serverSession('ses_act_me', 'srv-act', fake.client);
+  const h = harness(SESSION, { locale, dialogs });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SESSION);
+  const peerRow = findIn(
+    el,
+    node => String(node.className).includes('collab-session') && node.textContent.includes('act peer')
+  );
+  if (peerRow) fireClick(peerRow);
+  const button = id => findIn(el, node => node.attrs?.['data-collab-action'] === id);
+  const buttons = () => {
+    const out = [];
+    const walk = node => {
+      if (!node) return;
+      if (node.nodeType === 1) {
+        if (node.attrs?.['data-collab-action'] !== undefined) out.push(node.attrs['data-collab-action']);
+        for (const child of node.childNodes ?? []) walk(child);
+      }
+    };
+    walk(el);
+    return out;
+  };
+  return { fake, h, el, dispose, button, buttons, text: () => el?.textContent ?? '' };
+}
+
+// --- PN12a: four buttons; every click asks first, then runs the RPC.
+{
+  const dialogs = fakeDialogs();
+  const { fake, h, button, buttons, dispose } = await openBoard({ dialogs });
+  expect(
+    'PN12 the detail pane renders the four action buttons (加急 / 冻结 / 解冻 / 归档)',
+    JSON.stringify(buttons()) === JSON.stringify(['escalate', 'freeze', 'unfreeze', 'archive']) &&
+      button('escalate').textContent === '加急' &&
+      button('archive').textContent === '归档',
+    JSON.stringify(buttons())
+  );
+  const loadsBefore = fake.loads();
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 加急 asks for the reason, confirms, then calls escalate with target + reason + actor',
+    dialogs.calls.map(call => call.kind).join(',') === 'prompt,confirm' &&
+      fake.calls.length === 1 &&
+      fake.calls[0].action === 'escalate' &&
+      fake.calls[0].input.target === 'ses_act_peer' &&
+      fake.calls[0].input.session === 'ses_act_me' &&
+      fake.calls[0].input.reason === '看板理由：先处理这一单',
+    JSON.stringify({ kinds: dialogs.calls.map(call => call.kind), calls: fake.calls })
+  );
+  expect(
+    'PN12 a successful action shows a success toast and refreshes the snapshot once (no new poller)',
+    h.toasts.at(-1)?.variant === 'success' &&
+      String(h.toasts.at(-1)?.description ?? '').includes('escalate ok') &&
+      fake.loads() === loadsBefore + 1,
+    JSON.stringify({ toast: h.toasts.at(-1), loads: `${loadsBefore} → ${fake.loads()}` })
+  );
+
+  fireClick(button('freeze'));
+  await sleep(30);
+  expect(
+    'PN12 冻结 confirms (no reason prompt) and calls freeze with scope=session',
+    fake.calls.at(-1)?.action === 'freeze' &&
+      fake.calls.at(-1)?.input.scope === 'session' &&
+      fake.calls.at(-1)?.input.target === 'ses_act_peer' &&
+      String(fake.calls.at(-1)?.input.reason ?? '').includes('看板冻结'),
+    JSON.stringify(fake.calls.at(-1))
+  );
+  fireClick(button('unfreeze'));
+  await sleep(30);
+  fireClick(button('archive'));
+  await sleep(30);
+  expect(
+    'PN12 解冻 / 归档 call their RPC methods for the selected session',
+    fake.calls.at(-2)?.action === 'unfreeze' &&
+      fake.calls.at(-2)?.input.scope === 'session' &&
+      fake.calls.at(-1)?.action === 'archive' &&
+      fake.calls.at(-1)?.input.target === 'ses_act_peer',
+    JSON.stringify(fake.calls.slice(-2))
+  );
+  dispose();
+}
+
+// --- PN12b: cancelling the dialog writes nothing (R4).
+{
+  const dialogs = fakeDialogs({ confirm: false });
+  const { fake, button, dispose } = await openBoard({ dialogs });
+  fireClick(button('escalate'));
+  await sleep(30);
+  fireClick(button('archive'));
+  await sleep(30);
+  expect(
+    'PN12 cancelling the confirmation calls nothing (0 writes)',
+    fake.calls.length === 0 && dialogs.calls.some(call => call.kind === 'confirm'),
+    JSON.stringify({ calls: fake.calls, kinds: dialogs.calls.map(call => call.kind) })
+  );
+  const cancelledPrompt = fakeDialogs({ reason: () => undefined });
+  dispose();
+  const second = await openBoard({ dialogs: cancelledPrompt });
+  fireClick(second.button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 cancelling the reason prompt also writes nothing',
+    second.fake.calls.length === 0,
+    JSON.stringify(second.fake.calls)
+  );
+  second.dispose();
+}
+
+// --- PN12c: a refusal is a toast, and the panel stays interactive (R6).
+{
+  const dialogs = fakeDialogs();
+  const { fake, h, button, dispose } = await openBoard({
+    dialogs,
+    handler: (action, input) =>
+      action === 'escalate'
+        ? { ok: false, action, target: input.target, detail: '拒绝加急：目标在 protect 名单内（collab.json 的 protect + 内置硬名单）' }
+        : { ok: true, action, target: input.target, detail: `${action} ok → ${input.target}` }
+  });
+  const loadsBefore = fake.loads();
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 a refused action shows an error toast with the server’s reason (no refresh, panel intact)',
+    h.toasts.at(-1)?.variant === 'error' &&
+      String(h.toasts.at(-1)?.description ?? '').includes('protect') &&
+      fake.loads() === loadsBefore,
+    JSON.stringify({ toast: h.toasts.at(-1), loads: `${loadsBefore} → ${fake.loads()}` })
+  );
+  fireClick(button('archive'));
+  await sleep(30);
+  expect(
+    'PN12 … and the next action still works (the panel never breaks)',
+    fake.calls.at(-1)?.action === 'archive' && h.toasts.at(-1)?.variant === 'success',
+    JSON.stringify({ calls: fake.calls, toast: h.toasts.at(-1) })
+  );
+  dispose();
+}
+
+// --- PN12d: a thrown RPC is one error toast; the panel keeps working (R6).
+{
+  const dialogs = fakeDialogs();
+  const { fake, h, button, dispose } = await openBoard({
+    dialogs,
+    handler: () => {
+      throw new Error('server unreachable (rpc rejected)');
+    }
+  });
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 a thrown RPC shows an error toast and writes no snapshot refresh',
+    h.toasts.at(-1)?.variant === 'error' &&
+      String(h.toasts.at(-1)?.description ?? '').includes('server unreachable') &&
+      fake.calls.length === 1,
+    JSON.stringify(h.toasts.at(-1))
+  );
+  expect(
+    'PN12 … and the buttons are still rendered/clickable afterwards',
+    Boolean(button('archive')) && button('archive').textContent === '归档',
+    button('archive')?.textContent
+  );
+  dispose();
+}
+
+// --- PN12e: no dialogs → two-step click (the documented known limitation).
+{
+  const { fake, h, button, text, dispose } = await openBoard();
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 without ctx.dialogs the first click only arms (0 writes) and says so',
+    fake.calls.length === 0 &&
+      button('escalate').textContent.includes('再点一次') &&
+      String(h.toasts.at(-1)?.description ?? '').includes('再点同一个按钮'),
+    JSON.stringify({ calls: fake.calls, label: button('escalate').textContent, toast: h.toasts.at(-1) })
+  );
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 … the second click runs escalate with the default one-line reason',
+    fake.calls.length === 1 &&
+      fake.calls[0].action === 'escalate' &&
+      fake.calls[0].input.reason === '看板加急' &&
+      !text().includes('再点一次'),
+    JSON.stringify(fake.calls[0])
+  );
+  dispose();
+}
+
+// --- PN12f: `actions:false` (boardActions:false) hides the row, RPC untouched.
+{
+  const { fake, button, buttons, dispose } = await openBoard({ board: { ...ACTION_BOARD, actions: false } });
+  expect(
+    'PN12 snapshot actions:false hides every button (the RPC is only hidden, not removed)',
+    buttons().length === 0 && !button('escalate') && fake.calls.length === 0,
+    JSON.stringify(buttons())
+  );
+  dispose();
+}
+
+// --- PN12g: the two-step arm is per (action, session) — it never leaks.
+// (Review R1: `ActionRow` is not recreated when the selection changes, so an
+// arm that only remembered the action id let ONE click on another session run.)
+{
+  const { fake, el, button, dispose } = await openBoard(); // no dialogs; selects ses_act_peer
+  fireClick(button('escalate'));
+  await sleep(30);
+  const armedOnPeer = fake.calls.length === 0 && button('escalate').textContent.includes('再点一次');
+  const meRow = findIn(
+    el,
+    node => String(node.className).includes('collab-session') && node.textContent.includes('act me')
+  );
+  expect('PN12 (setup) an arm on act peer writes nothing, and the other row exists', armedOnPeer && Boolean(meRow), meRow?.className);
+  fireClick(meRow);
+  await sleep(20);
+  expect(
+    'PN12 switching the selection clears the arm: the button on the new session shows 加急 again',
+    button('escalate').textContent === '加急' && fake.calls.length === 0,
+    JSON.stringify({ label: button('escalate').textContent, calls: fake.calls })
+  );
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 one click on the new session does NOT execute — it only arms that session (R1)',
+    fake.calls.length === 0 && button('escalate').textContent.includes('再点一次'),
+    JSON.stringify({ calls: fake.calls, label: button('escalate').textContent })
+  );
+  fireClick(button('escalate'));
+  await sleep(30);
+  expect(
+    'PN12 … the second click on the new session executes against it (not the previously armed one)',
+    fake.calls.length === 1 && fake.calls[0].action === 'escalate' && fake.calls[0].input.target === 'ses_act_me',
+    JSON.stringify(fake.calls)
   );
   dispose();
 }

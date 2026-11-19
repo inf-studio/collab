@@ -6,11 +6,34 @@
 ## [Unreleased]
 
 > 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节已收 `board2-layout`
-> （主从布局，只读）、`board2-graph`（三级关系图，只读）与 P2 的 `sender-name`
-> （注入头带发出方名称）；版本号由父任务在子任务齐了之后统一发。
+> （主从布局）、`board2-graph`（三级关系图）、`board2-actions`（加急/冻结/解冻/归档，四个需确认的写动作）
+> 与 P2 的 `sender-name`（注入头带发出方名称）；版本号由父任务在子任务齐了之后统一发。
 
 ### Added
 
+- **看板快捷动作（0.8.0，`board2-actions`）**：GUI 右详情的关系图下方多一行四个按钮
+  `加急` / `冻结` / `解冻` / `归档`。点击**先确认**（`ctx.dialogs.prompt` 问理由 / `dialogs.confirm`），
+  确认后调 `collab.state.escalate|freeze|unfreeze|archive`，回执（成功或拒绝原因）用 toast 展示；
+  成功后 `store.load()` **刷新一次**（不新增轮询）。
+  - **RPC（additive）**：`CollabState` 增四个写方法，入参 `{ target, reason?, mode?, until?, scope?, restore?, session? }`，
+    统一返回 `ActionReceipt { ok, action, target, detail }`。可读拒绝（protected / 冻结 / 校验 / 宿主拒绝写入）
+    返回 `ok:false` + `detail`，不抛；只有传输失败才 reject。`snapshot` 增可选 `actions:boolean`
+    （`collab.json` 的 `boardActions`，默认 true；`false` 只隐藏动作行，RPC 仍可调）。
+  - **抽 core（不复制规则）**：新增 `src/core/actions.ts`（`escalateAction` / `freezeAction` / `archiveAction`），
+    工具与 RPC 调**同一批函数**；`collab_escalate` / `collab_freeze` / `collab_archive` 只保留 description /
+    schema / `confirm` 接线，**全部 883 条旧断言逐字不变**。
+  - **门禁（服务端强制）**：加急目标 protected（含血缘）→ 看板路径**拒绝**且 **0 prompt + 0 队列项**
+    （工具仍走 0.6.0 的 urgent 队列路径，二者由 `protected:"queue"|"refuse"` 区分）；只读 agent
+    （`explore`/`plan`）→ `queue(forced)`；目标冻结（会话/工作区/bid）→ 先解冻；归档 `[protected*]` 拒绝且不 PATCH。
+  - **审计（R5）**：每次写动作向 `~/.config/opencode/collab-audit.jsonl` **追加一行**
+    `{ at, actor, action, target, ok, reason }`（成功与失败都写；失败记回执 `detail`）。只追加、不轮转；
+    写失败只打日志，不回滚已发生的动作。`COLLAB_AUDIT_FILE` 可覆盖路径（测试）。
+  - **无 dialogs 的降级**：老窗口 / 测试宿主没有 `ctx.dialogs` 时改为**两步点击**（第一次只上膛，
+    第二次执行），加急用固定一行理由——不确认绝不写（记在 docs §11.20 的已知限制）。
+  - 测试：`test/handoff-harness.mjs` 883 → **898**（S108：注册/`actions` 标志/protected 拒绝 0 prompt+0 队列/
+    只读降级/冻结中加急被拒/解冻/归档↔恢复/protected 归档拒绝/审计逐条字段/`boardActions:false` 仍可调/
+    snapshot 零写入）；`test/gui-panel.mjs` 47 → **61**（PN12：四按钮/prompt→confirm→RPC/成功 toast + 一次刷新/
+    取消两处 0 写入/拒绝 toast 仍可交互/RPC 抛错/两步点击/`actions:false` 隐藏）。
 - **入站注入头带发出方名称（0.8.0，`sender-name`）**：投递到对端会话的消息头从
   `[collab:ses_e176…2HXy][reply:t_…]` 改为 **名称在前**：
   `[<发出方会话标题>][collab:ses_e176…2HXy][reply:t_…]`，读的人不必再反查截断 id。

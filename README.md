@@ -84,10 +84,16 @@
 
 ## 状态视图（Desktop 侧栏 / TUI，experimental）
 
-两个**只读**视图，问的是同一件事：「谁持有资源 / 谁在排队 / 哪些交接没闭环 / 我给受保护会话排了哪些请求」。
+两个视图，问的是同一件事：「谁持有资源 / 谁在排队 / 哪些交接没闭环 / 我给受保护会话排了哪些请求」。
 数据都来自插件 server 部分的 `collab.state.snapshot`（RPC），与 `collab_locks` / `collab_list`
 **同一读取层**，没有第二份状态。Desktop 的 GUI 走**当前会话所属服务器**的 client（0.5.3；远端会话读远端），
 TUI 走宿主给它的 `ctx.client`。
+
+> 0.8.0（`board2-actions`）：Desktop 面板右详情多一行**动作按钮**（加急 / 冻结 / 解冻 / 归档），每次点击
+> **先确认**再调用 `collab.state.escalate|freeze|unfreeze|archive`（服务端复用工具同一份 core 实现，protected
+> 拒绝、只读 agent 降级、冻结优先都在服务端强制），成功/失败只弹 toast，并追加一行
+> `~/.config/opencode/collab-audit.jsonl`。`collab.json` 的 `boardActions:false` 只隐藏动作行（RPC 保留）；
+> 没有 `ctx.dialogs` 的老窗口降级为「再点一次确认」。TUI 与所有读取视图仍然零写操作。
 
 | 客户端 | 入口 | 说明 |
 | --- | --- | --- |
@@ -97,8 +103,9 @@ TUI 走宿主给它的 `ctx.client`。
 
 | 位置 | 内容 |
 | --- | --- |
-| GUI 侧栏 `collab` 面板 | 0.8.0 **主从布局**：左列表 `320px` / 右详情 `1fr`，窄窗口（≤640px，`max-width:640px`）回落单栏（选中后详情替换列表 + 「← 返回列表」）。左列表仍是 0.6.0 的三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 会话行（agent + 徽标 `🔒n` / `‹m›` / `[archived]` / `[frozen]` / `[urgent]`）→ `已归档 N` 折叠段；无法归属的锁 / 交接 / 队列以 `· 未归属` 兜底。**点行 = 单选**（`›` 高亮），右详情自上而下是会话头（标题 / agent / 完整 sid / 徽标）→ 关系图槽位 → 动作行槽位 → items（锁 / 交接 / owner 队列 / `↳` 拉起的会话）。选中与展开都是本地信号，2 s 轮询换快照不重置；选中的会话从快照消失才清空并 toast「该会话已不在快照中」 |
+| GUI 侧栏 `collab` 面板 | 0.8.0 **主从布局**：左列表 `320px` / 右详情 `1fr`，窄窗口（≤640px，`max-width:640px`）回落单栏（选中后详情替换列表 + 「← 返回列表」）。左列表仍是 0.6.0 的三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 会话行（agent + 徽标 `🔒n` / `‹m›` / `[archived]` / `[frozen]` / `[urgent]`）→ `已归档 N` 折叠段；无法归属的锁 / 交接 / 队列以 `· 未归属` 兜底。**点行 = 单选**（`›` 高亮），右详情自上而下是会话头（标题 / agent / 完整 sid / 徽标）→ 关系图 → 动作行（加急/冻结/解冻/归档，需确认）→ items（锁 / 交接 / owner 队列 / `↳` 拉起的会话）。选中与展开都是本地信号，2 s 轮询换快照不重置；选中的会话从快照消失才清空并 toast「该会话已不在快照中」 |
 | GUI 关系图（0.8.0） | 右详情顶部的内联 SVG（无图库）：**L0** 未选中 = 工作区节点 + 跨工作区交接（同一对工作区合并为一条 `count`）；**L1** 选中工作区 = 本区会话 + 对端工作区占位节点（不展开对方，画虚线）；**L2** 选中会话 = 以它为中心 ±1 跳、最多 8 个节点（超出显示 `+N`）。点节点 = 选中（联动左列表与 items），节点角标 `▸/▾` 折叠一跳，悬停高亮相邻边；折叠/悬停只在本窗口内存，2 s 轮询不重置。派生来自 `src/core/graph.ts` 的 `buildGraph`，**与 TUI 同一份**（`handoff` 实线 / `origin` 虚线 / `spawn`·`subagent` 点线） |
+| GUI 动作行（0.8.0） | 关系图下方四个按钮：`加急` / `冻结` / `解冻` / `归档`。加急先问理由（≤200 字）再确认；冻结默认 30 分钟；归档按钮为危险色。确认后才调 RPC，回执（成功或拒绝原因）用 toast 展示，成功后**刷新一次**快照（不新增轮询）。服务端门禁：protected 拒绝（加急 0 prompt / 0 队列、归档不 PATCH）、只读 agent 加急降级 `queue`、冻结中加急被拒。每次调用追加一行 `~/.config/opencode/collab-audit.jsonl`。`boardActions:false` 隐藏该行（RPC 仍可用）；无 `ctx.dialogs` 时降级为两步点击 |
 | GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
 | GUI 会话头计数条 | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点。四个数的口径见下方「四个数」 |
 | GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本、platform 与数据源 `server=`）——这是「窗口到底加载了 GUI 没有」的自证 |
@@ -123,9 +130,11 @@ TUI 走宿主给它的 `ctx.client`。
 同一 **target**（或同一 thread）+ 归一化后同文在 `dedupeWindowMs`（默认 60s，`0` 关闭）内只投递一次——
 同一条结论发到同一会话的 3 个 thread 也算重复（回执写「已在 thread … 发过同文」）；确需再发传 `force:true`。
 
-- **只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
+- **默认只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
   两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。0.5.1 的命令与计数条、
   0.5.2 的标题栏 pill 同样只有一个动作：**打开面板**（pill 在无会话时还多一个 **toast**，仍是只读）。
+  0.8.0 起 Desktop 面板右详情多了四个**写动作**（加急/冻结/解冻/归档），但每一个都**先确认**、服务端复用
+  工具同一份门禁、失败只 toast，并且 `boardActions:false` 可以整行隐藏；TUI 与所有读取视图仍然零写。
 - **鼠标不可用时 TUI 仍能进**：`/collab` 与 `ctrl+shift+l` 始终有效；宿主把侧栏固定成一行高度时展开内容
   会被裁掉（不崩溃），此时就是靠这两个入口。见 `docs/collab.md` §11.11.3。
 - **可关闭**：Settings → Extensions → Plugins 里本插件的开关；关掉视图不影响 server 部分的工具。
@@ -242,6 +251,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
   "waiterHeartbeat": true,
   "dedupeWindowMs": 60000,
   "awareness": "line",
+  "boardActions": true,
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -259,6 +269,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `waiterHeartbeat`| `true`             | `false` 只关「会话 `context` 每轮刷新排队心跳」这一半；`collab_lock` / 写工具的 touch 仍在 |
 | `dedupeWindowMs` | `60000`            | 正文去重窗口：同一 **target**（或同一 thread）+ 归一化后同文在窗口内只投递一次（`force:true` 强制并标 `dedupeOverridden`）；**`0` 关闭**（回滚开关） |
 | `awareness`      | `"line"`           | **自动感知**提示：`context` 里每 10 分钟最多一行「本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）」；`"off"` = 0 行。只读、不写记录、不投递 |
+| `boardActions`   | `true`             | Desktop 面板右详情的动作行（加急/冻结/解冻/归档）。`false` **只隐藏按钮**（`snapshot.actions=false`），`collab.state.escalate\|freeze\|unfreeze\|archive` 仍可调；每次写动作追加一行 `~/.config/opencode/collab-audit.jsonl` |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |
@@ -293,7 +304,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 883 项 harness + 12 项只读默认 + 20 项看板派生 + 36 项关系图 + 52 项快照/产物 + 60 项 TUI 渲染 + 47 项 GUI 入口 + 47 项 GUI 面板渲染
+pnpm test          # build + 899 项 harness + 12 项只读默认 + 20 项看板派生 + 36 项关系图 + 54 项快照/产物 + 60 项 TUI 渲染 + 47 项 GUI 入口 + 65 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），

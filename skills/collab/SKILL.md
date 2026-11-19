@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十二个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十二个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -48,12 +48,18 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 
 > 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）的规程在同工作区 skill
 > `collab-coordination`；需要看**全局**（谁持有/谁排队/哪些交接未闭环）时打开 OpenCode Desktop
-> 侧栏的 `collab` 面板（0.3.0 起，只读，与 `collab_locks` 同一数据源）。0.6.0 起 GUI 与 TUI 共用同一份
+> 侧栏的 `collab` 面板（0.3.0 起，与 `collab_locks` 同一数据源）。0.6.0 起 GUI 与 TUI 共用同一份
 > `buildBoard` 派生：工作区 → 会话（徽标 `🔒n`/`‹m›`/`[archived]`/`[frozen]`/`[urgent]`）→
-> `↳` 它拉起的会话 + 该会话的锁/交接/队列；`已归档 N` 默认折叠，看板本身仍然零写操作。
+> `↳` 它拉起的会话 + 该会话的锁/交接/队列；`已归档 N` 默认折叠，读取视图本身零写操作。
 > 0.8.0 起 GUI 是**主从布局**：左列表点行 = 单选（`›`），右详情显示标题/agent/完整 sid/徽标 + 锁/交接/
 > 队列/`↳`。窄窗口回落单栏并给「← 返回列表」。选中是本地状态，2 s 轮询
 > 不会重置；会话离开快照才清空并提示。TUI 仍是树 + `j`/`k` 选中后下方 3–5 行详情，`esc` 清除。
+> 0.8.0 动作行（`board2-actions`，仅 Desktop 面板）：右详情四个按钮 `加急` / `冻结` / `解冻` / `归档`，
+> 每次点击**先确认**（有 `ctx.dialogs` 就弹窗；没有则「再点一次」）再调
+> `collab.state.escalate|freeze|unfreeze|archive`，结果只弹 toast，成功后刷新一次快照。
+> 服务端复用工具同一份 core（protected 拒绝、只读 agent 降级 queue、冻结优先、protected 不归档），
+> 每次调用追加一行 `~/.config/opencode/collab-audit.jsonl`（成功/失败都写；只追加不轮转）。
+> `collab.json` 的 `boardActions:false` 只隐藏动作行（RPC 仍可调）。TUI 与所有读取视图仍然零写。
 > 0.8.0 关系图（`buildGraph`，GUI 与 TUI 同一份）：**L0** 未选中 = 工作区 + 跨区交接（同对合并计数）；
 > **L1** 点工作区标题 = 本区会话 + 对端工作区占位（不展开对方）；**L2** 选中会话 = 中心 ±1 跳、≤8 节点
 > （超出 `+N`）。GUI 点节点 = 选中（联动左列表/items）、`▸/▾` 折叠一跳、悬停高亮相邻边；TUI 是文本树

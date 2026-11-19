@@ -764,6 +764,12 @@ export interface CollabConfig {
    * injects nothing. Read-only either way.
    */
   awareness: 'line' | 'off';
+  /**
+   * 0.8.0 (`board2-actions`): the desktop board's action row (加急 / 冻结 /
+   * 解冻 / 归档), default `true`. `false` hides the row; the RPC methods keep
+   * working (rollback switch, design §5).
+   */
+  boardActions: boolean;
   report?: ReportConfig;
 }
 

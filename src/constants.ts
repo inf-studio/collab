@@ -93,7 +93,13 @@ export const DEFAULTS = {
    * 0.7.0 (R5): the read-only awareness hint ("本工作区候选 N · 其它工作区候选 M").
    * `line` (default) injects at most one line per 10 min; `off` injects none.
    */
-  awareness: 'line' as 'line' | 'off'
+  awareness: 'line' as 'line' | 'off',
+  /**
+   * 0.8.0 (`board2-actions`): the desktop board's action row (加急 / 冻结 /
+   * 解冻 / 归档). `false` hides the row in the panel; the RPC methods stay
+   * callable (the same rollback switch the PRD asks for, design §5).
+   */
+  boardActions: true
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -197,8 +203,23 @@ export const SERVER_URL = String(process.env.COLLAB_SERVER_URL ?? '')
   .replace(/\/+$/, '');
 export const SERVER_TOKEN = String(process.env.COLLAB_SERVER_TOKEN ?? '').trim();
 
-// ------------------------------------------------------- defect self-reporting
+// ------------------------------------------- board write actions (0.8.0, R5)
 
+/**
+ * R5 (`board2-actions`): every **write action** of the board (加急 / 冻结 /
+ * 解冻 / 归档) appends exactly one JSON line here — success *and* failure, only
+ * appended, never rotated (`{ at, actor, action, target, ok, reason }`).
+ *
+ * One global file for the same reason the freeze / lease directories are global:
+ * the board can act on a session of any workspace. A line is written by the RPC
+ * entry point (`collab.state.*`), which is where the GUI-confirmed call lands;
+ * the native tools keep their own receipts and do not append here.
+ * `COLLAB_AUDIT_FILE` overrides the path (harness / sandbox runs).
+ */
+export const AUDIT_FILE =
+  process.env.COLLAB_AUDIT_FILE || join(homedir(), '.config', 'opencode', 'collab-audit.jsonl');
+
+// ------------------------------------------------------- defect self-reporting
 /**
  * Where defect evidence lands (`~/.config/opencode/collab-reports/<sig>/`).
  * The directory is **evidence and fallback only**: the primary channel is a

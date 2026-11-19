@@ -2,6 +2,8 @@ import type { Plugin } from '@opencode/plugin';
 import { createContextHook } from './hooks/context.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
+import { appendAudit, archiveAction, escalateAction, freezeAction, sanitizeReason as sanitizeActionReason } from './core/actions.ts';
+import type { ActionContext } from './core/actions.ts';
 import { createHandoffChain } from './core/chain.ts';
 import { awarenessText } from './core/awareness.ts';
 import { allBroadcasts } from './core/claim.ts';
@@ -15,6 +17,7 @@ import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
 import { buildGraph } from './core/graph.ts';
 import { CollabState } from './rpc.ts';
+import type { ActionReceipt, Snapshot } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
 import {
   DeliveryError,
@@ -30,6 +33,7 @@ import { appendThreadMessage, createInboxStore, createThreadStore, extractInboun
 import { createSignal } from './ids.ts';
 import { AWARENESS_LIST_LIMIT, AWARENESS_TTL_MS, BUILTIN_PROTECT, PLUGIN_VERSION } from './constants.ts';
 import { log } from './log.ts';
+import type { JsonObject } from './types.ts';
 import { createToolKit, registerTools } from './tools/index.ts';
 import type { CollabContext } from './types.ts';
 
@@ -184,9 +188,109 @@ const plugin: Plugin.Plugin = {
       }
     });
 
-    // 4) Read-only RPC for the desktop sidebar (C2, 0.3.0). Optional: an older
-    // host without `ctx.rpc` keeps the tools and loses only the panel. The
-    // snapshot reuses the same readers as `collab_locks` / `collab_list`.
+    // 4) The board's write actions + the read-only snapshot, over one RPC
+    // (C2, 0.3.0 read; 0.8.0 `board2-actions` write). Optional: an older host
+    // without `ctx.rpc` keeps the tools and loses only the panel.
+    //
+    // The four actions run the **same** core functions the native tools run
+    // (`core/actions.ts`), so the gates are not re-implemented:
+    //   - protected lineage → `escalate` is refused with 0 prompts **and** 0
+    //     queue writes (a GUI click is not an owner-queue request);
+    //   - a read-only agent target → `queue`, forced (inside `escalateAction`);
+    //   - a frozen object → refused before anything is written (freeze wins);
+    //   - `archive` refuses `[protected*]` (the one-way boundary);
+    //   - the confirmation is the GUI dialog, so the server always executes.
+    // Every call appends one audit line (success *and* failure, R5).
+    const actionContext: ActionContext = {
+      ctx,
+      readConfig,
+      resolveTarget: kit.resolveTarget,
+      resolveMode: kit.resolveMode,
+      senderLabel: kit.senderLabel,
+      listSessions: input => chain.listSessions(input)
+    };
+    const isBid = (value: string): boolean => /^b_[0-9a-f]{8,32}$/i.test(value);
+    const isThread = (value: string): boolean => /^t_[0-9a-z]+_[0-9a-z]+$/i.test(value);
+
+    /** The scope a board `freeze` / `unfreeze` means when the caller omits one. */
+    const scopeOf = (input: JsonObject | undefined, target: string): string => {
+      const given = String(input?.scope ?? '').trim();
+      if (given) return given;
+      if (isBid(target)) return 'bid';
+      if (target.startsWith('/')) return 'workspace';
+      return 'session';
+    };
+
+    async function runAction(action: 'escalate' | 'freeze' | 'unfreeze' | 'archive', input: JsonObject | undefined): Promise<ActionReceipt> {
+      const sessionInput = String(input?.session ?? '').trim();
+      const actor = sessionInput || 'gui';
+      const target = String(input?.target ?? '').trim();
+      const reason = sanitizeActionReason(input?.reason);
+      let receipt: ActionReceipt;
+      if (action === 'escalate' && !sessionInput) {
+        // R2: a board escalation must name its requester. Without one the prompt
+        // would go out with `fromSessionID:"gui"` — the counterpart would have
+        // nowhere to send a receipt — and the audit line would name no session.
+        // `freeze` / `unfreeze` / `archive` do not need an actor, so they keep
+        // the `"gui"` fallback.
+        receipt = {
+          ok: false,
+          action,
+          target,
+          detail: '拒绝加急：没有调用方会话（session）。看板动作必须带上发起会话，否则对方无处回执。未写入任何内容。'
+        };
+      } else {
+        try {
+          const result =
+            action === 'escalate'
+              ? await escalateAction(actionContext, {
+                  actor,
+                  bid: isBid(target) ? target : '',
+                  threadID: !isBid(target) && isThread(target) ? target : '',
+                  session: isBid(target) || isThread(target) ? '' : target,
+                  reason: input?.reason,
+                  mode: input?.mode,
+                  // R3 (board): protected targets are refused, not queued.
+                  protected: 'refuse',
+                  confirm: true
+                })
+              : action === 'archive'
+                ? await archiveAction(actionContext, {
+                    actor,
+                    bid: isBid(target) ? target : '',
+                    session: isBid(target) ? '' : target,
+                    restore: input?.restore === true,
+                    confirm: true
+                  })
+                : await freezeAction(actionContext, {
+                    actor,
+                    scope: scopeOf(input, target),
+                    target,
+                    reason: input?.reason,
+                    until: input?.until,
+                    freeze: action !== 'unfreeze',
+                    confirm: true
+                  });
+          receipt = { ok: result.ok, action, target: result.target, detail: result.detail };
+        } catch (error) {
+          // A readable refusal (protected / frozen / validation) is a receipt with
+          // `ok:false` — the panel keeps working; only the toast reports it (R6).
+          const detail = (error as Error)?.message ?? String(error ?? 'unknown error');
+          receipt = { ok: false, action, target, detail };
+        }
+      }
+      appendAudit({
+        at: Date.now(),
+        actor,
+        action,
+        target: receipt.target || target,
+        ok: receipt.ok,
+        // Success records the caller's own reason; a failure records the verdict.
+        reason: receipt.ok ? reason : receipt.detail
+      });
+      return receipt;
+    }
+
     const snapshotter = createSnapshotReader({
       sessions: input => chain.listSessions(input),
       locks: allLocks,
@@ -201,7 +305,17 @@ const plugin: Plugin.Plugin = {
     const rpcDomain = (host as { rpc?: Plugin.Context['rpc'] }).rpc;
     const rpcRegistration = rpcDomain
       ? await rpcDomain
-          .register(CollabState, { snapshot: async input => snapshotter.snapshot(input) })
+          .register(CollabState, {
+            // `actions:false` (collab.json) hides the row; the methods below stay.
+            snapshot: async (input): Promise<Snapshot> => ({
+              ...(await snapshotter.snapshot(input)),
+              actions: readConfig().boardActions !== false
+            }),
+            escalate: input => runAction('escalate', input as JsonObject | undefined),
+            freeze: input => runAction('freeze', input as JsonObject | undefined),
+            unfreeze: input => runAction('unfreeze', input as JsonObject | undefined),
+            archive: input => runAction('archive', input as JsonObject | undefined)
+          })
           .catch(error => {
             // A failed registration must not fail the whole plugin: the tools
             // and the context hook are the product, the sidebar is a view.
@@ -209,7 +323,11 @@ const plugin: Plugin.Plugin = {
             return undefined;
           })
       : undefined;
-    log(rpcRegistration ? 'rpc ok: collab.state.snapshot' : 'rpc skipped: host has no ctx.rpc');
+    log(
+      rpcRegistration
+        ? `rpc ok: collab.state.snapshot + 4 write actions (boardActions=${readConfig().boardActions})`
+        : 'rpc skipped: host has no ctx.rpc'
+    );
 
     const initial = readConfig();
     log(
@@ -313,5 +431,12 @@ export const __internals = {
   // harness also proves two concurrent writers keep each other's entries).
   readFreezes,
   mergeFreezes,
-  freezeFor
+  freezeFor,
+  // 0.8.0 (`board2-actions`): the four write actions + the append-only audit
+  // writer. The RPC handlers call exactly these functions, so the harness can
+  // prove the gates (protected / read-only / frozen) with a fake host.
+  escalateAction,
+  freezeAction,
+  archiveAction,
+  appendAudit
 };

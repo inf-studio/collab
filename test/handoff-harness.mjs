@@ -293,6 +293,11 @@ process.env.COLLAB_FREEZE_FILE = freezeFile;
 const threadIndexFile = join(dir, 'collab-threads.json');
 process.env.COLLAB_THREAD_INDEX_FILE = threadIndexFile;
 
+// 0.8.0 (`board2-actions`): the board's append-only audit file is global too.
+// Set before the import so S108 reads the very lines the RPC writes.
+const auditFile = join(dir, 'collab-audit.jsonl');
+process.env.COLLAB_AUDIT_FILE = auditFile;
+
 // 0.5.0 (S94): the archive HTTP fallback. `constants.ts` reads
 // `COLLAB_SERVER_URL` **once at module load**, so the mock server is started
 // before the import. It only sees traffic from the S94 case that removes
@@ -700,8 +705,22 @@ const ctx = {
     },
     async wait() {}
   },
-  event: { subscribe: feed }
+  event: { subscribe: feed },
+  // 0.8.0 (`board2-actions`): capture the registered RPC handlers so S108 drives
+  // the board's four write actions exactly as the desktop panel does (the same
+  // registration `index.ts` performs for a real host).
+  rpc: {
+    async register(definition, handlers) {
+      rpcDefinition = definition;
+      for (const [name, handler] of Object.entries(handlers)) rpcHandlers[name] = handler;
+      return { dispose: async () => {}, events: { emit: async () => {} } };
+    }
+  }
 };
+
+/** The registered RPC definition + handlers (`ctx.rpc.register`, S108). */
+let rpcDefinition;
+const rpcHandlers = {};
 
 const originalError = console.error;
 console.error = () => {}; // plugin setup logs are noise here
@@ -11922,6 +11941,224 @@ rmSync(bcFile(S107_ASK_BID), { force: true });
 rmSync(join(broadcastDir, `${S107_ASK_BID}.lock`), { force: true });
 contexts.delete(S107_ME);
 for (const sid of [S107_ME, S107_TO, S107_LONG, S107_BRACKET, S107_EMPTY, S107_CACHE]) delete sessions[sid];
+
+// ================== S108 (0.8.0: `board2-actions` — 看板四个写动作 over RPC)
+// R1–R6 of the board task, driven through the **registered RPC handlers** (the
+// same `collab.state.escalate|freeze|unfreeze|archive` the desktop panel calls):
+//   - the four actions reuse `core/actions.ts` (no second rule set);
+//   - a protected target is refused with 0 prompts **and** 0 queue writes;
+//   - a read-only agent target is forced back to `queue`;
+//   - a frozen object refuses an escalation (freeze first);
+//   - archive refuses `[protected*]` and never PATCHes it;
+//   - every call appends exactly one audit line (success and failure);
+//   - `boardActions:false` hides the row (`snapshot.actions === false`) while the
+//     RPC keeps working;
+//   - a snapshot stays read-only (no audit line, no prompt, no write).
+const S108_ME = 'ses_s108_me';
+const S108_PEER = 'ses_s108_peer';
+const S108_RO = 'ses_s108_ro';
+const S108_PROT = 'ses_e1eb91cebffeTv1467ubJLKebk';
+for (const sid of [S108_ME, S108_PEER, S108_RO]) {
+  sessions[sid] = {
+    id: sid,
+    agent: sid === S108_RO ? 'explore' : 'build',
+    title: `S108 ${sid}`,
+    time: { updated: Date.now(), busy: 0 },
+    location: { directory: WS_A }
+  };
+}
+const auditLines = () => {
+  try {
+    return readFileSync(auditFile, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+  } catch {
+    return [];
+  }
+};
+const s108QueueFiles = () => {
+  try {
+    return readdirSync(join(ownerQueueDir, S108_PROT)).filter(name => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+};
+rmSync(join(ownerQueueDir, S108_PROT), { recursive: true, force: true });
+
+// --- S108a: registration + the default `actions` flag on the snapshot.
+expect(
+  'S108 the RPC registers snapshot + the four write actions (and the definition declares them)',
+  ['snapshot', 'escalate', 'freeze', 'unfreeze', 'archive'].every(name => typeof rpcHandlers[name] === 'function') &&
+    ['escalate', 'freeze', 'unfreeze', 'archive'].every(name => Boolean(rpcDefinition?.methods?.[name])),
+  Object.keys(rpcHandlers).join(',')
+);
+const s108Snap = await rpcHandlers.snapshot({});
+expect(
+  'S108 the snapshot carries `actions: true` by default (an older server may omit it)',
+  s108Snap.actions === true && s108Snap.reachable === true,
+  JSON.stringify({ actions: s108Snap.actions })
+);
+
+const auditBefore = auditLines().length;
+
+// --- S108b: a protected target — refused, 0 prompts, 0 queue writes.
+const s108BeforeB = prompts.length;
+const s108B = await rpcHandlers.escalate({ target: S108_PROT, reason: 'S108 受保护目标', session: S108_ME });
+expect(
+  'S108 escalate → protected is refused: ok:false, 0 prompts, 0 queue writes',
+  s108B.ok === false &&
+    s108B.action === 'escalate' &&
+    prompts.length === s108BeforeB &&
+    s108QueueFiles().length === 0 &&
+    /protect/.test(s108B.detail) &&
+    s108B.detail.includes('0 条 prompt'),
+  `${s108B.ok} / ${prompts.length - s108BeforeB} prompt(s) / ${s108QueueFiles().length} queue file(s) / ${s108B.detail.slice(0, 80)}`
+);
+
+// --- S108c: a read-only agent target — one `queue` prompt, the receipt says forced.
+const s108C = await rpcHandlers.escalate({ target: S108_RO, reason: 'S108 只读目标', session: S108_ME });
+expect(
+  'S108 escalate → read-only agent is forced to queue (never steer)',
+  s108C.ok === true &&
+    prompts.at(-1)?.sessionID === S108_RO &&
+    prompts.at(-1)?.delivery === 'queue' &&
+    /forced/.test(s108C.detail),
+  `${prompts.at(-1)?.delivery} / ${s108C.detail}`
+);
+
+// --- S108d: freeze first — an escalation into the frozen session is refused.
+const s108D = await rpcHandlers.freeze({ target: S108_PEER, scope: 'session', reason: 'S108 冻结中', session: S108_ME });
+const s108FrozenEntry = internals.readFreezes().find(entry => entry.scope === 'session' && entry.target === S108_PEER);
+const s108BeforeEsc = prompts.length;
+const s108E = await rpcHandlers.escalate({ target: S108_PEER, reason: 'S108 冻结中加急', session: S108_ME });
+expect(
+  'S108 freeze writes the entry (and notifies once)',
+  s108D.ok === true && Boolean(s108FrozenEntry) && s108FrozenEntry.reason === 'S108 冻结中' && s108D.target === S108_PEER,
+  `${s108D.ok} / ${s108FrozenEntry?.reason}`
+);
+expect(
+  'S108 escalate → frozen is refused (freeze wins): ok:false, 0 prompts',
+  s108E.ok === false && prompts.length === s108BeforeEsc && /冻结/.test(s108E.detail),
+  `${s108E.ok} / ${prompts.length - s108BeforeEsc} prompt(s) / ${s108E.detail.slice(0, 80)}`
+);
+
+// --- S108e: unfreeze lifts it.
+const s108F = await rpcHandlers.unfreeze({ target: S108_PEER, scope: 'session', session: S108_ME });
+expect(
+  'S108 unfreeze removes the entry and reports it',
+  s108F.ok === true &&
+    s108F.action === 'unfreeze' &&
+    !internals.readFreezes().some(entry => entry.scope === 'session' && entry.target === S108_PEER),
+  s108F.detail
+);
+
+// --- S108f: archive / restore a session (archive is not delete).
+const s108BeforeArchive = archivedPatches.length;
+const s108G = await rpcHandlers.archive({ target: S108_PEER, session: S108_ME });
+const s108H = await rpcHandlers.archive({ target: S108_PEER, restore: true, session: S108_ME });
+expect(
+  'S108 archive → archived:true then restore → archived:false (both ok)',
+  s108G.ok === true &&
+    s108H.ok === true &&
+    archivedPatches.length === s108BeforeArchive + 2 &&
+    archivedPatches[s108BeforeArchive]?.archived === true &&
+    archivedPatches[s108BeforeArchive + 1]?.archived === false,
+  JSON.stringify(archivedPatches.slice(s108BeforeArchive))
+);
+
+// --- S108g: archive refuses a protected line and never PATCHes it.
+const s108BeforeProt = archivedPatches.length;
+const s108I = await rpcHandlers.archive({ target: S108_PROT, session: S108_ME });
+expect(
+  'S108 archive → protected is refused: ok:false, no PATCH',
+  s108I.ok === false && archivedPatches.length === s108BeforeProt && /protect/.test(s108I.detail),
+  `${s108I.ok} / ${archivedPatches.length - s108BeforeProt} patch(es) / ${s108I.detail.slice(0, 80)}`
+);
+
+// --- S108h: one audit line per action — success *and* failure.
+const s108Audit = auditLines().slice(auditBefore);
+expect(
+  'S108 every write action appends exactly one audit line (8 calls → 8 lines)',
+  s108Audit.length === 8,
+  `${s108Audit.length} line(s): ${s108Audit.map(entry => `${entry.action}:${entry.ok}`).join(', ')}`
+);
+expect(
+  'S108 an audit line carries at / actor / action / target / ok / reason',
+  s108Audit.every(
+    entry =>
+      typeof entry.at === 'number' &&
+      entry.at > 0 &&
+      entry.actor === S108_ME &&
+      typeof entry.action === 'string' &&
+      typeof entry.target === 'string' &&
+      typeof entry.ok === 'boolean' &&
+      typeof entry.reason === 'string'
+  ),
+  JSON.stringify(s108Audit.at(-1))
+);
+expect(
+  'S108 a failure is audited with ok:false and the refusal as `reason`',
+  s108Audit.some(entry => entry.action === 'escalate' && entry.ok === false && /protect/.test(entry.reason)) &&
+    s108Audit.some(entry => entry.action === 'archive' && entry.ok === false && /protect/.test(entry.reason)),
+  s108Audit
+    .filter(entry => !entry.ok)
+    .map(entry => `${entry.action}:${entry.reason.slice(0, 40)}`)
+    .join(' / ')
+);
+expect(
+  'S108 a success records the caller’s own reason (freeze) and ok:true',
+  s108Audit.some(entry => entry.action === 'freeze' && entry.ok === true && entry.reason === 'S108 冻结中'),
+  JSON.stringify(s108Audit.find(entry => entry.action === 'freeze'))
+);
+
+// --- S108i: `boardActions:false` hides the row but keeps the RPC callable.
+writeFileSync(collabConfigPath, JSON.stringify({ boardActions: false }));
+const s108SnapOff = await rpcHandlers.snapshot({});
+const s108J = await rpcHandlers.escalate({ target: S108_RO, reason: 'S108 关掉动作行仍可调用', session: S108_ME });
+expect(
+  'S108 boardActions:false → snapshot.actions === false, the RPC still works',
+  s108SnapOff.actions === false && s108J.ok === true,
+  `actions=${s108SnapOff.actions} / escalate.ok=${s108J.ok}`
+);
+writeFileSync(collabConfigPath, JSON.stringify({}));
+
+// --- S108j: a snapshot stays read-only (no audit line, no prompt, no write).
+const s108AuditMtime = statSync(auditFile).mtimeMs;
+const s108BeforeSnap = prompts.length;
+await rpcHandlers.snapshot({});
+await rpcHandlers.snapshot({ session: S108_ME });
+expect(
+  'S108 snapshot is still zero-write: no audit line, no prompt, file untouched',
+  auditLines().length === auditBefore + 9 &&
+    prompts.length === s108BeforeSnap &&
+    statSync(auditFile).mtimeMs === s108AuditMtime,
+  `${auditLines().length - auditBefore} line(s) / ${prompts.length - s108BeforeSnap} prompt(s)`
+);
+
+// --- S108k: a board escalation without a real caller session is refused (R2).
+// Without a `session` the prompt would carry `fromSessionID:"gui"` — the
+// counterpart would have nowhere to send a receipt — so the RPC refuses before
+// anything is written (freeze / unfreeze / archive keep the `"gui"` fallback).
+const s108AuditBeforeK = auditLines().length;
+const s108PromptsBeforeK = prompts.length;
+const s108K = await rpcHandlers.escalate({ target: S108_RO, reason: 'S108 无发起会话' });
+const s108LastAudit = auditLines().at(-1);
+expect(
+  'S108 escalate without a caller session is refused: ok:false, 0 prompt, audited as actor=gui',
+  s108K.ok === false &&
+    prompts.length === s108PromptsBeforeK &&
+    /没有调用方会话/.test(s108K.detail) &&
+    auditLines().length === s108AuditBeforeK + 1 &&
+    s108LastAudit.actor === 'gui' &&
+    s108LastAudit.action === 'escalate' &&
+    s108LastAudit.ok === false,
+  `${s108K.ok} / ${prompts.length - s108PromptsBeforeK} prompt(s) / ${JSON.stringify(s108LastAudit)}`
+);
+
+// Cleanup: S108 fixtures (records / freeze / archive state / sessions).
+rmSync(join(ownerQueueDir, S108_PROT), { recursive: true, force: true });
+for (const sid of [S108_ME, S108_PEER, S108_RO]) delete sessions[sid];
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

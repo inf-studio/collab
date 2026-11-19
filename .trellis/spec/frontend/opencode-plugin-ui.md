@@ -157,6 +157,17 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - 交互（GUI）：点会话节点=选中（联动左列表/items）；点工作区=切 L1；`▸/▾` 折叠一跳（仅组件内存）；悬停高亮。
 - 已知覆盖缺口：跨界 `spawn/subagent` 的虚线没有专门夹具（只有 kind 内联线型有断言）。
 
+## 2.12 看板动作（0.8.0）
+
+- 四个动作（加急 / 冻结 / 解冻 / 归档）的编排**只存在于** `src/core/actions.ts`：工具与看板 RPC 共用；
+  工具对 protected 走 urgent 队列（`protected:"queue"`），看板走拒绝（`protected:"refuse"`）——这是**入口策略**，不是第二套规则。
+- RPC 写方法必须服务端强制门禁：protected 拒绝、只读 agent 降级、冻结优先；每次调用（成功或失败）追加一行
+  `collab-audit.jsonl`（`{at,actor,action,target,ok,reason}`，只追加）。
+- `escalate` 没有真实发起会话时**拒绝**（否则对端无处回执）。
+- GUI 的「两步点击」降级路径：`armed` 必须存 `{action, sessionID}`，且**切换选中即清空**；
+  `run()` 在任何 `await` **之前**捕获目标 sid——否则对话框开着时切换，动作会落到新会话。
+- `boardActions:false` 只隐藏按钮，RPC 仍可用（文档写清）。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

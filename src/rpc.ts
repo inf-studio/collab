@@ -1,6 +1,5 @@
 /**
- * C2 (0.3.0): the **read-only** contract between the server part and the
- * desktop sidebar.
+ * C2 (0.3.0): the contract between the server part and the desktop sidebar.
  *
  * `collab.state.snapshot` answers one question — "who holds what, who is
  * waiting, which hand-offs are still open?" — from the same read layer the
@@ -9,9 +8,19 @@
  *
  *   - no event stream (a 2 s poll in the GUI is enough for a lease list, and an
  *     event bus would be a second state machine to keep correct);
- *   - no method that writes (the panel has no lock/release button — R5);
  *   - `reachable: true` is part of the payload, so the GUI can tell a *rejected
  *     call* (server down) from an *empty* answer instead of showing a blank pane.
+ *
+ * 0.8.0 (`board2-actions`) adds the **write** half the board needs — and only
+ * that half: `escalate` / `freeze` / `unfreeze` / `archive`, each answering one
+ * `ActionReceipt`. They are not a second rule set: the handlers call
+ * `core/actions.ts`, the same functions `collab_escalate` / `collab_freeze` /
+ * `collab_archive` call, so the protected guard, the read-only-agent demotion
+ * and the freeze precedence cannot drift between the tool and the panel. A
+ * readable refusal is `ok:false` + `detail` (the panel toasts it); only a
+ * transport failure rejects the call. Locking / releasing stays with the tools
+ * (the panel has no such button) — the four actions are the ones a human
+ * explicitly confirms in a dialog.
  *
  * The definition is a plain object `satisfies Rpc.PortableDefinition` instead of
  * `Rpc.define(...)`: `Rpc.define` is the identity function, and the runtime
@@ -164,19 +173,48 @@ export interface Snapshot {
    * not name a session (no "me" to filter by) — never a scan of every queue.
    */
   queue: SnapshotQueueItem[];
+  /**
+   * 0.8.0 (`board2-actions`): whether the detail pane renders its action row
+   * (`collab.json` → `boardActions`, default `true`). Optional: an older server
+   * omits it, and absence means "actions available" (the default) — but the RPC
+   * methods themselves are registered either way, so `false` only hides the row.
+   */
+  actions?: boolean;
   /** The server answered. A rejected call never produces a snapshot at all. */
   reachable: true;
+}
+
+/**
+ * 0.8.0 (`board2-actions`): the receipt of one **write** action
+ * (`escalate` / `freeze` / `unfreeze` / `archive`).
+ *
+ * `ok:false` is a readable refusal (protected target, frozen object, a host that
+ * refused the write, a validation error) — it is not a transport failure, and it
+ * always carries the reason in `detail`. A rejected RPC call (server down) never
+ * produces a receipt at all, so the panel can tell the two apart.
+ */
+export interface ActionReceipt {
+  ok: boolean;
+  action: string;
+  /** The resolved target: a session id, a hand-off id, or a workspace path. */
+  target: string;
+  /** One line: the verdict, or the refusal reason (shown in the toast). */
+  detail: string;
 }
 
 const str = { type: 'string' } as const;
 const num = { type: 'number' } as const;
 const bool = { type: 'boolean' } as const;
 const strArray = { type: 'array', items: str } as const;
+/** `until` accepts a relative window (`"30m"`) or an absolute epoch ms. */
+const until = { anyOf: [{ type: 'number' }, { type: 'string' }] } as const;
 const obj = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object',
   properties,
   required
 });
+/** Every write action answers with the same receipt (see `ActionReceipt`). */
+const actionOutput = obj({ ok: bool, action: str, target: str, detail: str }, ['ok', 'action', 'target', 'detail']);
 
 /**
  * `collab.state` — one method, no events. The id is under the plugin id
@@ -268,6 +306,30 @@ export const CollabState = {
         },
         ['at', 'reachable', 'sessions', 'locks', 'handoffs', 'queue']
       )
+    },
+    /*
+     * 0.8.0 (`board2-actions`): the four write actions of the board. Each one
+     * runs the **same** core function the native tool runs (`core/actions.ts`),
+     * so the gates (protected lineage, read-only agent → queue, freeze first,
+     * `[protected*]` archive refusal) are not re-implemented here. `session` is
+     * the calling session (the routed one), used as the audit `actor`; the
+     * confirmation is the GUI's dialog, so the server side always executes.
+     */
+    escalate: {
+      input: obj({ target: str, reason: str, mode: str, session: str }),
+      output: actionOutput
+    },
+    freeze: {
+      input: obj({ target: str, scope: str, until, reason: str, session: str }),
+      output: actionOutput
+    },
+    unfreeze: {
+      input: obj({ target: str, scope: str, session: str }),
+      output: actionOutput
+    },
+    archive: {
+      input: obj({ target: str, restore: bool, session: str }),
+      output: actionOutput
     }
   },
   events: {}
