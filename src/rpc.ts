@@ -46,6 +46,13 @@ export interface SnapshotSession {
    * ancestor, or because its workspace is. Optional: an older server omits it.
    */
   frozen?: SnapshotFreeze;
+  /**
+   * 0.6.0 (board): the host says this session is archived (`time.archived`).
+   * The snapshot now **keeps** archived sessions (it used to drop them) so the
+   * board can file them under `已归档 N` instead of losing the row entirely.
+   * Optional: an older server omits it and the reader treats absence as false.
+   */
+  archived?: boolean;
 }
 
 /** One resource lease, from `stateOf()` — never a second source of truth. */
@@ -102,6 +109,18 @@ export interface SnapshotHandoff {
    * Display only — the row stays, one marker is added.
    */
   freeze?: SnapshotFreeze;
+  /**
+   * 0.6.0 (board): how the hand-off was taken. `spawn` is the relation the board
+   * draws as `↳` (this record pulled a new session in). Optional: an older
+   * server omits it, and absence is simply "not a spawn".
+   */
+  kind?: 'handoff' | 'spawn';
+  /**
+   * 0.6.0 (board): the session this hand-off spawned (`claim.by` of a
+   * `claim.kind === 'spawn'` record; the expired-claim fallback is included).
+   * Optional, display only.
+   */
+  spawned?: string;
 }
 
 /**
@@ -174,7 +193,9 @@ export const CollabState = {
             items: obj(
               { sid: str, title: str, agent: str, busy: bool, workspace: str, parent: str,
                 // 0.6.0 (`collab_freeze`): optional marker — an older server omits it.
-                frozen: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason'])
+                frozen: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason']),
+                // 0.6.0 (board): optional archived flag (absence = false).
+                archived: bool
               },
               ['sid', 'title', 'agent', 'busy', 'workspace']
             )
@@ -212,7 +233,10 @@ export const CollabState = {
                 title: str,
                 archived: bool,
                 // 0.6.0 (`collab_freeze`): optional freeze marker (bid or workspace).
-                freeze: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason'])
+                freeze: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason']),
+                // 0.6.0 (board): optional spawn relation — an older server omits both.
+                kind: str,
+                spawned: str
               },
               ['bid', 'state', 'ageMs', 'from', 'title']
             )

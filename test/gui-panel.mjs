@@ -47,6 +47,19 @@ class TextNode {
     return new TextNode(this.data);
   }
 }
+/** Solid templates use `<!>` as the insertion marker; it must be a comment node. */
+class CommentNode extends TextNode {
+  constructor(data = '') {
+    super(data);
+    this.nodeType = 8;
+  }
+  get textContent() {
+    return '';
+  }
+  cloneNode() {
+    return new CommentNode(this.data);
+  }
+}
 class Elem {
   constructor(tag) {
     this.nodeType = 1;
@@ -132,20 +145,24 @@ function parseHTML(html) {
   const root = [];
   const stack = [];
   const push = node => (stack.length ? stack[stack.length - 1] : { appendChild: n => root.push(n) }).appendChild(node);
-  const tag = /<(\/?)([a-zA-Z][\w-]*)((?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/?)>/g;
+  const tag =
+    /<!--([\s\S]*?)-->|<!([^>]*)>|<(\/?)([a-zA-Z][\w-]*)((?:\s+[\w:-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?)*)\s*(\/?)>/g;
   let last = 0;
   let match;
   while ((match = tag.exec(html))) {
     if (match.index > last) push(new TextNode(html.slice(last, match.index)));
-    if (match[1] === '/') {
+    if (match[1] !== undefined || match[2] !== undefined) {
+      // `<!>` / `<!-- … -->`: Solid's insertion marker.
+      push(new CommentNode(match[1] ?? ''));
+    } else if (match[3] === '/') {
       stack.pop();
     } else {
-      const element = new Elem(match[2]);
-      for (const attr of match[3].matchAll(/([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+      const element = new Elem(match[4]);
+      for (const attr of match[5].matchAll(/([\w:-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
         element.setAttribute(attr[1], attr[2] ?? attr[3] ?? attr[4] ?? '');
       }
       push(element);
-      if (!match[4] && !VOID.has(match[2].toLowerCase())) stack.push(element);
+      if (!match[6] && !VOID.has(match[4].toLowerCase())) stack.push(element);
     }
     last = tag.lastIndex;
   }
@@ -175,6 +192,9 @@ const documentStub = {
   },
   createTextNode(text) {
     return new TextNode(text);
+  },
+  createComment(text) {
+    return new CommentNode(text);
   }
 };
 globalThis.window ??= globalThis;
@@ -438,6 +458,198 @@ function renderContribution(h, registry, input) {
     'PN5 the header asks the host to sync its prompt queue once per session, not per render',
     syncCount === 1 && (second?.textContent ?? '').includes('宿主排队 1'),
     JSON.stringify({ syncs, second: second?.textContent })
+  );
+  dispose();
+}
+
+// 6. 0.6.0 board: default collapsed, click expands, archived hidden until asked.
+{
+  const BOARD = {
+    at: 1,
+    reachable: true,
+    sessions: [
+      {
+        sid: 'ses_board',
+        title: 'board worker',
+        agent: 'build',
+        busy: true,
+        workspace: '/data/project/collab',
+        frozen: { scope: 'session', target: 'ses_board', until: 1_800_000_600_000, reason: '等 schema 线' }
+      },
+      { sid: 'ses_child', title: 'child worker', agent: 'build', busy: true, workspace: '/data/project/collab' },
+      {
+        sid: 'ses_old',
+        title: 'archived worker',
+        agent: 'build',
+        busy: false,
+        workspace: '/data/project/collab',
+        archived: true
+      }
+    ],
+    locks: [
+      {
+        resource: 'named:board-window',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: ['ses_board'],
+        waiters: 0,
+        waiting: [],
+        expiresInMs: 600_000
+      }
+    ],
+    handoffs: [
+      {
+        bid: 'b_board_spawn',
+        state: 'claimed',
+        ageMs: 1_000,
+        from: 'ses_board',
+        claimBy: 'ses_child',
+        spawned: 'ses_child',
+        kind: 'spawn',
+        title: 'spawn the child',
+        workspace: '/data/project/collab'
+      },
+      {
+        bid: 'b_board_urgent',
+        state: 'open',
+        ageMs: 2_000,
+        from: 'ses_board',
+        title: 'urgent thing',
+        priority: 'urgent',
+        workspace: '/data/project/collab'
+      }
+    ],
+    queue: [{ queueId: 'q_board', target: 'ses_p', ageMs: 1_000, summary: 'req', seen: false }]
+  };
+  let boardLoads = 0;
+  const boardClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        boardLoads += 1;
+        return BOARD;
+      }
+    })
+  };
+  const BOARD_SESSION = serverSession('ses_board', 'srv-board', boardClient);
+  const h = harness(BOARD_SESSION);
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, BOARD_SESSION);
+  const text = () => el?.textContent ?? '';
+
+  expect(
+    'PN6 the board header counts sessions · leases · hand-offs · archived',
+    text().includes('2 sessions · 1 leases · 2 hand-offs · 1 archived'),
+    JSON.stringify(text())
+  );
+  expect(
+    'PN6 the session row carries 🔒1 / ‹2› / ⇢1 / [frozen] / [urgent]',
+    text().includes('🔒1') &&
+      text().includes('‹2›') &&
+      text().includes('⇢1') &&
+      text().includes('[frozen]') &&
+      text().includes('[urgent]'),
+    JSON.stringify(text())
+  );
+  expect(
+    'PN6 derived rows are folded by default: no ↳ and no archived row',
+    text().includes('Archived 1') && !text().includes('↳') && !text().includes('archived worker'),
+    JSON.stringify(text())
+  );
+
+  const find = (predicate) => {
+    const out = [];
+    const walk = node => {
+      if (!node) return;
+      if (node.nodeType === 1) {
+        if (predicate(node)) out.push(node);
+        for (const child of node.childNodes ?? []) walk(child);
+      }
+    };
+    walk(el);
+    return out[0];
+  };
+  const fire = target => {
+    const event = { type: 'click', target, cancelBubble: false };
+    for (const listener of documentStub.listeners.get('click') ?? []) listener(event);
+  };
+
+  const sessionButton = find(node => String(node.className).includes('collab-session') && node.textContent.includes('ses_board'));
+  expect('PN6 the session row is a clickable button', Boolean(sessionButton), sessionButton?.className);
+  fire(sessionButton);
+  expect(
+    'PN6 clicking a session expands it: ↳ child + lock / hand-off / queue',
+    text().includes('↳') &&
+      text().includes('ses_child') &&
+      text().includes('named:board-window') &&
+      text().includes('b_board_spawn') &&
+      text().includes('q_board'),
+    JSON.stringify(text())
+  );
+
+  const archivedButton = find(node => String(node.className).includes('collab-archived'));
+  expect('PN6 the archived section is a clickable fold', Boolean(archivedButton), archivedButton?.className);
+  fire(archivedButton);
+  expect(
+    'PN6 clicking 已归档 reveals the archived row (with [archived])',
+    text().includes('archived worker') && text().includes('[archived]'),
+    JSON.stringify(text())
+  );
+
+  // The 2 s poll replaces `data`; the local expand set must survive it.
+  const loadsBeforePoll = boardLoads;
+  await sleep(2100);
+  expect(
+    'PN6 a 2 s poll actually replaced the snapshot during the wait',
+    boardLoads > loadsBeforePoll,
+    `${loadsBeforePoll} → ${boardLoads} loads`
+  );
+  expect(
+    'PN6 a 2 s poll does not fold an expanded row',
+    text().includes('↳') && text().includes('archived worker'),
+    JSON.stringify(text())
+  );
+  dispose();
+}
+
+// 7. F1: rows that belong to no listed session still render (0.5.3 parity).
+{
+  const ORPHAN = {
+    at: 1,
+    reachable: true,
+    sessions: [],
+    locks: [
+      {
+        resource: 'named:ghost-window',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: ['ses_ghost'],
+        waiters: 0,
+        waiting: [],
+        expiresInMs: 600_000
+      }
+    ],
+    handoffs: [
+      { bid: 'b_ghost', state: 'open', ageMs: 1_000, from: 'ses_ghost', title: 'ghost hand-off' }
+    ],
+    queue: [{ queueId: 'q_ghost', target: 'ses_p', ageMs: 1_000, summary: 'ghost request', seen: false }]
+  };
+  // `ses_me` is not in `sessions`, so the queue cannot attach to a session row.
+  const ORPHAN_SESSION = serverSession('ses_me', 'srv-orphan', fakeClient({ reply: ORPHAN }));
+  const h = harness(ORPHAN_SESSION);
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, ORPHAN_SESSION);
+  const text = el?.textContent ?? '';
+  expect(
+    'PN7 orphan leases / hand-offs / queue render as 未归属 sections (never silently dropped)',
+    text.includes('Leases (1) · unclaimed') &&
+      text.includes('Open hand-offs (1) · unclaimed') &&
+      text.includes('Owner queue (1) · unclaimed') &&
+      text.includes('named:ghost-window') &&
+      text.includes('b_ghost') &&
+      text.includes('q_ghost'),
+    JSON.stringify(text)
   );
   dispose();
 }

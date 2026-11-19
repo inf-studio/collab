@@ -314,6 +314,215 @@ expect(
 await livePanel.setup.dispose();
 await liveCleanup();
 
+/* ------------------------------------------ 5b. board tree (0.6.0, R1/R2/R3) */
+
+// 2 workspaces → 1 active session with two hand-offs (one spawn) + 1 archived.
+// The tree is default-collapsed; `↳` only appears after an explicit expand
+// (keyboard `enter` or a mouse click), and `已归档` is a collapsed last section.
+const TREE = {
+  at: SNAPSHOT.at,
+  reachable: true,
+  sessions: [
+    {
+      sid: 'ses_a1',
+      title: 'alpha worker',
+      agent: 'build',
+      busy: true,
+      workspace: '/data/project/collab',
+      frozen: { scope: 'session', target: 'ses_a1', until: SNAPSHOT.at + 600_000, reason: '等 schema 线' }
+    },
+    { sid: 'ses_child', title: 'child worker', agent: 'build', busy: true, workspace: '/data/project/collab' },
+    {
+      sid: 'ses_old',
+      title: 'archived worker',
+      agent: 'build',
+      busy: false,
+      workspace: '/data/project/collab',
+      archived: true
+    }
+  ],
+  locks: [
+    {
+      resource: 'named:tree-window',
+      kind: 'named',
+      mode: 'exclusive',
+      holders: ['ses_a1'],
+      waiters: 0,
+      waiting: [],
+      expiresInMs: 600_000
+    }
+  ],
+  handoffs: [
+    {
+      bid: 'b_tree_spawn',
+      state: 'claimed',
+      ageMs: 10_000,
+      from: 'ses_a1',
+      claimBy: 'ses_child',
+      spawned: 'ses_child',
+      kind: 'spawn',
+      title: 'spawn the child',
+      workspace: '/data/project/collab'
+    },
+    {
+      bid: 'b_tree_urgent',
+      state: 'open',
+      ageMs: 20_000,
+      from: 'ses_a1',
+      title: 'urgent thing',
+      priority: 'urgent',
+      workspace: '/data/project/collab'
+    }
+  ],
+  queue: [{ queueId: 'q_tree', target: 'ses_p', ageMs: 1_000, summary: 'req', seen: false }]
+};
+
+const tree = harness({ snapshot: TREE });
+const treeCleanup = await plugin.setup(tree.context);
+const treeMounted = await mount(tree.context, () =>
+  tree.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_a1' }))
+);
+const treeFrame = treeMounted.frame;
+
+expect(
+  'R2 the panel is a tree: workspace header counts (会话 · 锁 · 交接 · 已归档)',
+  treeFrame.includes('2 会话 · 1 锁 · 2 交接 · 1 已归档'),
+  treeFrame.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 5).join(' | ')
+);
+expect(
+  'R2 the session row carries 🔒1 / ‹2› / [frozen] / [urgent]',
+  treeFrame.includes('🔒1') &&
+    treeFrame.includes('‹2›') &&
+    treeFrame.includes('[frozen]') &&
+    treeFrame.includes('[urgent]'),
+  treeFrame.split('\n').find(line => line.includes('ses_a1'))?.trim()
+);
+expect(
+  'R3 archived rows are hidden by default and only the folded header shows',
+  treeFrame.includes('已归档 1') &&
+    !treeFrame.includes('archived worker') &&
+    !treeFrame.includes('[archived]'),
+  treeFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+expect(
+  'R2 expansion is default-off: no ↳ child row before the user asks',
+  !treeFrame.includes('↳')
+);
+expect(
+  'R2 the queue is attached to its session row, not the orphan fallback',
+  !treeFrame.includes('q_tree') && !treeFrame.includes('未归属'),
+  treeFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+
+const treeLayer = tree.layers
+  .map(factory => factory())
+  .find(layer => layer?.commands?.some(command => command.bind === 'enter'));
+expect('R4 the panel registers a keyboard layer (enter/space toggles, j/k move)', Boolean(treeLayer));
+treeLayer?.commands.find(command => command.bind === 'enter')?.run();
+await treeMounted.setup.renderOnce();
+const expandedTree = await treeMounted.setup.captureCharFrame();
+expect(
+  'R2 enter expands the selected session: ↳ child + its lock / hand-off / queue',
+  expandedTree.includes('↳') &&
+    expandedTree.includes('ses_child') &&
+    expandedTree.includes('named:tree-window') &&
+    expandedTree.includes('b_tree_spawn') &&
+    expandedTree.includes('⇢ q_tree') &&
+    !expandedTree.includes('未归属'),
+  expandedTree.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+
+treeLayer?.commands.find(command => command.bind === 'j')?.run();
+treeLayer?.commands.find(command => command.bind === 'j')?.run();
+treeLayer?.commands.find(command => command.bind === 'enter')?.run();
+await treeMounted.setup.renderOnce();
+const archivedOpen = await treeMounted.setup.captureCharFrame();
+expect(
+  'R3 j moves to 已归档 and enter opens it: the archived row appears with [archived]',
+  archivedOpen.includes('archived worker') && archivedOpen.includes('[archived]'),
+  archivedOpen.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await treeMounted.setup.dispose();
+await treeCleanup();
+
+// F2: switching the panel away and back must not stack keyboard layers. A
+// second enabled `enter` layer would toggle twice (= looks stuck) and `j` would
+// jump two rows.
+const flappy = harness({ snapshot: TREE });
+const flappyCleanup = await plugin.setup(flappy.context);
+const [panelName, setPanelName] = createSignal('collab.status');
+// A stable PanelInput object with reactive getters: this is how the host passes
+// props. Rebuilding it through `panelInput()` would remount the component and
+// hide the very bug we are testing (a layer re-registered inside an effect).
+const flappyPanel = {
+  get name() {
+    return panelName();
+  },
+  sessionID: 'ses_a1',
+  width: 100,
+  presentation: 'panel',
+  focused: true,
+  focus() {},
+  close() {},
+  toggleFullscreen() {}
+};
+const flappyMounted = await mount(flappy.context, () => flappy.slots['session.panel'](flappyPanel));
+setPanelName('someone.else');
+await sleep(120);
+setPanelName('collab.status');
+await sleep(120);
+await flappyMounted.setup.renderOnce();
+const activeLayers = () => flappy.layers.map(factory => factory()).filter(layer => !layer?.enabled || layer.enabled());
+const boardLayers = () => activeLayers().filter(layer => layer?.commands?.some(command => command.bind === 'enter'));
+expect(
+  'R4 panel away→back leaves exactly one enabled board keyboard layer',
+  boardLayers().length === 1,
+  `${boardLayers().length} enabled / ${flappy.layers.length} registrations`
+);
+const press = (bind) => {
+  for (const layer of activeLayers()) layer.commands?.find(command => command.bind === bind)?.run();
+};
+press('enter');
+await flappyMounted.setup.renderOnce();
+const oneEnter = await flappyMounted.setup.captureCharFrame();
+expect(
+  'R4 one enter toggles once (the tree expands after a single keypress)',
+  oneEnter.includes('↳') && oneEnter.includes('▾ ses_a1'),
+  oneEnter.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+press('enter'); // fold back
+press('j'); // one row: ses_a1 → ses_child
+press('enter');
+await flappyMounted.setup.renderOnce();
+const oneJump = await flappyMounted.setup.captureCharFrame();
+expect(
+  'R4 one j moves one row (ses_child expands, not 已归档 / not two rows)',
+  oneJump.includes('▾ ses_child') && !oneJump.includes('▾ ses_a1') && !oneJump.includes('▾ 已归档'),
+  oneJump.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await flappyMounted.setup.dispose();
+await flappyCleanup();
+
+// Mouse: clicking the session row itself expands it (no keyboard involved).
+const treeMouse = harness({ snapshot: TREE });
+const treeMouseCleanup = await plugin.setup(treeMouse.context);
+const treeMouseMounted = await mount(treeMouse.context, () =>
+  treeMouse.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_a1' }))
+);
+const beforeClick = await treeMouseMounted.setup.captureCharFrame();
+const rowY = beforeClick.split('\n').findIndex(line => line.includes('▸ ses_a1'));
+await treeMouseMounted.setup.mockMouse.click(4, rowY < 0 ? 4 : rowY);
+await sleep(80);
+await treeMouseMounted.setup.renderOnce();
+const mouseFrame = await treeMouseMounted.setup.captureCharFrame();
+expect(
+  'R4 clicking a session row expands it (the same tree, mouse path)',
+  mouseFrame.includes('↳') && mouseFrame.includes('ses_child'),
+  mouseFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+await treeMouseMounted.setup.dispose();
+await treeMouseCleanup();
+
 /* ------------------------------------------------------------------- 6. sidebar */
 
 const side = harness();

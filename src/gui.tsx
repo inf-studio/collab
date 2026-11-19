@@ -34,7 +34,7 @@
  *     from the remote server, local rows from the local one — one source at a
  *     time, never mixed.
  */
-import { For, Show, createMemo, onCleanup } from 'solid-js';
+import { For, Show, createMemo, createSignal, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import {
   Command,
@@ -53,7 +53,8 @@ import {
   type PanelTab
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
-import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotSession } from './rpc.ts';
+import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
+import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
@@ -259,46 +260,12 @@ function storeFor(ctx: Context): SnapshotStore {
 
 /* ---------------------------------------------------------------------- grouping */
 
-interface WorkspaceGroup {
-  dir: string;
-  sessions: SnapshotSession[];
-  locks: SnapshotLock[];
-  handoffs: SnapshotHandoff[];
-}
-
-/**
- * Group one snapshot by workspace. Sessions carry their own directory; a lease
- * has none (leases are global), so it is filed under the workspace of the first
- * holder that is a listed session — and under the global group when nobody
- * listed holds it (e.g. a lease of a session the host did not return).
+/*
+ * The workspace/session tree is no longer assembled here: `core/board.ts` does
+ * it once and the TUI renders the same object (R1). The panel only owns the
+ * expand/collapse state (a local signal, so the 2 s poll never folds a row the
+ * user opened).
  */
-function groupByWorkspace(snapshot: Snapshot): WorkspaceGroup[] {
-  const groups = new Map<string, WorkspaceGroup>();
-  const group = (dir: string): WorkspaceGroup => {
-    let entry = groups.get(dir);
-    if (!entry) {
-      entry = { dir, sessions: [], locks: [], handoffs: [] };
-      groups.set(dir, entry);
-    }
-    return entry;
-  };
-
-  const dirOf = new Map<string, string>();
-  for (const session of snapshot.sessions) {
-    dirOf.set(session.sid, session.workspace || '');
-    group(session.workspace || '').sessions.push(session);
-  }
-  for (const lock of snapshot.locks) {
-    const owner = [...lock.holders, ...lock.waiting].map(sid => dirOf.get(sid)).find(dir => dir !== undefined);
-    group(owner ?? '').locks.push(lock);
-  }
-  for (const handoff of snapshot.handoffs) {
-    group(handoff.workspace || '').handoffs.push(handoff);
-  }
-  return [...groups.values()]
-    .filter(entry => entry.sessions.length || entry.locks.length || entry.handoffs.length)
-    .sort((left, right) => left.dir.localeCompare(right.dir));
-}
 
 /* --------------------------------------------------------------------------- css */
 
@@ -306,6 +273,7 @@ const CSS = `
 .collab-panel{display:flex;flex-direction:column;gap:14px;height:100%;overflow:auto;padding:10px 12px;font-size:12px;line-height:1.45;color:inherit;}
 .collab-group{display:flex;flex-direction:column;gap:4px;}
 .collab-group + .collab-group{border-top:1px solid color-mix(in srgb, currentColor 12%, transparent);padding-top:10px;}
+.collab-orphans{opacity:.9;}
 .collab-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-weight:600;}
 .collab-head-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .collab-sub{font-size:11px;font-weight:600;opacity:.55;margin-top:6px;}
@@ -314,6 +282,16 @@ const CSS = `
 .collab-mono{font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11px;}
 .collab-muted{opacity:.6;}
 .collab-badge{flex:none;border-radius:999px;padding:0 6px;font-size:10px;line-height:16px;background:color-mix(in srgb, currentColor 10%, transparent);}
+.collab-session{appearance:none;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:0;margin:0;width:100%;cursor:pointer;border-radius:4px;}
+.collab-session:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
+.collab-session:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+.collab-caret{flex:none;width:10px;opacity:.7;}
+.collab-detail{display:flex;flex-direction:column;gap:2px;padding:2px 0 4px 16px;border-left:1px solid color-mix(in srgb, currentColor 12%, transparent);margin-left:5px;}
+.collab-spawn{opacity:.85;}
+.collab-spawn-mark{flex:none;opacity:.55;}
+.collab-archived{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;text-align:left;padding:2px 0;margin:4px 0 0;cursor:pointer;opacity:.6;border-radius:4px;}
+.collab-archived:hover{opacity:.9;background:color-mix(in srgb, currentColor 6%, transparent);}
+.collab-archived:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
 .collab-dot{flex:none;width:6px;height:6px;border-radius:999px;background:currentColor;opacity:.35;}
 .collab-dot-busy{opacity:1;background:#2ea043;}
 .collab-tone-success{color:#2ea043;}
@@ -331,25 +309,75 @@ const CSS = `
 
 /* ----------------------------------------------------------------------- rows */
 
-function SessionRow(props: { session: SnapshotSession; current: string }) {
+function SessionBadges(props: { session: BoardSession }) {
   const ctx = usePlugin();
+  const frozenTitle = () =>
+    `冻结至 ${new Date(props.session.frozen!.until).toLocaleTimeString()}（${props.session.frozen!.reason}）`;
   return (
-    <div class="collab-row" title={props.session.sid}>
-      <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
-      <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
-      <span class="collab-badge">{props.session.agent}</span>
-      <Show when={props.session.frozen}>
-        <span
-          class="collab-badge collab-tone-danger"
-          title={`冻结至 ${new Date(props.session.frozen!.until).toLocaleTimeString()}（${props.session.frozen!.reason}）`}
-        >
-          frozen
+    <>
+      <Show when={props.session.badges.held > 0}>
+        <span class="collab-badge collab-tone-success" title={ctx.t('panel.badgeHeld')}>
+          🔒{props.session.badges.held}
         </span>
       </Show>
-      <span class="collab-row-title">{props.session.title}</span>
-      <Show when={props.session.sid === props.current}>
-        <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
+      <Show when={props.session.badges.waiting > 0}>
+        <span class="collab-badge collab-tone-warning" title={ctx.t('panel.badgeWaiting')}>
+          ⏳{props.session.badges.waiting}
+        </span>
       </Show>
+      <Show when={props.session.badges.handoffs > 0}>
+        <span class="collab-badge" title={ctx.t('panel.badgeHandoffs')}>
+          ‹{props.session.badges.handoffs}›
+        </span>
+      </Show>
+      <Show when={props.session.badges.queue > 0}>
+        <span class="collab-badge" title={ctx.t('panel.badgeQueue')}>
+          ⇢{props.session.badges.queue}
+        </span>
+      </Show>
+      <Show when={props.session.archived}>
+        <span class="collab-badge collab-muted">[archived]</span>
+      </Show>
+      <Show when={props.session.frozen}>
+        <span class="collab-badge collab-tone-danger" title={frozenTitle()}>
+          [frozen]
+        </span>
+      </Show>
+      <Show when={props.session.urgent}>
+        <span class="collab-badge collab-tone-warning">[urgent]</span>
+      </Show>
+    </>
+  );
+}
+
+function SpawnRow(props: { child: BoardSession['spawned'][number] }) {
+  return (
+    <div class="collab-row collab-spawn" title={props.child.sid}>
+      <span class="collab-spawn-mark">↳</span>
+      <span class="collab-mono collab-muted">{shortSid(props.child.sid)}</span>
+      <span class="collab-badge">{props.child.state}</span>
+      <Show when={props.child.archived}>
+        <span class="collab-badge collab-muted">[archived]</span>
+      </Show>
+      <Show when={props.child.title}>
+        <span class="collab-row-title collab-muted">{props.child.title}</span>
+      </Show>
+    </div>
+  );
+}
+
+function QueueRow(props: { item: SnapshotQueueItem }) {
+  const ctx = usePlugin();
+  return (
+    <div class="collab-row" title={props.item.queueId}>
+      <span class="collab-mono">{props.item.queueId}</span>
+      <span class="collab-mono collab-muted">{shortSid(props.item.target)}</span>
+      <span class="collab-badge">{props.item.seen ? ctx.t('panel.seen') : ctx.t('panel.pending')}</span>
+      <Show when={props.item.priority === 'urgent'}>
+        <span class="collab-badge collab-tone-warning">[urgent]</span>
+      </Show>
+      <span class="collab-muted">{fmtTtl(props.item.ageMs)}</span>
+      <span class="collab-row-title collab-muted">{props.item.summary}</span>
     </div>
   );
 }
@@ -394,6 +422,9 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
       <Show when={props.handoff.priority === 'urgent'}>
         <span class="collab-badge collab-tone-warning">urgent</span>
       </Show>
+      <Show when={props.handoff.archived}>
+        <span class="collab-badge collab-muted">[archived]</span>
+      </Show>
       <Show when={props.handoff.freeze}>
         <span
           class="collab-badge collab-tone-danger"
@@ -408,27 +439,120 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
   );
 }
 
-function GroupView(props: { group: WorkspaceGroup; current: string }) {
+function SessionRow(props: {
+  session: BoardSession;
+  current: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const ctx = usePlugin();
-  const label = () => workspaceLabel(props.group.dir) || ctx.t('panel.global');
+  return (
+    <>
+      <button
+        type="button"
+        class="collab-row collab-session"
+        title={props.session.sid}
+        aria-expanded={props.expanded}
+        onClick={props.onToggle}
+      >
+        <span class="collab-caret">{props.expanded ? '▾' : '▸'}</span>
+        <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
+        <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
+        <span class="collab-badge">{props.session.agent}</span>
+        <SessionBadges session={props.session} />
+        <span class="collab-row-title">{props.session.title}</span>
+        <Show when={props.session.sid === props.current}>
+          <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
+        </Show>
+      </button>
+      <Show when={props.expanded}>
+        <div class="collab-detail">
+          <For each={props.session.spawned}>{child => <SpawnRow child={child} />}</For>
+          <For each={props.session.locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
+          <For each={props.session.handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
+          <For each={props.session.queue}>{item => <QueueRow item={item} />}</For>
+        </div>
+      </Show>
+    </>
+  );
+}
+
+function GroupView(props: {
+  group: BoardWorkspace;
+  current: string;
+  expanded: (key: string) => boolean;
+  onToggle: (key: string) => void;
+}) {
+  const ctx = usePlugin();
+  const label = () => workspaceLabel(props.group.workspace) || ctx.t('panel.global');
+  const archivedKey = () => `archived:${props.group.workspace}`;
   return (
     <section class="collab-group">
       <header class="collab-head">
-        <span class="collab-head-label" title={props.group.dir || undefined}>
+        <span class="collab-head-label" title={props.group.workspace || undefined}>
           {label()}
         </span>
         <span class="collab-muted">
-          {props.group.sessions.length ? ctx.plural('panel.sessions', props.group.sessions.length) : ''}
+          {ctx.t('panel.workspaceCounts', {
+            sessions: props.group.counts.sessions,
+            locks: props.group.counts.locks,
+            handoffs: props.group.counts.handoffs,
+            archived: props.group.counts.archived
+          })}
         </span>
       </header>
-      <For each={props.group.sessions}>{session => <SessionRow session={session} current={props.current} />}</For>
-      <Show when={props.group.locks.length}>
-        <div class="collab-sub">{ctx.t('panel.locks')}</div>
-        <For each={props.group.locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
+      <For each={props.group.sessions}>
+        {session => (
+          <SessionRow
+            session={session}
+            current={props.current}
+            expanded={props.expanded(`ses:${session.sid}`)}
+            onToggle={() => props.onToggle(`ses:${session.sid}`)}
+          />
+        )}
+      </For>
+      <Show when={props.group.archived.length}>
+        <button type="button" class="collab-archived" onClick={() => props.onToggle(archivedKey())}>
+          {props.expanded(archivedKey()) ? '▾' : '▸'} {ctx.t('panel.archived', { count: props.group.archived.length })}
+        </button>
+        <Show when={props.expanded(archivedKey())}>
+          <For each={props.group.archived}>
+            {session => (
+              <SessionRow
+                session={session}
+                current={props.current}
+                expanded={props.expanded(`ses:${session.sid}`)}
+                onToggle={() => props.onToggle(`ses:${session.sid}`)}
+              />
+            )}
+          </For>
+        </Show>
       </Show>
-      <Show when={props.group.handoffs.length}>
-        <div class="collab-sub">{ctx.t('panel.handoffs')}</div>
-        <For each={props.group.handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
+    </section>
+  );
+}
+
+/**
+ * Rows the board could not attach to any session row (a lease whose holder is
+ * gone, a hand-off from a session outside this snapshot, the caller's queue
+ * when it is not listed). 0.5.3's flat view showed them; the tree must not drop
+ * a row its own header counted. Same `boardOrphans` helper as the TUI.
+ */
+function OrphanView(props: { orphans: BoardOrphans; current: string }) {
+  const ctx = usePlugin();
+  return (
+    <section class="collab-group collab-orphans">
+      <Show when={props.orphans.locks.length}>
+        <div class="collab-sub">{ctx.t('panel.orphanLocks', { count: props.orphans.locks.length })}</div>
+        <For each={props.orphans.locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
+      </Show>
+      <Show when={props.orphans.handoffs.length}>
+        <div class="collab-sub">{ctx.t('panel.orphanHandoffs', { count: props.orphans.handoffs.length })}</div>
+        <For each={props.orphans.handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
+      </Show>
+      <Show when={props.orphans.queue.length}>
+        <div class="collab-sub">{ctx.t('panel.orphanQueue', { count: props.orphans.queue.length })}</div>
+        <For each={props.orphans.queue}>{item => <QueueRow item={item} />}</For>
       </Show>
     </section>
   );
@@ -438,7 +562,25 @@ function GroupView(props: { group: WorkspaceGroup; current: string }) {
 function PanelView(props: { session: { id: string } }) {
   const ctx = usePlugin();
   const store = storeFor(ctx);
-  const groups = createMemo(() => (store.state.data ? groupByWorkspace(store.state.data) : []));
+  // Expand/collapse lives here, not in the store: a 2 s poll replaces `data`
+  // and must not fold a row the user opened. Keys are `ses:<sid>` and
+  // `archived:<workspace>`.
+  const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
+  const isExpanded = (key: string): boolean => expanded().has(key);
+  const toggle = (key: string): void => {
+    setExpanded(previous => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const groups = createMemo(() =>
+    store.state.data ? buildBoard(store.state.data, [], Date.now(), props.session.id) : []
+  );
+  const orphans = createMemo(() => boardOrphans(store.state.data, groups()));
+  const hasOrphans = (): boolean =>
+    orphans().locks.length > 0 || orphans().handoffs.length > 0 || orphans().queue.length > 0;
 
   // 0.5.3 (R3): name the server the rows came from — remote only. The app's own
   // server is the default and would be noise (`@sidecar` on every window).
@@ -469,8 +611,20 @@ function PanelView(props: { session: { id: string } }) {
           </Show>
         }
       >
-        <Show when={groups().length} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
-          <For each={groups()}>{group => <GroupView group={group} current={props.session.id} />}</For>
+        <Show when={groups().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
+          <For each={groups().filter(group => group.sessions.length || group.archived.length)}>
+            {group => (
+              <GroupView
+                group={group}
+                current={props.session.id}
+                expanded={isExpanded}
+                onToggle={toggle}
+              />
+            )}
+          </For>
+          <Show when={hasOrphans()}>
+            <OrphanView orphans={orphans()} current={props.session.id} />
+          </Show>
         </Show>
         <div class="collab-footer">
           {ctx.t('panel.updated', { time: fmtClock(store.state.at) })} · {ctx.t('panel.readonly')}
@@ -577,6 +731,17 @@ export default Plugin.define({
       'panel.readonly': 'read-only',
       'panel.sessions.one': '{{count}} session',
       'panel.sessions.other': '{{count}} sessions',
+      'panel.workspaceCounts': '{{sessions}} sessions · {{locks}} leases · {{handoffs}} hand-offs · {{archived}} archived',
+      'panel.archived': 'Archived {{count}}',
+      'panel.badgeHeld': 'leases held',
+      'panel.badgeWaiting': 'leases queued',
+      'panel.badgeHandoffs': 'open hand-offs',
+      'panel.badgeQueue': 'my owner-queue items',
+      'panel.orphanLocks': 'Leases ({{count}}) · unclaimed',
+      'panel.orphanHandoffs': 'Open hand-offs ({{count}}) · unclaimed',
+      'panel.orphanQueue': 'Owner queue ({{count}}) · unclaimed',
+      'panel.seen': 'seen',
+      'panel.pending': 'pending',
       'panel.waiting.one': '{{count}} waiting',
       'panel.waiting.other': '{{count}} waiting',
       'pill.title': 'Collaboration leases',
@@ -613,6 +778,17 @@ export default Plugin.define({
       'panel.updated': '更新于 {{time}}',
       'panel.readonly': '只读',
       'panel.sessions.other': '{{count}} 个会话',
+      'panel.workspaceCounts': '{{sessions}} 会话 · {{locks}} 锁 · {{handoffs}} 交接 · {{archived}} 已归档',
+      'panel.archived': '已归档 {{count}}',
+      'panel.badgeHeld': '持有的锁',
+      'panel.badgeWaiting': '排队的锁',
+      'panel.badgeHandoffs': '未闭环交接',
+      'panel.badgeQueue': '我提交的队列项',
+      'panel.orphanLocks': '资源租约 ({{count}}) · 未归属',
+      'panel.orphanHandoffs': '未闭环交接 ({{count}}) · 未归属',
+      'panel.orphanQueue': '受保护目标队列 ({{count}}) · 未归属',
+      'panel.seen': '已读',
+      'panel.pending': '未读',
       'panel.waiting.other': '等待 {{count}}',
       'pill.title': '协作资源',
       'pill.held.other': '锁 {{count}}',

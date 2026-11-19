@@ -42,6 +42,7 @@ import type { Context, PanelInput } from '@opencode/plugin/tui/context';
 import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from './rpc.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
+import { buildBoard, boardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
 const POLL_MS = 2000;
@@ -91,6 +92,8 @@ type Tone = 'base' | 'muted' | 'success' | 'warning' | 'danger';
 interface Line {
   text: string;
   tone: Tone;
+  /** Expandable tree row (mouse + keymap target); absent for a plain line. */
+  key?: string;
 }
 
 /** One cell: cut to `width`, with an ellipsis when it had to be cut. */
@@ -328,14 +331,16 @@ function handoffLines(handoffs: SnapshotHandoff[], width: number): Line[] {
     const urgent = handoff.priority === 'urgent' ? ' [urgent]' : '';
     // 0.6.0 (`collab_freeze`): the same rule — one marker, no layout change.
     const frozen = handoff.freeze ? ` [frozen] ${fmtClock(handoff.freeze.until).slice(0, 5)}` : '';
+    // 0.5.0: the spawned session was archived — the row stays, the marker is added.
+    const archived = handoff.archived ? ' [archived]' : '';
     const text = narrow
-      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}${urgent}${frozen}`, width - 2)}`
+      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}${urgent}${frozen}${archived}`, width - 2)}`
       : `${tableRow([
           [handoff.bid, 16],
           [handoff.state, 9],
           [age, 8],
           [from, Math.max(6, width - 35)]
-        ])}${urgent}${frozen}`;
+        ])}${urgent}${frozen}${archived}`;
     // `open` = nobody has taken it yet; that is the row worth noticing.
     out.push({
       text,
@@ -379,6 +384,124 @@ function queueLines(queue: SnapshotQueueItem[], width: number): Line[] {
   return out;
 }
 
+/* ------------------------------------------------------------------- board tree */
+
+/** The last path segment of a workspace, without `node:path` (the TUI is a client). */
+function workspaceLabel(directory: string): string {
+  const parts = String(directory ?? '')
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  return parts.length ? parts[parts.length - 1]! : '';
+}
+
+/** One tree row; `key` makes it expandable (mouse + keymap target). */
+interface BoardRow {
+  text: string;
+  tone: Tone;
+  key?: string;
+}
+
+function sessionBadges(session: BoardSession): string {
+  const badges = [
+    session.badges.held ? `🔒${session.badges.held}` : '',
+    session.badges.waiting ? `⏳${session.badges.waiting}` : '',
+    session.badges.handoffs ? `‹${session.badges.handoffs}›` : '',
+    session.badges.queue ? `⇢${session.badges.queue}` : '',
+    session.archived ? '[archived]' : '',
+    session.frozen ? '[frozen]' : '',
+    session.urgent ? '[urgent]' : ''
+  ].filter(Boolean);
+  return badges.length ? `  ${badges.join(' ')}` : '';
+}
+
+function sessionTone(session: BoardSession): Tone {
+  if (session.archived) return 'muted';
+  if (session.frozen) return 'danger';
+  if (session.urgent) return 'warning';
+  return 'base';
+}
+
+/** The rows under one expanded session: `↳` children, then locks / hand-offs / queue. */
+function sessionDetailRows(session: BoardSession, indent: string): BoardRow[] {
+  const out: BoardRow[] = [];
+  for (const spawn of session.spawned) {
+    out.push({
+      text: `${indent}↳ ${shortSid(spawn.sid)}  ${spawn.state}${spawn.archived ? ' [archived]' : ''}${
+        spawn.title ? `  ${spawn.title}` : ''
+      }`,
+      tone: spawn.archived ? 'muted' : 'base'
+    });
+  }
+  for (const lock of session.locks) {
+    const holders = lock.holders.length ? lock.holders.map(shortSid).join(',') : 'free';
+    const ttl = lock.expiresInMs ? ` · 剩 ${fmtAge(lock.expiresInMs)}` : '';
+    const waited = lock.waiters ? ` · 等 ${lock.waiters}` : '';
+    out.push({ text: `${indent}🔒 ${lock.resource} · ${lock.mode} · ${holders}${ttl}${waited}`, tone: leaseTone(lock, session.sid) });
+  }
+  for (const handoff of session.handoffs) {
+    const urgent = handoff.priority === 'urgent' ? ' [urgent]' : '';
+    const frozen = handoff.freeze ? ` [frozen] ${fmtClock(handoff.freeze.until).slice(0, 5)}` : '';
+    const archived = handoff.archived ? ' [archived]' : '';
+    out.push({
+      text: `${indent}→ ${handoff.bid} · ${handoff.state} · 剩 ${fmtAge(handoff.ageMs)}${urgent}${frozen}${archived}`,
+      tone: handoff.freeze || handoff.priority === 'urgent' ? 'danger' : handoff.state === 'open' ? 'warning' : 'base'
+    });
+  }
+  for (const item of session.queue) {
+    const urgent = item.priority === 'urgent' ? ' [urgent]' : '';
+    out.push({
+      text: `${indent}⇢ ${item.queueId} · ${shortSid(item.target)} · ${item.seen ? 'seen' : 'pending'}${urgent}`,
+      tone: item.priority === 'urgent' ? 'danger' : item.seen ? 'muted' : 'base'
+    });
+  }
+  return out;
+}
+
+/**
+ * The three-layer tree (design §3): workspace header → session rows → expanded
+ * details, with `已归档 N` as the last section of each workspace (collapsed by
+ * default). Exactly one level of `↳` (a spawn is never recursive).
+ */
+function boardRows(board: BoardWorkspace[], expanded: Set<string>, width: number): BoardRow[] {
+  const rows: BoardRow[] = [];
+  const wide = width >= 56;
+  for (const workspace of board) {
+    const label = workspaceLabel(workspace.workspace) || '全局';
+    const counts =
+      `${workspace.counts.sessions} 会话 · ${workspace.counts.locks} 锁 · ` +
+      `${workspace.counts.handoffs} 交接 · ${workspace.counts.archived} 已归档`;
+    rows.push({
+      text: wide ? `${pad(label, 16)}  ${counts}` : `${label}  ${counts}`,
+      tone: 'muted'
+    });
+    for (const session of workspace.sessions) {
+      rows.push(...sessionRows(session, expanded, '  '));
+    }
+    if (workspace.archived.length) {
+      const key = `arch:${workspace.workspace}`;
+      const open = expanded.has(key);
+      rows.push({ text: `  ${open ? '▾' : '▸'} 已归档 ${workspace.archived.length}`, tone: 'muted', key });
+      if (open) {
+        for (const session of workspace.archived) rows.push(...sessionRows(session, expanded, '    '));
+      }
+    }
+  }
+  return rows;
+}
+
+function sessionRows(session: BoardSession, expanded: Set<string>, indent: string): BoardRow[] {
+  const key = `ses:${session.sid}`;
+  const open = expanded.has(key);
+  const row: BoardRow = {
+    text: `${indent}${open ? '▾' : '▸'} ${shortSid(session.sid)}  ${session.agent}  ${session.title}${sessionBadges(session)}`,
+    tone: sessionTone(session),
+    key
+  };
+  if (!open) return [row];
+  return [row, ...sessionDetailRows(session, `${indent}    `)];
+}
+
+
 /**
  * The whole panel as lines. Reading `panel.name` here (and in the caller's memo)
  * keeps it reactive: switching to another plugin's panel empties the list, and
@@ -393,7 +516,10 @@ function panelLines(
   state: TuiState,
   panel: PanelInput,
   sessions: FallbackSession[],
-  hostPending: number
+  hostPending: number,
+  board: BoardWorkspace[],
+  expanded: Set<string>,
+  selectedKey: string | undefined
 ): Line[] {
   if (panel.name !== PANEL) return [];
   const width = Math.max(24, Number(panel.width) || FALLBACK_WIDTH);
@@ -416,24 +542,55 @@ function panelLines(
     push(data ? '（显示上一份快照）' : '（仅显示本地会话列表）', 'muted');
   }
 
-  push(`资源租约 (${data?.locks.length ?? 0})`, 'muted');
-  if (data && data.locks.length) out.push(...leaseLines(data.locks, width, panel.sessionID));
-  else push(pending('（无租约）'), 'muted');
+  if (data) {
+    // The same three-layer tree the GUI renders (design §2/§3). Expansion is
+    // local UI state: a 2 s poll replaces `data` and never folds a row.
+    const rows = boardRows(board, expanded, width);
+    for (const row of rows) {
+      const selected = row.key !== undefined && row.key === selectedKey;
+      out.push({
+        text: selected ? `› ${row.text}` : row.text,
+        tone: selected ? 'success' : row.tone,
+        ...(row.key ? { key: row.key } : {})
+      });
+    }
 
-  push(`未闭环交接 (${data?.handoffs.length ?? 0})`, 'muted');
-  if (data && data.handoffs.length) out.push(...handoffLines(data.handoffs, width));
-  else push(pending('（无交接）'), 'muted');
+    // Compatibility with a snapshot whose `sessions` block is empty (an older
+    // server, a hand-built fixture): leases / hand-offs / queue items that no
+    // session row owns are still shown, never silently dropped. The same helper
+    // feeds the GUI's fallback section.
+    const orphans = boardOrphans(data, board);
+    if (orphans.locks.length) {
+      push(`资源租约 (${orphans.locks.length}) · 未归属`, 'muted');
+      out.push(...leaseLines(orphans.locks, width, panel.sessionID));
+    }
+    if (orphans.handoffs.length) {
+      push(`未闭环交接 (${orphans.handoffs.length}) · 未归属`, 'muted');
+      out.push(...handoffLines(orphans.handoffs, width));
+    }
+    if (!rows.length && !orphans.locks.length && !orphans.handoffs.length && !orphans.queue.length) {
+      push('（无协作活动）', 'muted');
+    }
+    if (orphans.queue.length) {
+      push(`受保护目标队列 (${orphans.queue.length}) · 未归属`, 'muted');
+      out.push(...queueLines(orphans.queue, width));
+    }
+  } else {
+    // No snapshot at all: the three blocks keep the old honest "unreachable"
+    // rows, and the host's own session list stands in for the tree.
+    push(`资源租约 (0)`, 'muted');
+    push(pending('（无租约）'), 'muted');
+    push(`未闭环交接 (0)`, 'muted');
+    push(pending('（无交接）'), 'muted');
+    push(`受保护目标队列 (0)`, 'muted');
+    push(pending('（无排队）'), 'muted');
 
-  push(`受保护目标队列 (${data?.queue.length ?? 0})`, 'muted');
-  if (data && data.queue.length) out.push(...queueLines(data.queue, width));
-  else push(pending('（无排队）'), 'muted');
-
-  // R6: no snapshot at all → the host's own session list, clearly labelled.
-  if (!data && state.error) {
-    push(`会话 (${sessions.length})`, 'muted');
-    for (const session of sessions) {
-      const title = clip(session.title, Math.max(8, width - 26));
-      push(`  ${session.busy ? '●' : '○'} ${shortSid(session.sid)} ${session.agent} ${title}`, session.busy ? 'success' : 'base');
+    if (state.error) {
+      push(`会话 (${sessions.length})`, 'muted');
+      for (const session of sessions) {
+        const title = clip(session.title, Math.max(8, width - 26));
+        push(`  ${session.busy ? '●' : '○'} ${shortSid(session.sid)} ${session.agent} ${title}`, session.busy ? 'success' : 'base');
+      }
     }
   }
 
@@ -446,6 +603,44 @@ function panelLines(
 function StatusPanel(props: { panel: PanelInput }) {
   const ctx = usePlugin();
   const store = storeFor(ctx);
+  // Expand/collapse + cursor are local UI state (never in the snapshot): the
+  // 2 s poll must not fold a row the user opened.
+  const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
+  const [cursor, setCursor] = createSignal(0);
+  const width = () => Math.max(24, Number(props.panel.width) || FALLBACK_WIDTH);
+  const board = createMemo(() =>
+    store.state.data ? buildBoard(store.state.data, [], Date.now(), props.panel.sessionID) : []
+  );
+  const selectable = createMemo(() =>
+    store.state.data ? boardRows(board(), expanded(), width()).flatMap(row => (row.key ? [row.key] : [])) : []
+  );
+  const selectedKey = () => {
+    const keys = selectable();
+    if (!keys.length) return undefined;
+    return keys[Math.min(cursor(), keys.length - 1)];
+  };
+  const toggle = (key: string): void => {
+    setExpanded(previous => {
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+  const move = (delta: number): void => {
+    const keys = selectable();
+    if (!keys.length) return;
+    setCursor(value => (value + delta + keys.length) % keys.length);
+  };
+  const toggleSelected = (): void => {
+    const key = selectedKey();
+    if (key) toggle(key);
+  };
+  const clickRow = (key: string): void => {
+    const index = selectable().indexOf(key);
+    if (index >= 0) setCursor(index);
+    toggle(key);
+  };
 
   // R7: the poll belongs to "this plugin's panel is the open one". Reading
   // `panel.name` / `panel.sessionID` makes the effect re-run when either
@@ -459,18 +654,49 @@ function StatusPanel(props: { panel: PanelInput }) {
     onCleanup(() => clearInterval(timer));
   });
 
+  // R4 (0.6.0): keyboard expansion, only while this panel owns the input.
+  // Register **once** at component scope: `PanelInput` is reactive props, and a
+  // layer created inside an effect would stack a new one on every name/focus
+  // change (then one `enter` toggles twice). The factory itself is reactive;
+  // the host disposes the layer when this component is disposed.
+  ctx.keymap.layer(() => ({
+    mode: 'global',
+    // `focused` is the host's own statement that this panel owns the input;
+    // a panel rendered in the background must not steal j/k/enter.
+    enabled: () => props.panel.name === PANEL && props.panel.focused === true,
+    commands: [
+      { id: 'collab.board.down', title: 'Collab 下一项', group: 'Collab', bind: 'j', run: () => move(1) },
+      { id: 'collab.board.up', title: 'Collab 上一项', group: 'Collab', bind: 'k', run: () => move(-1) },
+      { id: 'collab.board.toggle', title: 'Collab 展开/收起', group: 'Collab', bind: 'enter', run: () => toggleSelected() },
+      { id: 'collab.board.toggle-space', title: 'Collab 展开/收起', group: 'Collab', bind: 'space', run: () => toggleSelected() }
+    ]
+  }));
+
   const lines = createMemo(() =>
     panelLines(
       store.state,
       props.panel,
       fallbackSessions(ctx),
-      pendingCountOf(ctx.data?.session?.pending, props.panel.sessionID)
+      pendingCountOf(ctx.data?.session?.pending, props.panel.sessionID),
+      board(),
+      expanded(),
+      selectedKey()
     )
   );
 
   return (
     <box flexDirection="column">
-      <For each={lines()}>{line => <text fg={color(ctx, line.tone)}>{line.text}</text>}</For>
+      <For each={lines()}>
+        {line =>
+          line.key ? (
+            <box onMouseDown={() => clickRow(line.key!)}>
+              <text fg={color(ctx, line.tone)}>{line.text}</text>
+            </box>
+          ) : (
+            <text fg={color(ctx, line.tone)}>{line.text}</text>
+          )
+        }
+      </For>
     </box>
   );
 }

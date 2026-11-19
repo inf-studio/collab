@@ -86,15 +86,18 @@ function toSession(
   const sid = String(info?.id ?? '');
   if (!sid) return undefined;
   const state = sessionState(info);
-  if (state === 'archived') return undefined; // an archived session holds nothing a human watches
+  const archived = state === 'archived';
   const parent = info.parentID ?? info.parentId;
   return {
     sid,
     title: truncate(info.title ?? '(untitled)', 80),
     agent: String(info.agent ?? '?'),
+    // An archived session is not running: `busy` is false even when the host
+    // still carries the last clock values. The board files it under `已归档`.
     busy: state === 'busy',
     workspace: info?.location?.directory ?? workspace ?? '',
     ...(parent ? { parent: String(parent) } : {}),
+    ...(archived ? { archived: true } : {}),
     ...(frozen ? { frozen } : {})
   };
 }
@@ -127,6 +130,16 @@ function toHandoff(record: BroadcastRecord, now: number, freeze?: SnapshotFreeze
   // A decided hand-off is *closed*: the sidebar shows the open queue, not history.
   if (BCAST_DONE_STATES.includes(state)) return undefined;
   const createdAt = Number(record.createdAt ?? record.updatedAt ?? 0) || now;
+  // 0.6.0 (board): the spawn relation, from the claim that took the hand-off.
+  // `claim.kind` is the current shape; `expiredClaim` survives a spawn whose
+  // lease lapsed before anybody accepted (the same fallback `archive.ts` uses),
+  // so a `↳` line does not disappear when a human later took the bid over.
+  const claim = asObject(record.claim);
+  const expired = asObject(record.expiredClaim);
+  const spawned = String(
+    (claim.kind === 'spawn' ? claim.by : undefined) ?? (expired.kind === 'spawn' ? expired.by : undefined) ?? ''
+  );
+  const isSpawn = claim.kind === 'spawn' || expired.kind === 'spawn';
   return {
     bid,
     state,
@@ -139,6 +152,9 @@ function toHandoff(record: BroadcastRecord, now: number, freeze?: SnapshotFreeze
     ...(Number(record.archivedAt) > 0 ? { archived: true } : {}),
     // 0.6.0 (`collab_escalate`): read-only marker; the panel layout is unchanged.
     ...(asObject(record).priority === 'urgent' ? { priority: 'urgent' as const } : {}),
+    // 0.6.0 (board): `↳` relation, optional so an older server stays valid.
+    ...(isSpawn ? { kind: 'spawn' as const } : {}),
+    ...(spawned ? { spawned } : {}),
     // 0.6.0 (`collab_freeze`): the bid or its workspace is frozen (read-only).
     ...(freeze ? { freeze } : {})
   };

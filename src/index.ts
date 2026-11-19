@@ -11,6 +11,7 @@ import { freezeFor, freezeNotice, freezeNoticeText, markFreezeNotified, mergeFre
 import { createLineage } from './core/lineage.ts';
 import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
+import { buildBoard } from './core/board.ts';
 import { CollabState } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
 import {
@@ -284,6 +285,8 @@ export const __internals = {
   // with injected readers (no host, no `~/.config` directory).
   CollabState,
   buildSnapshot,
+  // Three-layer board (0.6.0) — the one pure derivation GUI / TUI share.
+  buildBoard,
   // The four-number vocabulary (0.6.0, R4) — pure, shared by GUI / TUI / tests.
   countsOf,
   pendingCountOf,

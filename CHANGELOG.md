@@ -104,6 +104,20 @@
   **60000**，**`0` 关闭**（回滚开关）。
 - **快照（`src/core/snapshot.ts` / `src/rpc.ts`）**：`SnapshotLock` 追加**可选** `waiterAgeMs` /
   `staleWaiters` / `stale`（schema 里均不在 `required`），老 server 的回包仍然有效。
+- **三层看板（新 `src/core/board.ts`，0.6.0）**：GUI 侧栏与 TUI `collab.status` 改为渲染**同一份纯派生**
+  `buildBoard(snapshot, freezes, now, me?)`：工作区 → 会话 → 明细。
+  - 工作区头 `N 会话 · M 锁 · K 交接 · A 已归档`；会话行带 `badges{held,waiting,handoffs,queue}` 与
+    `🔒n` / `‹m›` / `[archived]` / `[frozen]` / `[urgent]`；展开显示该会话的锁 / 交接 / owner 队列 +
+    `↳` 它拉起的会话（`handoff.kind === "spawn"`，子 id = `spawned ?? claimBy`，**只一层**）。
+  - 已归档会话从活跃列表分流到 `archived[]`，面板默认只显示 `已归档 N` 折叠段（交接行的 `[archived]` 仍显示）；
+    `urgent` 来自交接/队列项的 `priority`，`frozen` 来自快照标记或 freeze 列表（过期不显示）；归档行不再带 `busy`。
+  - 快照只追加**可选**字段：`SnapshotSession.archived?`、`SnapshotHandoff.kind?` / `spawned?`
+    （schema 均不在 `required`），方法签名不变；老快照缺字段即 `false` / 空，不崩、不显示空徽标。
+  - 无法归属到任何会话行的锁 / 交接 / 队列由 `boardOrphans` 兜底，GUI 与 TUI 都以 `· 未归属` 成段显示
+    （头部计数过的行不会在正文消失）。
+  - GUI 展开状态是 `createSignal<Set<string>>`（2 s 轮询不折叠）；TUI 同一棵树（缩进 2 空格、默认折叠、
+    `j`/`k` 移动、`enter`/`space` 切换、`onMouseDown` 点击行）；键盘层在组件顶层**只注册一次**，
+    面板切走再切回不会叠加。侧栏仍是四数一行。看板**零写操作**。
 - **启动日志**：`waiterTtlMs / waiterHeartbeat / dedupeWindowMs` 与既有 `archiveSpawned` 一并打印。
 
 ### Changed
@@ -158,6 +172,15 @@
   祖先继承、工作区冻结同时标会话与交接、无 `freezes` reader 的旧源不崩。
   变异（各还原，dist 打补丁后跑 S98）：① 去掉 `frozenBy` 的 lineage 走查 → 「祖先冻结」断言失败
   （子会话交接成功）；② 去掉 `readFreezes` 的 `until > now` 过滤 → 「到期」断言失败（1 live / 1 expired）。
+- 三层看板：新增 `test/board-shape.mjs`（13 条，纯派生）——2 workspace / 1 归档 / 1 spawn / 1 urgent /
+  1 frozen 的 `buildBoard` 结构、徽标、`↳` 关系、归档分流、证据优先级、老快照兼容；
+  `test/gui-panel.mjs` 17 条（默认折叠 / 点击展开 / `已归档` / `↳` / 未归属兜底 / 2 s 轮询确实替换且不折叠）、
+  `test/tui-render.mjs` 44 条（树头计数、徽标、默认无 `↳`、`enter` 展开、`j` 到已归档、鼠标点击展开、
+  面板切走再切回只有 1 个键盘层）、
+  `test/snapshot-shape.mjs` 50 条（`archived` / `kind` / `spawned` 可选字段与 schema）。
+  变异（各还原）：① spawned 用 `claimBy` 当父 → board「↳ 关系」失败；② 已归档默认展开 →
+  TUI「归档默认隐藏」与 GUI「默认折叠」两条同时失败；③ 删掉 GUI 未归属兜底 → PN7 失败；
+  ④ keymap 注册放回 effect → 层数 / 单次 toggle / 单步移动三条同时失败。
 
 ## [0.5.3] - 2026-11-19
 

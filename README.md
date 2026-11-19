@@ -68,12 +68,12 @@ TUI 走宿主给它的 `ctx.client`。
 
 | 位置 | 内容 |
 | --- | --- |
-| GUI 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age） |
+| GUI 侧栏 `collab` 面板 | 0.6.0 三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 活跃会话行（`▸/▾`、agent、徽标 `🔒n` / `‹m›` / `[archived]` / `[frozen]` / `[urgent]`）→ 点击展开锁 / 交接 / owner 队列 / `↳` 它拉起的会话；`已归档 N` 默认折叠。无法归属到任何会话的锁 / 交接 / 队列在末尾以 `· 未归属` 段兜底。展开状态是本地信号，2 s 轮询不重置 |
 | GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
 | GUI 会话头计数条 | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点。四个数的口径见下方「四个数」 |
 | GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本、platform 与数据源 `server=`）——这是「窗口到底加载了 GUI 没有」的自证 |
 | GUI 数据源（0.5.3） | **跟随会话所属服务器**：请求走 `ctx.sessions.current()?.server?.client`（远端会话 → 远端 server；没有 `server` 字段 → 回退 `ctx.client`）。跨服务器切换立即用新 server 的 client 重请求，上一台服务器的迟到回包**丢弃**；面板顶部在远端时显示 `@<server.id>`（本机不显示） |
-| TUI `collab.status` 面板 | 首行四个数 + 一行图例（0.6.0），再是三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
+| TUI `collab.status` 面板 | 首行四个数 + 一行图例（0.6.0），主体是与 GUI **同一份 `buildBoard`** 的三层树：工作区头 → 默认折叠的会话行（`🔒n` / `‹m›` / `[frozen]` / `[urgent]`）→ 展开后的锁 / 交接 / 队列 / `↳` 子会话；`已归档 N` 是末段，默认折叠。`j`/`k` 移动、`enter`/`space` 展开，鼠标点击行同样可展开 |
 | TUI 侧栏摘要 | 一行 `锁 N · 排 M · 待 K · 宿 J`（持有 / 排队 / 待受保护 / 宿主排队；`▸` 折叠 / `▾` 展开）；RPC 不可达时 `collab: n/a`。展开最多 4 行明细（锁 → 交接 → 队列）+ `+N`，明细行点击开面板 |
 | 刷新 | GUI：有会话挂载时每 2 s 一次（面板、pill、计数条共用**同一个**轮询与 store）。TUI：面板打开时每 2 s 一次，**关闭即停**；侧栏展开/折叠只渲染已有快照，**不新增轮询** |
 | 不可达 | GUI / TUI 都显示「不可达：<原因>」并保留上一份快照；TUI 一份快照都没有时退化为「宿主会话列表 + 仅显示本地会话」——不白屏也不崩 |

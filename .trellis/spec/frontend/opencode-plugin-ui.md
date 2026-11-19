@@ -110,6 +110,22 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - 宿主 pending 在 GUI 走 `SessionRef.server.data`，首次读取可 `sync()` 一次，失败静默 0（不要因此报错或加轮询）。
 - TUI 侧栏用紧凑写法 `锁 N · 排 M · 待 K · 宿 J`，面板首行给图例，避免再猜。
 
+## 2.7 看板：一份派生、两个渲染器
+
+- 派生只在 `src/core/board.ts`（纯函数）：`buildBoard()` 工作区→会话→明细，`boardOrphans()` 兜底
+  「无法归属到任何会话行」的锁/交接/队列。**GUI 与 TUI 必须调同一对函数**，禁止各自算。
+- **绝不静默丢行**：孤儿锁/交接/队列要单独成段（`· 未归属`），空态只在「树和孤儿段都为空」时显示。
+- spawn 关系只画一层：`handoff.kind === 'spawn' && from === sid`，子 id = `spawned ?? claimBy`。
+- 已归档默认折叠（底部 `已归档 N`），归档行的 `busy` 恒为 false（归档≠忙碌）。
+- 展开状态是**组件本地** `createSignal<Set<string>>`：2s 轮询换 `data` 不得折叠行；断言要证明
+  「期间确实发生过一次快照替换」。
+
+## 2.8 TUI 键盘层：组件体顶层注册一次
+
+`ctx.keymap.layer(...)` **不要**放进 `createEffect`：`PanelInput` 是 reactive props，effect 重跑会叠加层
+（实测切走再切回 → 2 个 enabled 层，`enter` toggle 两次、`j/k` 跳两格）。注册放组件体顶层，
+`enabled` 里读 reactive props 即可；测试断言「切走再切回只有 1 个带 `enter` 的 enabled 层」。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

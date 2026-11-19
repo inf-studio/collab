@@ -810,10 +810,10 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 {
   at: number,                              // 快照时间
   reachable: true,                         // server 真的回答了
-  sessions: [{ sid, title, agent, busy, workspace, parent? }],
+  sessions: [{ sid, title, agent, busy, workspace, parent?, frozen?, archived? }],
   locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, waiterAgeMs?, staleWaiters?, stale?, reason? }],
-  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title }],
-  queue:    [{ queueId, target, ageMs, summary, issuePath?, bid?, seen }]   // 0.4.2：{ session } 限定
+  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title, archived?, priority?, freeze?, kind?, spawned? }],
+  queue:    [{ queueId, target, ageMs, summary, issuePath?, bid?, seen, priority? }]   // 0.4.2：{ session } 限定
 }
 ```
 
@@ -837,7 +837,8 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
   不传 `session` 就是空数组——绝不扫全表，也不会把别人的请求列出来。`revokedAt` 的条目不出现。
 - **不新造状态**：`locks` 由 `stateOf()` 渲染（过期的在视图里就是 `free`，不落盘、不回收）；
   `handoffs` 只取未决的（`done` / `blocked` / `expired` 不算「未闭环」）。
-- 空记录（无人持有、无人排队）不出现；归档会话不列。
+- 空记录（无人持有、无人排队）不出现。0.6.0 起**归档会话仍留在快照里**（`archived:true`，`busy:false`），
+  由看板归入「已归档 N」折叠段，而不是像以前那样直接丢掉——丢弃会让「谁被归档了」无法从视图回答。
 
 **GUI UI**：
 
@@ -847,7 +848,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 会话头计数条（0.5.1；0.6.0 起四个数） | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（与面板**同一个 store / 同一次 2 s 轮询**；口径见上文「四个数」），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空；`宿主排队` 不经过 RPC，直接读宿主已同步的 `server.data.session.pending`（首次 `sync` 一次，失败静默 0） |
 | 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本、platform 与数据源 `server=`）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
 | 数据源（0.5.3） | 快照请求走**当前路由会话所属服务器**：`ctx.sessions.current()?.server?.client`，缺失（老宿主 / 无 `server`）时回退 `ctx.client`。远端会话 → 远端服务器的 `collab.state.snapshot`（`session` 参数仍是该远端会话 id）；本机会话 → 本机 sidecar。跨服务器/跨会话切换**立即**以新 client 重请求，上一台服务器的迟到回包**丢弃**（见 §11.11.5）；面板顶部在远端时显示 `@<server.id>`，本机不显示（避免噪音） |
-| 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
+| 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 0.6.0 三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 活跃会话行（`▸/▾` + agent + 徽标 `🔒n` / `⏳n` / `‹m›` / `⇢k` / `[archived]` / `[frozen]` / `[urgent]`）→ 点击展开该会话的锁 / 交接 / owner 队列 / `↳` 它拉起的会话（state + `[archived]`）；底部 `已归档 N` 默认折叠。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组。展开状态是面板本地信号，2 s 轮询不会折叠用户打开的节点 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
 | 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时停止**、恢复可见后立即以当前会话继续（监听 `visibilitychange`，0.5.2 起；以前读 `document.hidden` 不是响应式的，隐藏不真停、隐藏时挂载的窗口也永不启动）；面板、pill、计数条、标题栏 pill 共用一个轮询与一份 store。0.5.2（R-7）：本轮请求发出后会记住目标会话，回包时若路由会话已经变了（且未隐藏 / 未 dispose）就**补排一次**——切换瞬间恰好有请求在飞也不会把新会话的 `queue` 压到下一个 tick；`inFlight` 仍然防并发，未切换不补排。0.5.3：轮询 key 改为 `${server.id}\n${session.id}`，切换服务器即重建；请求前后比对 key，不一致的回包丢弃 |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
@@ -857,7 +858,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 位置 | 内容 |
 | --- | --- |
 | `/collab`（`ctrl+shift+l`，也在命令面板里） | 打开 `session.panel` 里的 **`collab.status`** 面板；没有打开的会话时提示「先打开一个会话」 |
-| 面板 | 首行时间戳 + **四个数**（`持有 · 排队 · 待受保护 · 宿主排队`）+ 一行图例（0.6.0）；三块等宽表格：`资源租约`（resource / mode / holders / 剩余 TTL / waiters）、`未闭环交接`（bid / state / age / from）、`受保护目标队列`（queueId / target / age / status）。窄终端（<48 列）每个条目拆成两行 |
+| 面板 | 首行时间戳 + **四个数**（`持有 · 排队 · 待受保护 · 宿主排队`）+ 一行图例（0.6.0）。0.6.0 起主体是**同一棵三层树**（工作区头 `N 会话 · M 锁 · K 交接 · A 已归档` → 默认折叠的会话行，带 `🔒n` / `‹m›` / `[frozen]` / `[urgent]` → 展开后的锁 / 交接 / 队列 / `↳` 子会话）；`已归档 N` 是每个工作区的末段，默认折叠。键盘 `j`/`k` 移动、`enter`/`space` 展开收起（只在面板拥有输入时生效），鼠标点击行同样可展开 |
 | 侧栏摘要（0.5.1；0.6.0 起四个数） | 一行 `▸ 锁 N · 排 M · 待 K · 宿 J`（紧凑写法的持有/排队/待受保护/宿主排队）；**点击摘要行**就地展开（`▾`）最多 4 行明细（锁 → 交接 → 队列，超出的以 `+N` 结尾），**点击明细行**打开 `/collab` 面板，再点摘要行折叠。RPC 不可达时 `collab: n/a`（不假装 0），展开行读 `collab: n/a · 点击打开面板` |
 | 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染）。侧栏只在挂载时 load 一次，**展开/折叠不新增轮询** |
 | 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
@@ -1016,6 +1017,36 @@ toast 的文案是 `ctx.t('probe.title')` + `ctx.t('probe.description')`，`vari
 - A→B 跨服务器切换 → 立即用 B 的 client；pill 数字从 A 的快照变成 B 的（不串台）；
 - A 慢回包在切到 B 之后到达 → **丢弃**：中途读到的是「无数据」而不是 A 的数字，最终是 B 的数字，且两个 client 各只被调用一次；
 - 无会话点 pill → toast 含 `server=this computer` 与版本，0 次 `layout.open`。
+
+
+#### 11.11.6 三层看板（0.6.0）：GUI / TUI 同一份派生
+
+快照是**三份独立列表**（会话 / 租约 / 交接 + 队列），平铺渲染时关系会丢：会话行不知道自己持有/排队/发起了什么，
+「谁拉起了谁」只存在于记录的 `claim.kind`，已归档会话干脆不出现。0.6.0 把关系集中到一个**纯函数**：
+
+```text
+core/board.ts  buildBoard(snapshot, freezes, now, me?)  →  Workspace[] → Session[]
+  Workspace: { workspace, sessions[], archived[], counts{sessions,locks,handoffs,archived} }
+  Session:   { sid,title,agent,busy,workspace,archived,frozen?,urgent,
+               locks[], handoffs[], spawned[{sid,state,archived,title?}], queue[],
+               badges{held,waiting,handoffs,queue} }
+```
+
+| 规则 | 口径 |
+| --- | --- |
+| 归属 | 租约：`holders` 或 `waiting` 含本 sid；交接：`from` 或 `claimBy` 是本 sid；队列：快照 `queue` 属于**调用方**（`mineFor(session)`），只挂到 `me` 那一行 |
+| `↳` 拉起 | `handoff.kind === "spawn" && from === sid`，子会话 id = `handoff.spawned ?? claimBy`（`expiredClaim` 的 spawn 也保留）；**只一层**，不递归 |
+| 归档 | `session.archived === true` 进 `archived[]`，不混入活跃列表；数量进工作区头的 `已归档 A`，面板默认只显示 `已归档 N` 折叠段 |
+| 冻结 / 加急 | `frozen` 优先用快照里的 `session.frozen`，否则按 `freezes` 的 session（含祖先）> workspace 优先级推导，过期即不显示；`urgent` = 该会话任一交接或队列项 `priority:"urgent"` |
+| 老快照 | `archived` / `kind` / `spawned` / `priority` 全部**可选**：缺失即 `false` / 空，不崩、不显示空徽标；快照方法签名不变 |
+| 只读 | 看板只归类已有数据，没有释放 / 归档 / 解冻按钮（R5）；展开状态是组件本地信号，轮询不重置 |
+
+- GUI：`PanelView` / `GroupView` 渲染 `buildBoard(...)`；会话行是按钮，`aria-expanded` 反映展开，明细缩进显示 `↳` / 锁 / 交接 / 队列。
+- TUI：`collab.status` 面板同一棵树（缩进 2 空格、默认折叠）；`j`/`k` 移动、`enter`/`space` 切换、`onMouseDown` 点击行；
+  侧栏（`sidebar.content`）仍是四数一行，不变。
+- 兼容：快照里 `sessions` 为空 / 某行的持有者或 `from` 不在列表（老 server、手写夹具、会话已结束、超出 `limit:100`）时，
+  未被任何会话行认领的租约 / 交接 / 队列在树后各自成段，标题注明 `· 未归属`（GUI 与 TUI 共用 `boardOrphans`），
+  不静默丢行；头部计数与正文因此始终一致。
 
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）

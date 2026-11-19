@@ -255,8 +255,8 @@ expect(
   JSON.stringify(snapshot.queue)
 );
 expect(
-  'C2 archived sessions are left out, sub-agents keep their parent',
-  snapshot.sessions.every(session => session.sid !== 'ses_gone') &&
+  'C2 archived sessions are kept with archived:true (the board files them under 已归档), sub-agents keep their parent',
+  snapshot.sessions.some(session => session.sid === 'ses_gone' && session.archived === true && !session.busy) &&
     snapshot.sessions.some(session => session.sid === 'ses_sub' && session.parent === 'ses_a1')
 );
 expect(
@@ -363,6 +363,15 @@ expect(
   snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.archived === true &&
     !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2')?.archived,
   JSON.stringify(snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4'))
+);
+// 0.6.0 (board): the spawn relation is additive — `kind` says this record
+// pulled a session in, `spawned` names it. Older records simply omit both.
+expect(
+  'C2 a spawn hand-off carries kind:"spawn" + spawned:<claim.by> (board ↳ relation)',
+  snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.kind === 'spawn' &&
+    snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.spawned === 'ses_a1' &&
+    !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000a1')?.kind,
+  JSON.stringify(snapshot.handoffs.map(handoff => [handoff.bid, handoff.kind, handoff.spawned]))
 );
 
 /* ------------------------------------------------- 4b. freeze markers (0.6.0) */
@@ -484,6 +493,24 @@ expect(
   Boolean(output.properties?.handoffs?.items?.properties?.archived) &&
     !output.properties?.handoffs?.items?.required?.includes('archived'),
   JSON.stringify(output.properties?.handoffs?.items?.properties)
+);
+// 0.6.0 (board): all three new fields are optional, so an older server's answer
+// stays valid and no consumer may assume they exist.
+expect(
+  'C2 the session/hand-off rows declare optional archived / kind / spawned (board, 0.6.0)',
+  Boolean(output.properties?.sessions?.items?.properties?.archived) &&
+    !output.properties?.sessions?.items?.required?.includes('archived') &&
+    Boolean(output.properties?.handoffs?.items?.properties?.kind) &&
+    Boolean(output.properties?.handoffs?.items?.properties?.spawned) &&
+    !output.properties?.handoffs?.items?.required?.includes('kind') &&
+    !output.properties?.handoffs?.items?.required?.includes('spawned'),
+  JSON.stringify({
+    session: output.properties?.sessions?.items?.properties?.archived,
+    handoff: [
+      output.properties?.handoffs?.items?.properties?.kind,
+      output.properties?.handoffs?.items?.properties?.spawned
+    ]
+  })
 );
 // 0.6.0 (`collab_freeze`): both markers are optional — an older server's answer
 // stays valid, and a consumer must tolerate their absence.
