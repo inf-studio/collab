@@ -608,12 +608,102 @@ await sleep(80);
 await treeMouseMounted.setup.renderOnce();
 const mouseFrame = await treeMouseMounted.setup.captureCharFrame();
 expect(
-  'R4 clicking a session row expands it (the same tree, mouse path)',
-  mouseFrame.includes('↳') && mouseFrame.includes('ses_child'),
+  'R4 clicking a session row expands it (the same tree, mouse path) and does not open the detail block',
+  mouseFrame.includes('↳') && mouseFrame.includes('ses_child') && !mouseFrame.includes('详情'),
   mouseFrame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
 );
 await treeMouseMounted.setup.dispose();
 await treeMouseCleanup();
+
+/* ------------------ 5c. R4 (0.8.0): selected row detail (3–5 lines) + esc ---- */
+
+// The tree is unchanged: at mount nothing is selected, so no `›` marker and no
+// detail block. `j`/`k` select a row and append 3–5 lines under the tree; `esc`
+// clears the selection without touching the tree's expand/collapse state.
+const detailHarness = harness({ snapshot: TREE });
+const detailCleanup = await plugin.setup(detailHarness.context);
+const detailMounted = await mount(detailHarness.context, () =>
+  detailHarness.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_a1' }))
+);
+const linesOf = frame => frame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+// `›` also ends the badges (`‹2›`), so the marker is "a line that *starts* with
+// `› `" — that is the only place `panelLines` puts it.
+const hasSelectionMarker = frame => linesOf(frame).some(line => line.startsWith('› '));
+const mountLines = linesOf(detailMounted.frame);
+
+expect(
+  'R4 at mount no row is selected: no › marker and no 详情 block (the tree renders as before)',
+  !hasSelectionMarker(detailMounted.frame) && !detailMounted.frame.includes('详情'),
+  mountLines.slice(0, 6).join(' | ')
+);
+
+hostPress(detailHarness, 'j');
+await detailMounted.setup.renderOnce();
+const selectedFrame = await detailMounted.setup.captureCharFrame();
+const selectedLines = linesOf(selectedFrame);
+expect(
+  'R4 j selects one row and appends 3–5 detail lines under the tree',
+  hasSelectionMarker(selectedFrame) &&
+    selectedFrame.includes('详情 ses_child') &&
+    selectedLines.length - mountLines.length >= 3 &&
+    selectedLines.length - mountLines.length <= 5,
+  `${mountLines.length} → ${selectedLines.length} lines: ${selectedLines.filter(line => line.includes('详情')).join(' | ')}`
+);
+expect(
+  'R4 the detail is header + counters + item rows (锁 / 交接 / 队列 / 拉起), from the same derivation',
+  selectedFrame.includes('0 持有 · 0 排队 · 1 交接 · 0 队列 · 0 拉起') &&
+    selectedFrame.includes('→ b_tree_spawn'),
+  selectedLines.slice(-5).join(' | ')
+);
+
+hostPress(detailHarness, 'k');
+await detailMounted.setup.renderOnce();
+const backToFrame = await detailMounted.setup.captureCharFrame();
+expect(
+  'R4 k moves the selection back one row (details follow the selected session)',
+  backToFrame.includes('详情 ses_a1') && backToFrame.includes('1 持有 · 0 排队 · 2 交接 · 1 队列 · 1 拉起'),
+  linesOf(backToFrame).filter(line => line.includes('详情')).join(' | ')
+);
+// The item rows follow the documented order (locks → hand-offs → queue → `↳`),
+// capped at three with `… +N` — ses_a1 has 5 rows, so the spawn never shows.
+const detailBlock = frame => {
+  const rows = linesOf(frame);
+  const start = rows.findIndex(line => line.includes('详情 '));
+  return start < 0 ? [] : rows.slice(start);
+};
+expect(
+  'R4 the detail rows are ordered locks → hand-offs → … +N (↳ last, truncated here)',
+  detailBlock(backToFrame)[2]?.includes('🔒 named:tree-window') &&
+    detailBlock(backToFrame)[3]?.includes('→ b_tree_spawn') &&
+    detailBlock(backToFrame)[4]?.includes('… +3') &&
+    !detailBlock(backToFrame).slice(0, 5).some(line => line.includes('↳')),
+  detailBlock(backToFrame).slice(0, 5).join(' | ')
+);
+
+hostPress(detailHarness, 'escape');
+await detailMounted.setup.renderOnce();
+const clearedFrame = await detailMounted.setup.captureCharFrame();
+expect(
+  'R4 esc clears the selection: no › marker, no detail block, the tree is unchanged',
+  !hasSelectionMarker(clearedFrame) && !clearedFrame.includes('详情') && clearedFrame.includes('▸ ses_a1'),
+  linesOf(clearedFrame).slice(0, 6).join(' | ')
+);
+
+// R4's detail block belongs to `j/k` only: `enter` keeps its 0.6.0 meaning
+// (expand/collapse) and must not open a second copy of the same rows.
+hostPress(detailHarness, 'enter');
+await detailMounted.setup.renderOnce();
+const enterFrame = await detailMounted.setup.captureCharFrame();
+expect(
+  'R4 enter expands the row but opens no detail block (only j/k selects)',
+  enterFrame.includes('↳') &&
+    enterFrame.includes('▾ ses_a1') &&
+    !enterFrame.includes('详情') &&
+    !hasSelectionMarker(enterFrame),
+  linesOf(enterFrame).filter(line => line.includes('▾ ses_a1') || line.includes('详情')).join(' | ')
+);
+await detailMounted.setup.dispose();
+await detailCleanup();
 
 /* ------------------------------------------------------------------- 6. sidebar */
 

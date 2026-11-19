@@ -803,7 +803,7 @@ collab_unlock { resource:"test-window", confirm:true }
 
 活的心跳（< TTL）仍按 FIFO 排队，不会被插队；只有 `waiterTtlMs` 设到上限 60min 才接近旧行为。
 
-### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2 / 0.5.3 / 0.6.0，experimental）
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2 / 0.5.3 / 0.6.0 / 0.8.0，experimental）
 
 > GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
 > `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
@@ -869,7 +869,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 会话头计数条（0.5.1；0.6.0 起四个数） | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（与面板**同一个 store / 同一次 2 s 轮询**；口径见上文「四个数」），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空；`宿主排队` 不经过 RPC，直接读宿主已同步的 `server.data.session.pending`（首次 `sync` 一次，失败静默 0） |
 | 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本、platform 与数据源 `server=`）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
 | 数据源（0.5.3） | 快照请求走**当前路由会话所属服务器**：`ctx.sessions.current()?.server?.client`，缺失（老宿主 / 无 `server`）时回退 `ctx.client`。远端会话 → 远端服务器的 `collab.state.snapshot`（`session` 参数仍是该远端会话 id）；本机会话 → 本机 sidecar。跨服务器/跨会话切换**立即**以新 client 重请求，上一台服务器的迟到回包**丢弃**（见 §11.11.5）；面板顶部在远端时显示 `@<server.id>`，本机不显示（避免噪音） |
-| 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 0.6.0 三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 活跃会话行（`▸/▾` + agent + 徽标 `🔒n` / `⏳n` / `‹m›` / `⇢k` / `[archived]` / `[frozen]` / `[urgent]`）→ 点击展开该会话的锁 / 交接 / owner 队列 / `↳` 它拉起的会话（state + `[archived]`）；底部 `已归档 N` 默认折叠。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组。展开状态是面板本地信号，2 s 轮询不会折叠用户打开的节点 |
+| 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 0.8.0 **主从布局**（§11.11.7）：左列表 `320px` / 右详情 `1fr`（CSS grid），窄窗口（`≤640px`，即 `max-width:640px`）回落单栏。左列表仍是 0.6.0 的三层结构：工作区头（`N 会话 · M 锁 · K 交接 · A 已归档`）→ 活跃会话行（agent + 徽标 `🔒n` / `⏳n` / `‹m›` / `⇢k` / `[archived]` / `[frozen]` / `[urgent]`）→ `已归档 N` 折叠段。点行 = **单选**该会话（`›` 高亮 + 右详情），不再行内展开；右详情自上而下是会话头（标题 / agent / **完整 sid** / 徽标）→ 关系图槽位 → 动作行槽位 → items（锁 / 交接 / owner 队列 / `↳` 拉起的会话）。选中是组件本地信号，2 s 轮询换快照**不会重置**；选中的会话从快照消失才清空并 toast「该会话已不在快照中」。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
 | composer pill | 当前会话「锁 N · 等待 M」；`success` 只持有 / `warning` 排第 1 位 / `danger` 排在更后面。展开是逐条租约（只显示，不可操作） |
 | 刷新 | 有会话挂载时每 2 s 一次；**窗口隐藏时停止**、恢复可见后立即以当前会话继续（监听 `visibilitychange`，0.5.2 起；以前读 `document.hidden` 不是响应式的，隐藏不真停、隐藏时挂载的窗口也永不启动）；面板、pill、计数条、标题栏 pill 共用一个轮询与一份 store。0.5.2（R-7）：本轮请求发出后会记住目标会话，回包时若路由会话已经变了（且未隐藏 / 未 dispose）就**补排一次**——切换瞬间恰好有请求在飞也不会把新会话的 `queue` 压到下一个 tick；`inFlight` 仍然防并发，未切换不补排。0.5.3：轮询 key 改为 `${server.id}\n${session.id}`，切换服务器即重建；请求前后比对 key，不一致的回包丢弃 |
 | 不可达 | RPC 被 reject（server 停 / 插件禁用 / 版本不匹配）→ 顶部「server 不可达：<原因>」，**保留上一份快照**；server 部分与工具完全不受影响 |
@@ -879,7 +879,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 位置 | 内容 |
 | --- | --- |
 | `/collab`（`ctrl+shift+l`，也在命令面板里） | 打开 `session.panel` 里的 **`collab.status`** 面板；没有打开的会话时提示「先打开一个会话」 |
-| 面板 | 首行时间戳 + **四个数**（`持有 · 排队 · 待受保护 · 宿主排队`）+ 一行图例（0.6.0）。0.6.0 起主体是**同一棵三层树**（工作区头 `N 会话 · M 锁 · K 交接 · A 已归档` → 默认折叠的会话行，带 `🔒n` / `‹m›` / `[frozen]` / `[urgent]` → 展开后的锁 / 交接 / 队列 / `↳` 子会话）；`已归档 N` 是每个工作区的末段，默认折叠。键盘 `j`/`k` 移动、`enter`/`space` 展开收起（只在面板拥有输入时生效），鼠标点击行同样可展开 |
+| 面板 | 首行时间戳 + **四个数**（`持有 · 排队 · 待受保护 · 宿主排队`）+ 一行图例（0.6.0）。0.6.0 起主体是**同一棵三层树**（工作区头 `N 会话 · M 锁 · K 交接 · A 已归档` → 默认折叠的会话行，带 `🔒n` / `‹m›` / `[frozen]` / `[urgent]` → 展开后的锁 / 交接 / 队列 / `↳` 子会话）；`已归档 N` 是每个工作区的末段，默认折叠。键盘 `j`/`k` 移动、`enter`/`space` 展开收起（只在面板拥有输入时生效），鼠标点击行同样可展开。0.8.0：`j`/`k` **选中**某行后，树下方追加 3–5 行该会话详情（`详情 …` + 五个计数 + 最多 3 条锁/交接/队列/`↳`，超出以 `… +N` 结尾），`esc` 清除选中；`enter`/`space`/鼠标点击只做 0.6.0 的展开/收起，不打开详情。挂载时未选中，树与 0.6.0 逐字一致 |
 | 侧栏摘要（0.5.1；0.6.0 起四个数） | 一行 `▸ 锁 N · 排 M · 待 K · 宿 J`（紧凑写法的持有/排队/待受保护/宿主排队）；**点击摘要行**就地展开（`▾`）最多 4 行明细（锁 → 交接 → 队列，超出的以 `+N` 结尾），**点击明细行**打开 `/collab` 面板，再点摘要行折叠。RPC 不可达时 `collab: n/a`（不假装 0），展开行读 `collab: n/a · 点击打开面板` |
 | 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染）。侧栏只在挂载时 load 一次，**展开/折叠不新增轮询** |
 | 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
@@ -1072,6 +1072,40 @@ core/board.ts  buildBoard(snapshot, freezes, now, me?)  →  Workspace[] → Ses
   `src/core/freeze.ts` 再导出给服务端调用方，`src/core/board.ts` 直接用它——board 里不再有
   `until` / session-vs-workspace 的第二份判断（纯模块不含任何 `node:` 导入，GUI bundle 才装得下）。
 
+
+#### 11.11.7 看板主从布局（0.8.0，`board2-layout`）
+
+0.7.0 的看板是「单栏 + 行内展开」：会话一多就要反复折叠，详情和列表抢同一列。0.8.0 把 GUI 面板拆成
+**左列表 / 右详情**，并给随后两个子任务（`board2-graph` 关系图、`board2-actions` 快捷动作）留好槽位。
+
+```text
+PanelView                       （唯一的 2 s store 仍在这里；不新增轮询）
+ └ .collab-split                CSS grid：320px + minmax(0,1fr)
+    ├ .collab-sidebar           buildBoard() 的树（工作区 → 会话 → 已归档折叠段）+ 未归属段
+    └ .collab-detail-pane       （窄屏 ≤640px 时与 sidebar 二选一）
+       ├ .collab-back           「← 返回列表」（仅窄屏）
+       ├ DetailHeader           标题 / agent / 完整 sid / 徽标
+       ├ GraphSlot              `data-collab-slot="graph"`（空，零高；关系图子任务挂这里）
+       ├ ActionRow              `data-collab-slot="actions"`（空；动作子任务挂这里）
+       └ DetailItems            锁 → 交接 → owner 队列 → `↳` 拉起的会话（复用 board.ts 派生）
+```
+
+| 规则 | 口径 |
+| --- | --- |
+| 单选 | `createSignal<string \| null>`（按 **sid**，跨快照稳定）；选中的行加 `collab-session-selected` 与 `›`，再点同一行 = 取消 |
+| 轮询不重置 | 选中/展开/窄屏判定都是**组件本地信号**；`sharedStore` 每 2 s 换 `data` 不触碰它们（测试用 `data-collab-at` 计数证明「期间确实换过一次快照」） |
+| 消失清空 | `createEffect` 检查选中的 sid 是否仍在 `buildBoard()` 的活跃或已归档列表里；不在才清空 + `ctx.toast.show`「该会话已不在快照中」。**没有快照**（adopt / 一次失败）不算消失——保留行，由横幅解释 |
+| 归档 | 会话被归档后**仍存在**于快照与 `archived[]`，详情继续显示并带 `[archived]`；只有真的离开快照才清空 |
+| 窄窗口 | `matchMedia('(max-width: 640px)')`（没有 `matchMedia` 的宿主 = 宽屏）：单栏时 `selected ? 详情 : 列表`，详情顶部给「← 返回列表」；CSS 里同一断点把 grid 收成一列（`@media (max-width:640px)`） |
+| 槽位 | `GraphSlot` / `ActionRow` 现在渲染**空元素**（`data-collab-slot`），不是 `null`：下一个子任务在原地挂载，不重排布局；两者 `min-height:0`，今天不占高度 |
+| 只读 | 本子任务不引入任何写路径：新增的 DOM 事件只有「选中 / 返回列表」两个本地信号写操作 |
+
+**TUI**（树不变）：`j`/`k` 移动光标即**选中**（`esc` 清除），树下方追加 3–5 行
+`详情 <sid> · <agent> · <标题>` + `N 持有 · N 排队 · N 交接 · N 队列 · N 拉起` + 最多 3 条明细
+（锁 / 交接 / 队列 / `↳`，超出以 `… +N` 结尾）。挂载时 `active=false`：没有 `›` 也没有详情块，
+0.6.0 的树断言逐字不变；`enter`/`space` 与鼠标点击保持 0.6.0 语义（只展开/收起，**不**打开详情块），`escape` 只清除选中。
+
+**回滚**：`git restore -- src/gui.tsx src/tui.tsx test/gui-panel.mjs test/tui-render.mjs`；没有运行时开关。
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

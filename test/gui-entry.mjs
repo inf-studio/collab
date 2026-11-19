@@ -317,7 +317,15 @@ const keys = [
   'titlebar.title',
   'probe.title',
   'probe.description',
-  'panel.source'
+  'panel.source',
+  'panel.pick',
+  'panel.back',
+  'panel.selectedGone',
+  'panel.detailLocks',
+  'panel.detailHandoffs',
+  'panel.detailQueue',
+  'panel.detailSpawned',
+  'panel.detailEmpty'
 ];
 for (const locale of ['en', 'zh']) {
   const missing = keys.filter(key => typeof plugin.i18n?.[locale]?.[key] !== 'string');

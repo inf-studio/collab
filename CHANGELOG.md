@@ -3,6 +3,33 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+> 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节先收 `board2-layout`
+> （主从布局，只读）；版本号由父任务在三个子任务齐了之后统一发。
+
+### Added
+
+- **看板主从布局（0.8.0，`board2-layout`）**：GUI 的 `collab` 面板从「单栏 + 行内展开」拆成
+  **左列表（CSS grid `320px`）/ 右详情（`1fr`）**。左列表仍是 0.6.0 的三层树（工作区头 → 会话行 →
+  `已归档 N` 折叠段 + `· 未归属` 兜底），点行改为**单选**（`›` + `collab-session-selected`），不再行内展开。
+  - 右详情自上而下：`DetailHeader`（标题 / agent / **完整 sid** / `[archived]` / `[frozen]` / `[urgent]`）→
+    `GraphSlot` → `ActionRow` → `DetailItems`（锁 / 交接 / owner 队列 / `↳` 拉起的会话，复用 `core/board.ts`
+    的派生）。两个槽位渲染**空元素**（`data-collab-slot="graph"` / `"actions"`，`min-height:0`），
+    供 `board2-graph` / `board2-actions` 原地挂载，不重排布局、今天不占高度。
+  - 选中是 `createSignal<string | null>`（按 **sid**），组件内存：2 s 轮询换 `data` **不重置**选中
+    （测试用 `data-collab-at` 计数证明期间确实换过快照）；选中的会话离开快照（活跃与已归档都找不到）才
+    清空并 `toast`「该会话已不在快照中」；一次失败/没有快照不算消失。
+  - 窄窗口（`matchMedia('(max-width: 640px)')`，没有 `matchMedia` 的宿主按宽屏）：单栏回落，
+    `selected ? 详情 : 列表`，详情顶部「← 返回列表」；CSS 同一断点把 grid 收成一列。
+- **TUI 选中行详情（0.8.0，`board2-layout`）**：树本身不变。`j`/`k` 移动光标即选中，树下方追加
+  **3–5 行**详情（`详情 <sid> · <agent> · <标题>` + `N 持有 · N 排队 · N 交接 · N 队列 · N 拉起` +
+  最多 3 条锁/交接/队列/`↳`，超出以 `… +N` 结尾）；`escape` 清除选中。挂载时未选中，
+  所以 0.6.0 的树断言逐字不变（`enter`/`space` 与鼠标点击仍只展开/收起，**不**打开详情块）。
+- **测试**：`test/gui-panel.mjs` 17 → 34（分栏结构、槽位元素、点选联动、详情内容与顺序、轮询计数证明、
+  消失清空 + toast、窄屏单栏 + 返回列表）；`test/tui-render.mjs` 49 → 56（挂载无选中、`j` 后 3–5 行、
+  计数与明细行、`k` 跟随、`esc` 清除）。工具数与快照契约不变，仍无写路径。
+
 ## [0.7.0] - 2026-11-19
 
 > 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、

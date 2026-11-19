@@ -137,6 +137,14 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   不要给缺 `text` 或 `kind:"note"` 的写法（实测停在 `acked`，看板一直 open）。peer 无 thread 时给
   `collab_send { text:"[handoff] DONE|BLOCKED <bid> <摘要>" }`。
 
+## 2.10 看板主从布局
+
+- **GUI 分栏**：左列表（320px 左右）/ 右详情（自适应）；`≤640px`（`max-width:640px`）回落单栏——选中后详情替换列表并给「← 返回列表」。
+- **右详情顺序固定**：`会话头 → 图槽（GraphSlot）→ 动作槽（ActionRow）→ items`；两个槽位必须是**真实占位元素**（带 `data-collab-slot`），后续子任务原地挂载。
+- **选中是本地 signal（按 sid）**：2s 轮询换快照**不得重置**；会话从「活跃 + 归档」都消失才清空并 toast；拉取失败/暂无快照不算消失。
+- **TUI**：树不变；只有 `j/k` 打开下方 3–5 行详情，`esc` 清除；`enter/space/click` 只做展开，不再附带「激活详情」。
+- **测试要点**：槽位顺序用直接子元素类名数组逐字比较；断点用可注入 `matchMedia` 夹住 `639`（单栏）/`641`（分栏）两侧——否则改数值/换顺序都能全绿。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

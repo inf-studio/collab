@@ -1,0 +1,1 @@
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "看板/注入/轮询约定"}\n{"file": ".trellis/spec/frontend/component-guidelines.md", "reason": "组件拆分与渲染约定"}\n{"file": ".trellis/spec/frontend/state-management.md", "reason": "本地状态与轮询"}\n

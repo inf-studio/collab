@@ -29,6 +29,9 @@
  *     a banner; with no snapshot at all the panel falls back to the host's own
  *     session list plus an explicit "unreachable" line — never a blank pane, and
  *     never a crash of the TUI.
+ *   - **Selection is local** (0.8.0): `j`/`k` select a row and append 3–5
+ *     detail lines under the tree, `escape` clears it. The flag is component
+ *     memory, so the 2 s poll neither moves the cursor nor drops the detail.
  *   - **Lines, not nested slots**: OpenTUI's reconciler throws on a bare text
  *     node inside a `box` ("Orphan text error"), and Solid's universal renderer
  *     turns `undefined` (an empty `<Show>`) into exactly that `""`. So the body
@@ -421,40 +424,62 @@ function sessionTone(session: BoardSession): Tone {
   return 'base';
 }
 
-/** The rows under one expanded session: `↳` children, then locks / hand-offs / queue. */
-function sessionDetailRows(session: BoardSession, indent: string): BoardRow[] {
-  const out: BoardRow[] = [];
-  for (const spawn of session.spawned) {
-    out.push({
-      text: `${indent}↳ ${shortSid(spawn.sid)}  ${spawn.state}${spawn.archived ? ' [archived]' : ''}${
-        spawn.title ? `  ${spawn.title}` : ''
-      }`,
-      tone: spawn.archived ? 'muted' : 'base'
-    });
-  }
-  for (const lock of session.locks) {
+/** One `↳` child row (a session this one pulled in). */
+function spawnRows(session: BoardSession, indent: string): BoardRow[] {
+  return session.spawned.map(spawn => ({
+    text: `${indent}↳ ${shortSid(spawn.sid)}  ${spawn.state}${spawn.archived ? ' [archived]' : ''}${
+      spawn.title ? `  ${spawn.title}` : ''
+    }`,
+    tone: spawn.archived ? 'muted' : 'base'
+  }));
+}
+
+function lockRows(session: BoardSession, indent: string): BoardRow[] {
+  return session.locks.map(lock => {
     const holders = lock.holders.length ? lock.holders.map(shortSid).join(',') : 'free';
     const ttl = lock.expiresInMs ? ` · 剩 ${fmtAge(lock.expiresInMs)}` : '';
     const waited = lock.waiters ? ` · 等 ${lock.waiters}` : '';
-    out.push({ text: `${indent}🔒 ${lock.resource} · ${lock.mode} · ${holders}${ttl}${waited}`, tone: leaseTone(lock, session.sid) });
-  }
-  for (const handoff of session.handoffs) {
+    return {
+      text: `${indent}🔒 ${lock.resource} · ${lock.mode} · ${holders}${ttl}${waited}`,
+      tone: leaseTone(lock, session.sid)
+    };
+  });
+}
+
+function handoffRows(session: BoardSession, indent: string): BoardRow[] {
+  return session.handoffs.map(handoff => {
     const urgent = handoff.priority === 'urgent' ? ' [urgent]' : '';
     const frozen = handoff.freeze ? ` [frozen] ${fmtClock(handoff.freeze.until).slice(0, 5)}` : '';
     const archived = handoff.archived ? ' [archived]' : '';
-    out.push({
+    return {
       text: `${indent}→ ${handoff.bid} · ${handoff.state} · 剩 ${fmtAge(handoff.ageMs)}${urgent}${frozen}${archived}`,
       tone: handoff.freeze || handoff.priority === 'urgent' ? 'danger' : handoff.state === 'open' ? 'warning' : 'base'
-    });
-  }
-  for (const item of session.queue) {
+    };
+  });
+}
+
+function queueRows(session: BoardSession, indent: string): BoardRow[] {
+  return session.queue.map(item => {
     const urgent = item.priority === 'urgent' ? ' [urgent]' : '';
-    out.push({
+    return {
       text: `${indent}⇢ ${item.queueId} · ${shortSid(item.target)} · ${item.seen ? 'seen' : 'pending'}${urgent}`,
       tone: item.priority === 'urgent' ? 'danger' : item.seen ? 'muted' : 'base'
-    });
-  }
-  return out;
+    };
+  });
+}
+
+/**
+ * The rows under one expanded session: `↳` children first (a spawn is the reason
+ * the row exists), then locks / hand-offs / queue. The selected-row detail block
+ * below uses the **documented** order instead (locks → hand-offs → queue → `↳`).
+ */
+function sessionDetailRows(session: BoardSession, indent: string): BoardRow[] {
+  return [
+    ...spawnRows(session, indent),
+    ...lockRows(session, indent),
+    ...handoffRows(session, indent),
+    ...queueRows(session, indent)
+  ];
 }
 
 /**
@@ -499,6 +524,51 @@ function sessionRows(session: BoardSession, expanded: Set<string>, indent: strin
   };
   if (!open) return [row];
   return [row, ...sessionDetailRows(session, `${indent}    `)];
+}
+
+/** The session behind a `ses:<sid>` row key (`arch:` folds have no session). */
+function sessionByKey(board: BoardWorkspace[], key: string | undefined): BoardSession | undefined {
+  if (!key || !key.startsWith('ses:')) return undefined;
+  const sid = key.slice('ses:'.length);
+  for (const workspace of board) {
+    const hit = [...workspace.sessions, ...workspace.archived].find(session => session.sid === sid);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/**
+ * R4 (0.8.0): the selected row's detail, **3–5 lines** under the tree — a header,
+ * the counters, then up to three item rows in the documented order
+ * (locks → hand-offs → queue → `↳` spawned; the inline expansion keeps its own
+ * order). A row that overflows ends in `… +N` instead of growing without bound;
+ * an empty session still says so (three lines, never two).
+ */
+function detailLines(session: BoardSession, width: number): Line[] {
+  const counts =
+    `${session.badges.held} 持有 · ${session.badges.waiting} 排队 · ` +
+    `${session.badges.handoffs} 交接 · ${session.badges.queue} 队列 · ${session.spawned.length} 拉起`;
+  const out: Line[] = [
+    {
+      text: clip(`详情 ${shortSid(session.sid)} · ${session.agent} · ${session.title}`, width),
+      tone: 'muted'
+    },
+    { text: clip(`  ${counts}`, width), tone: 'muted' }
+  ];
+  const rows = [
+    ...lockRows(session, '  '),
+    ...handoffRows(session, '  '),
+    ...queueRows(session, '  '),
+    ...spawnRows(session, '  ')
+  ];
+  if (!rows.length) {
+    out.push({ text: '  （无锁 / 交接 / 队列 / 拉起）', tone: 'muted' });
+    return out;
+  }
+  const shown = rows.slice(0, 3);
+  if (rows.length > 3) shown[2] = { text: `  … +${rows.length - 2}`, tone: 'muted' };
+  out.push(...shown);
+  return out;
 }
 
 
@@ -555,6 +625,11 @@ function panelLines(
       });
     }
 
+    // R4 (0.8.0): the selected row's detail, directly under the tree. Only a
+    // `ses:` row has one; an `arch:` fold row selected by `j/k` adds nothing.
+    const selectedSession = sessionByKey(board, selectedKey);
+    if (selectedSession) out.push(...detailLines(selectedSession, width));
+
     // Compatibility with a snapshot whose `sessions` block is empty (an older
     // server, a hand-built fixture): leases / hand-offs / queue items that no
     // session row owns are still shown, never silently dropped. The same helper
@@ -607,6 +682,11 @@ function StatusPanel(props: { panel: PanelInput }) {
   // 2 s poll must not fold a row the user opened.
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
   const [cursor, setCursor] = createSignal(0);
+  // R4 (0.8.0): a row counts as *selected* only after `j`/`k`. `esc` clears it.
+  // `enter`/`space` and a mouse click keep their 0.6.0 meaning (expand / collapse
+  // the row) and do **not** open the detail block: the tree already renders those
+  // rows inline, and doubling them under the tree would be noise.
+  const [active, setActive] = createSignal(false);
   const width = () => Math.max(24, Number(props.panel.width) || FALLBACK_WIDTH);
   const board = createMemo(() =>
     store.state.data ? buildBoard(store.state.data, [], Date.now(), props.panel.sessionID) : []
@@ -614,11 +694,12 @@ function StatusPanel(props: { panel: PanelInput }) {
   const selectable = createMemo(() =>
     store.state.data ? boardRows(board(), expanded(), width()).flatMap(row => (row.key ? [row.key] : [])) : []
   );
-  const selectedKey = () => {
+  const cursorKey = (): string | undefined => {
     const keys = selectable();
     if (!keys.length) return undefined;
     return keys[Math.min(cursor(), keys.length - 1)];
   };
+  const selectedKey = () => (active() ? cursorKey() : undefined);
   const toggle = (key: string): void => {
     setExpanded(previous => {
       const next = new Set(previous);
@@ -630,11 +711,15 @@ function StatusPanel(props: { panel: PanelInput }) {
   const move = (delta: number): void => {
     const keys = selectable();
     if (!keys.length) return;
+    setActive(true);
     setCursor(value => (value + delta + keys.length) % keys.length);
   };
   const toggleSelected = (): void => {
-    const key = selectedKey();
+    const key = cursorKey();
     if (key) toggle(key);
+  };
+  const clearSelection = (): void => {
+    setActive(false);
   };
   const clickRow = (key: string): void => {
     const index = selectable().indexOf(key);
@@ -668,7 +753,8 @@ function StatusPanel(props: { panel: PanelInput }) {
       { id: 'collab.board.down', title: 'Collab 下一项', group: 'Collab', bind: 'j', run: () => move(1) },
       { id: 'collab.board.up', title: 'Collab 上一项', group: 'Collab', bind: 'k', run: () => move(-1) },
       { id: 'collab.board.toggle', title: 'Collab 展开/收起', group: 'Collab', bind: 'enter', run: () => toggleSelected() },
-      { id: 'collab.board.toggle-space', title: 'Collab 展开/收起', group: 'Collab', bind: 'space', run: () => toggleSelected() }
+      { id: 'collab.board.toggle-space', title: 'Collab 展开/收起', group: 'Collab', bind: 'space', run: () => toggleSelected() },
+      { id: 'collab.board.clear', title: 'Collab 清除选中', group: 'Collab', bind: 'escape', run: () => clearSelection() }
     ]
   }));
 

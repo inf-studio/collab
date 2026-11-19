@@ -34,7 +34,7 @@
  *     from the remote server, local rows from the local one — one source at a
  *     time, never mixed.
  */
-import { For, Show, createMemo, createSignal, onCleanup } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import {
   Command,
@@ -114,6 +114,28 @@ function describe(error: unknown): string {
 function pageHidden(): boolean {
   const doc = (globalThis as { document?: { hidden?: boolean } }).document;
   return doc?.hidden === true;
+}
+
+/** The slice of `MediaQueryList` this panel reads (a test host simply has none). */
+interface MediaQuery {
+  matches: boolean;
+  addEventListener?: (type: 'change', listener: () => void) => void;
+  removeEventListener?: (type: 'change', listener: () => void) => void;
+}
+
+/**
+ * R1 (0.8.0): the one breakpoint of the split layout. Guards like `pageHidden`:
+ * a test host (or an older window) has no `matchMedia`, and then the panel is
+ * simply the wide, two-column form.
+ */
+function narrowQuery(): MediaQuery | undefined {
+  const win = globalThis as { matchMedia?: (query: string) => MediaQuery };
+  if (typeof win.matchMedia !== 'function') return undefined;
+  try {
+    return win.matchMedia('(max-width: 640px)');
+  } catch {
+    return undefined;
+  }
 }
 
 /* --------------------------------------------------------------------- snapshot */
@@ -262,9 +284,10 @@ function storeFor(ctx: Context): SnapshotStore {
 
 /*
  * The workspace/session tree is no longer assembled here: `core/board.ts` does
- * it once and the TUI renders the same object (R1). The panel only owns the
- * expand/collapse state (a local signal, so the 2 s poll never folds a row the
- * user opened).
+ * it once and the TUI renders the same object (R1). The panel only owns three
+ * pieces of **local** UI state — the archived folds, the selected `sid` and the
+ * narrow-window flag — so a 2 s poll that replaces `data` can never fold a row,
+ * drop the selection or flip the layout.
  */
 
 /* --------------------------------------------------------------------------- css */
@@ -286,7 +309,21 @@ const CSS = `
 .collab-session:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
 .collab-session:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
 .collab-caret{flex:none;width:10px;opacity:.7;}
-.collab-detail{display:flex;flex-direction:column;gap:2px;padding:2px 0 4px 16px;border-left:1px solid color-mix(in srgb, currentColor 12%, transparent);margin-left:5px;}
+.collab-session-selected{background:color-mix(in srgb, currentColor 10%, transparent);}
+.collab-split{display:grid;grid-template-columns:320px minmax(0,1fr);gap:12px;align-items:start;min-height:0;}
+.collab-split-narrow{grid-template-columns:minmax(0,1fr);}
+.collab-sidebar{display:flex;flex-direction:column;gap:10px;min-width:0;max-height:100%;overflow:auto;}
+.collab-detail-pane{display:flex;flex-direction:column;gap:8px;min-width:0;padding-left:12px;border-left:1px solid color-mix(in srgb, currentColor 12%, transparent);}
+.collab-detail-header{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.collab-detail-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.collab-detail-meta{display:flex;align-items:baseline;flex-wrap:wrap;gap:6px;min-width:0;}
+.collab-detail-section{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.collab-graph-slot,.collab-actions-slot{flex:none;min-height:0;}
+.collab-items{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.collab-back{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;text-align:left;padding:2px 0;margin:0 0 2px;cursor:pointer;opacity:.7;border-radius:4px;}
+.collab-back:hover{opacity:1;background:color-mix(in srgb, currentColor 6%, transparent);}
+.collab-back:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+@media (max-width: 640px){.collab-split{grid-template-columns:minmax(0,1fr);}.collab-detail-pane{padding-left:0;border-left:0;}}
 .collab-spawn{opacity:.85;}
 .collab-spawn-mark{flex:none;opacity:.55;}
 .collab-archived{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;text-align:left;padding:2px 0;margin:4px 0 0;cursor:pointer;opacity:.6;border-radius:4px;}
@@ -439,49 +476,47 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
   );
 }
 
+/**
+ * 0.8.0 (`board2-layout`): one row of the **left list**. Clicking it selects the
+ * session (single-select, `sid`-keyed); the rows that belong to it render in the
+ * right detail pane, so the row carries no inline detail of its own and the list
+ * stays narrow.
+ */
 function SessionRow(props: {
   session: BoardSession;
   current: string;
-  expanded: boolean;
-  onToggle: () => void;
+  selected: boolean;
+  onSelect: () => void;
 }) {
   const ctx = usePlugin();
   return (
-    <>
-      <button
-        type="button"
-        class="collab-row collab-session"
-        title={props.session.sid}
-        aria-expanded={props.expanded}
-        onClick={props.onToggle}
-      >
-        <span class="collab-caret">{props.expanded ? '▾' : '▸'}</span>
-        <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
-        <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
-        <span class="collab-badge">{props.session.agent}</span>
-        <SessionBadges session={props.session} />
-        <span class="collab-row-title">{props.session.title}</span>
-        <Show when={props.session.sid === props.current}>
-          <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
-        </Show>
-      </button>
-      <Show when={props.expanded}>
-        <div class="collab-detail">
-          <For each={props.session.spawned}>{child => <SpawnRow child={child} />}</For>
-          <For each={props.session.locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
-          <For each={props.session.handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
-          <For each={props.session.queue}>{item => <QueueRow item={item} />}</For>
-        </div>
+    <button
+      type="button"
+      class={`collab-row collab-session${props.selected ? ' collab-session-selected' : ''}`}
+      title={props.session.sid}
+      aria-pressed={props.selected}
+      onClick={props.onSelect}
+    >
+      <span class="collab-caret">{props.selected ? '›' : '·'}</span>
+      <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
+      <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
+      <span class="collab-badge">{props.session.agent}</span>
+      <SessionBadges session={props.session} />
+      <span class="collab-row-title">{props.session.title}</span>
+      <Show when={props.session.sid === props.current}>
+        <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
       </Show>
-    </>
+    </button>
   );
 }
 
 function GroupView(props: {
   group: BoardWorkspace;
   current: string;
+  selected: string | null;
   expanded: (key: string) => boolean;
   onToggle: (key: string) => void;
+  onSelect: (sid: string) => void;
 }) {
   const ctx = usePlugin();
   const label = () => workspaceLabel(props.group.workspace) || ctx.t('panel.global');
@@ -506,8 +541,8 @@ function GroupView(props: {
           <SessionRow
             session={session}
             current={props.current}
-            expanded={props.expanded(`ses:${session.sid}`)}
-            onToggle={() => props.onToggle(`ses:${session.sid}`)}
+            selected={props.selected === session.sid}
+            onSelect={() => props.onSelect(session.sid)}
           />
         )}
       </For>
@@ -521,8 +556,8 @@ function GroupView(props: {
               <SessionRow
                 session={session}
                 current={props.current}
-                expanded={props.expanded(`ses:${session.sid}`)}
-                onToggle={() => props.onToggle(`ses:${session.sid}`)}
+                selected={props.selected === session.sid}
+                onSelect={() => props.onSelect(session.sid)}
               />
             )}
           </For>
@@ -558,13 +593,116 @@ function OrphanView(props: { orphans: BoardOrphans; current: string }) {
   );
 }
 
-/** The side panel's content. Reads `props.session` as a getter, never destructured. */
+/**
+ * R2 (0.8.0): the right pane, top to bottom — header, graph slot, action row,
+ * items. The two empty sections are **insertion points** for `board2-graph` and
+ * `board2-actions`: they are real elements (so a later component mounts in place
+ * instead of reshaping the layout) but they occupy no height today.
+ */
+function DetailHeader(props: { session: BoardSession; current: string }) {
+  const ctx = usePlugin();
+  return (
+    <header class="collab-detail-header">
+      <div class="collab-detail-title" title={props.session.title}>
+        {props.session.title}
+      </div>
+      <div class="collab-detail-meta">
+        <span class="collab-badge">{props.session.agent}</span>
+        {/* The **full** sid: the list row is shortened, the detail pane is where
+            a human copies it into a command. */}
+        <span class="collab-mono collab-muted">{props.session.sid}</span>
+        <SessionBadges session={props.session} />
+        <Show when={props.session.sid === props.current}>
+          <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
+        </Show>
+      </div>
+    </header>
+  );
+}
+
+/*
+ * The slot classes are computed, not literals: the GUI bundle inlines static
+ * attributes (unquoted, no separator), and the test host's template parser
+ * needs the class set at runtime, like every other class in this file. The
+ * `data-collab-slot` attribute is what `board2-graph` / `board2-actions` select
+ * on.
+ */
+function slotClass(kind: 'graph' | 'actions'): string {
+  return `collab-detail-section collab-${kind}-slot`;
+}
+
+/** `board2-graph` mounts here; today an empty, zero-height slot that never collapses. */
+function GraphSlot() {
+  return <div class={slotClass('graph')} data-collab-slot="graph" />;
+}
+
+/** `board2-actions` mounts here; today empty (R5 of this task: read-only). */
+function ActionRow() {
+  return <div class={slotClass('actions')} data-collab-slot="actions" />;
+}
+
+/** Leases → hand-offs → owner queue → `↳` spawned (the same derivation the row badges use). */
+function DetailItems(props: { session: BoardSession; current: string }) {
+  const ctx = usePlugin();
+  const session = () => props.session;
+  const empty = () =>
+    !session().locks.length && !session().handoffs.length && !session().queue.length && !session().spawned.length;
+  return (
+    <div class="collab-items">
+      <Show when={session().locks.length}>
+        <div class="collab-sub">{ctx.t('panel.detailLocks', { count: session().locks.length })}</div>
+        <For each={session().locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
+      </Show>
+      <Show when={session().handoffs.length}>
+        <div class="collab-sub">{ctx.t('panel.detailHandoffs', { count: session().handoffs.length })}</div>
+        <For each={session().handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
+      </Show>
+      <Show when={session().queue.length}>
+        <div class="collab-sub">{ctx.t('panel.detailQueue', { count: session().queue.length })}</div>
+        <For each={session().queue}>{item => <QueueRow item={item} />}</For>
+      </Show>
+      <Show when={session().spawned.length}>
+        <div class="collab-sub">{ctx.t('panel.detailSpawned', { count: session().spawned.length })}</div>
+        <For each={session().spawned}>{child => <SpawnRow child={child} />}</For>
+      </Show>
+      <Show when={empty()}>
+        <div class="collab-empty">{ctx.t('panel.detailEmpty')}</div>
+      </Show>
+    </div>
+  );
+}
+
+function BoardDetail(props: { session: BoardSession; current: string; narrow: boolean; onBack: () => void }) {
+  const ctx = usePlugin();
+  return (
+    <section class="collab-detail-pane">
+      <Show when={props.narrow}>
+        <button type="button" class="collab-back" onClick={props.onBack}>
+          ← {ctx.t('panel.back')}
+        </button>
+      </Show>
+      <DetailHeader session={props.session} current={props.current} />
+      <GraphSlot />
+      <ActionRow />
+      <DetailItems session={props.session} current={props.current} />
+    </section>
+  );
+}
+
+/**
+ * R1/R3 (0.8.0): the side panel's content. Left = the tree, right = the detail
+ * of the selected session (single-select, `sid`-keyed so it survives a snapshot
+ * replacement). Below 640 px the two panes become one: selecting a session
+ * replaces the list and a `← 返回列表` button brings it back.
+ *
+ * Reads `props.session` as a getter, never destructured.
+ */
 function PanelView(props: { session: { id: string } }) {
   const ctx = usePlugin();
   const store = storeFor(ctx);
   // Expand/collapse lives here, not in the store: a 2 s poll replaces `data`
-  // and must not fold a row the user opened. Keys are `ses:<sid>` and
-  // `archived:<workspace>`.
+  // and must not fold a row the user opened. The only key left is
+  // `archived:<workspace>` — sessions are selected, not expanded.
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
   const isExpanded = (key: string): boolean => expanded().has(key);
   const toggle = (key: string): void => {
@@ -575,12 +713,57 @@ function PanelView(props: { session: { id: string } }) {
       return next;
     });
   };
+  // R3: the selection is component memory, not snapshot data — a poll that
+  // replaces `data` cannot reset it.
+  const [selected, setSelected] = createSignal<string | null>(null);
+  // R1: the one breakpoint. Read once per mount (a media query, not a resize
+  // listener on every render); a host without `matchMedia` is the wide form.
+  const query = narrowQuery();
+  const [narrow, setNarrow] = createSignal(query?.matches === true);
+  if (query && typeof query.addEventListener === 'function') {
+    const onChange = (): void => {
+      setNarrow(query.matches === true);
+    };
+    query.addEventListener('change', onChange);
+    onCleanup(() => query.removeEventListener?.('change', onChange));
+  }
+
   const groups = createMemo(() =>
     store.state.data ? buildBoard(store.state.data, [], Date.now(), props.session.id) : []
   );
   const orphans = createMemo(() => boardOrphans(store.state.data, groups()));
   const hasOrphans = (): boolean =>
     orphans().locks.length > 0 || orphans().handoffs.length > 0 || orphans().queue.length > 0;
+
+  /** The selected session, active **or** archived: an archived session still exists. */
+  const selectedSession = createMemo((): BoardSession | undefined => {
+    const sid = selected();
+    if (!sid) return undefined;
+    for (const workspace of groups()) {
+      const hit = [...workspace.sessions, ...workspace.archived].find(session => session.sid === sid);
+      if (hit) return hit;
+    }
+    return undefined;
+  });
+
+  // R3: a selection that left the snapshot (closed, or no longer listed) is
+  // cleared and said out loud. No snapshot at all (adopt / a failed poll) is
+  // *not* a disappearance: the rows are kept while the banner explains them.
+  createEffect(() => {
+    const sid = selected();
+    if (!sid || !store.state.data) return;
+    if (selectedSession()) return;
+    setSelected(null);
+    ctx.toast.show({
+      title: ctx.t('panel.title'),
+      description: ctx.t('panel.selectedGone'),
+      variant: 'default'
+    });
+  });
+
+  const select = (sid: string): void => {
+    setSelected(previous => (previous === sid ? null : sid));
+  };
 
   // 0.5.3 (R3): name the server the rows came from — remote only. The app's own
   // server is the default and would be noise (`@sidecar` on every window).
@@ -591,7 +774,7 @@ function PanelView(props: { session: { id: string } }) {
   };
 
   return (
-    <div class="collab-panel">
+    <div class="collab-panel" data-collab-at={String(store.state.at)}>
       <Show when={sourceLabel()}>
         <div class="collab-source collab-mono collab-muted" title={ctx.t('panel.source')}>
           {sourceLabel()}
@@ -612,19 +795,48 @@ function PanelView(props: { session: { id: string } }) {
         }
       >
         <Show when={groups().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
-          <For each={groups().filter(group => group.sessions.length || group.archived.length)}>
-            {group => (
-              <GroupView
-                group={group}
-                current={props.session.id}
-                expanded={isExpanded}
-                onToggle={toggle}
-              />
-            )}
-          </For>
-          <Show when={hasOrphans()}>
-            <OrphanView orphans={orphans()} current={props.session.id} />
-          </Show>
+          <div class={`collab-split${narrow() ? ' collab-split-narrow' : ''}`}>
+            <Show when={!narrow() || !selected()}>
+              <section class="collab-sidebar">
+                <For each={groups().filter(group => group.sessions.length || group.archived.length)}>
+                  {group => (
+                    <GroupView
+                      group={group}
+                      current={props.session.id}
+                      selected={selected()}
+                      expanded={isExpanded}
+                      onToggle={toggle}
+                      onSelect={select}
+                    />
+                  )}
+                </For>
+                <Show when={hasOrphans()}>
+                  <OrphanView orphans={orphans()} current={props.session.id} />
+                </Show>
+              </section>
+            </Show>
+            <Show when={!narrow() || selected()}>
+              <Show
+                when={selectedSession()}
+                fallback={
+                  <section class="collab-detail-pane">
+                    <div class="collab-empty">{ctx.t('panel.pick')}</div>
+                  </section>
+                }
+              >
+                {(session: () => BoardSession) => (
+                  <BoardDetail
+                    session={session()}
+                    current={props.session.id}
+                    narrow={narrow()}
+                    onBack={() => {
+                      setSelected(null);
+                    }}
+                  />
+                )}
+              </Show>
+            </Show>
+          </div>
         </Show>
         <div class="collab-footer">
           {ctx.t('panel.updated', { time: fmtClock(store.state.at) })} · {ctx.t('panel.readonly')}
@@ -744,6 +956,14 @@ export default Plugin.define({
       'panel.pending': 'pending',
       'panel.waiting.one': '{{count}} waiting',
       'panel.waiting.other': '{{count}} waiting',
+      'panel.pick': 'Select a session to see its details.',
+      'panel.back': 'Back to the list',
+      'panel.selectedGone': 'That session is no longer in the snapshot',
+      'panel.detailLocks': 'Leases ({{count}})',
+      'panel.detailHandoffs': 'Open hand-offs ({{count}})',
+      'panel.detailQueue': 'Owner queue ({{count}})',
+      'panel.detailSpawned': 'Spawned ({{count}})',
+      'panel.detailEmpty': 'No leases, hand-offs or queue items for this session.',
       'pill.title': 'Collaboration leases',
       'pill.held.one': '{{count}} lease',
       'pill.held.other': '{{count}} leases',
@@ -790,6 +1010,14 @@ export default Plugin.define({
       'panel.seen': '已读',
       'panel.pending': '未读',
       'panel.waiting.other': '等待 {{count}}',
+      'panel.pick': '选择左侧会话查看详情。',
+      'panel.back': '返回列表',
+      'panel.selectedGone': '该会话已不在快照中',
+      'panel.detailLocks': '资源租约 ({{count}})',
+      'panel.detailHandoffs': '未闭环交接 ({{count}})',
+      'panel.detailQueue': '受保护目标队列 ({{count}})',
+      'panel.detailSpawned': '拉起的会话 ({{count}})',
+      'panel.detailEmpty': '该会话没有锁 / 交接 / 队列 / 拉起的会话。',
       'pill.title': '协作资源',
       'pill.held.other': '锁 {{count}}',
       'pill.waiting.other': '等待 {{count}}',

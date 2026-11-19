@@ -49,8 +49,11 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 > 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`）的规程在同工作区 skill
 > `collab-coordination`；需要看**全局**（谁持有/谁排队/哪些交接未闭环）时打开 OpenCode Desktop
 > 侧栏的 `collab` 面板（0.3.0 起，只读，与 `collab_locks` 同一数据源）。0.6.0 起 GUI 与 TUI 共用同一份
-> `buildBoard` 派生：工作区 → 会话（徽标 `🔒n`/`‹m›`/`[archived]`/`[frozen]`/`[urgent]`，点击展开）→
+> `buildBoard` 派生：工作区 → 会话（徽标 `🔒n`/`‹m›`/`[archived]`/`[frozen]`/`[urgent]`）→
 > `↳` 它拉起的会话 + 该会话的锁/交接/队列；`已归档 N` 默认折叠，看板本身仍然零写操作。
+> 0.8.0 起 GUI 是**主从布局**：左列表点行 = 单选（`›`），右详情显示标题/agent/完整 sid/徽标 + 锁/交接/
+> 队列/`↳`（上方预留关系图与动作行槽位）；窄窗口回落单栏并给「← 返回列表」。选中是本地状态，2 s 轮询
+> 不会重置；会话离开快照才清空并提示。TUI 仍是树 + `j`/`k` 选中后下方 3–5 行详情，`esc` 清除。
 >
 > 入口（0.5.1，全部只读）：Desktop 用命令面板的 `collab.open` / `mod+shift+l` / `/collab`，或点会话头部的
 > 计数条；TUI 用 `/collab`（`ctrl+shift+l`），或点侧栏摘要行展开明细、再点明细行开面板。

@@ -264,6 +264,7 @@ function serverSession(id, serverID, client, { local = false, withServer = true 
 
 function harness(session, { locale = 'en' } = {}) {
   const registered = [];
+  const toasts = [];
   const [current, setCurrent] = createSignal(session);
   const target = {
     id: 'collab',
@@ -278,7 +279,14 @@ function harness(session, { locale = 'en' } = {}) {
     },
     layout: { open: () => {}, state: () => undefined },
     app: { name: 'opencode', version: '2.5.0', channel: 'prod', platform: 'desktop', packaged: true },
-    toast: { show: () => ({ dismiss() {} }) },
+    toast: {
+      show: toast => {
+        // Recorded, never rendered: the panel has no button to click and no
+        // write it could make (R5) — a toast is the only thing it says out loud.
+        toasts.push(toast);
+        return { dismiss() {} };
+      }
+    },
     sessions: { list: () => [session].filter(Boolean), current: () => current() },
     client: fakeClient({ reply: snap(0) })
   };
@@ -289,7 +297,7 @@ function harness(session, { locale = 'en' } = {}) {
       return object[key];
     }
   });
-  return { context, registered, setCurrent };
+  return { context, registered, setCurrent, toasts };
 }
 
 /** Render the registered panel through a plugin-context provider on the mini DOM. */
@@ -526,7 +534,9 @@ function renderContribution(h, registry, input) {
     rpc: () => ({
       snapshot: async () => {
         boardLoads += 1;
-        return BOARD;
+        // 0.8.0: a fresh `at` per answer, so "a poll replaced the snapshot" is
+        // a number the DOM can be read for (`data-collab-at`), not a guess.
+        return { ...BOARD, at: boardLoads };
       }
     })
   };
@@ -578,7 +588,7 @@ function renderContribution(h, registry, input) {
   expect('PN6 the session row is a clickable button', Boolean(sessionButton), sessionButton?.className);
   fire(sessionButton);
   expect(
-    'PN6 clicking a session expands it: ↳ child + lock / hand-off / queue',
+    'PN6 clicking a session selects it: the right detail shows ↳ child + lock / hand-off / queue',
     text().includes('↳') &&
       text().includes('ses_child') &&
       text().includes('named:board-window') &&
@@ -605,7 +615,7 @@ function renderContribution(h, registry, input) {
     `${loadsBeforePoll} → ${boardLoads} loads`
   );
   expect(
-    'PN6 a 2 s poll does not fold an expanded row',
+    'PN6 a 2 s poll does not drop the selection (detail still shown)',
     text().includes('↳') && text().includes('archived worker'),
     JSON.stringify(text())
   );
@@ -651,6 +661,299 @@ function renderContribution(h, registry, input) {
       text.includes('q_ghost'),
     JSON.stringify(text)
   );
+  dispose();
+}
+
+/* ---------------------------------- 8. 0.8.0 (board2-layout): master / detail */
+
+/** Depth-first search of the mini DOM (the same shape as PN6's local helper). */
+function findIn(root, predicate) {
+  let hit;
+  const walk = node => {
+    if (hit || !node) return;
+    if (node.nodeType === 1) {
+      if (predicate(node)) {
+        hit = node;
+        return;
+      }
+      for (const child of node.childNodes ?? []) walk(child);
+    }
+  };
+  walk(root);
+  return hit;
+}
+
+/** Click through Solid's delegated listener, with the node as `target`. */
+function fireClick(target) {
+  const event = { type: 'click', target, cancelBubble: false };
+  for (const listener of documentStub.listeners.get('click') ?? []) listener(event);
+}
+
+const LAYOUT = {
+  at: 1,
+  reachable: true,
+  sessions: [
+    {
+      sid: 'ses_layout_board01',
+      title: 'layout worker',
+      agent: 'build',
+      busy: true,
+      workspace: '/data/project/collab'
+    },
+    { sid: 'ses_layout_child01', title: 'child worker', agent: 'explore', busy: false, workspace: '/data/project/collab' },
+    { sid: 'ses_layout_other01', title: 'other worker', agent: 'build', busy: false, workspace: '/data/project/other' }
+  ],
+  locks: [
+    {
+      resource: 'named:layout-window',
+      kind: 'named',
+      mode: 'exclusive',
+      holders: ['ses_layout_board01'],
+      waiters: 0,
+      waiting: [],
+      expiresInMs: 600_000
+    }
+  ],
+  handoffs: [
+    {
+      bid: 'b_layout_spawn',
+      state: 'claimed',
+      ageMs: 1_000,
+      from: 'ses_layout_board01',
+      claimBy: 'ses_layout_child01',
+      spawned: 'ses_layout_child01',
+      kind: 'spawn',
+      title: 'spawn the child',
+      workspace: '/data/project/collab'
+    },
+    {
+      bid: 'b_layout_open',
+      state: 'open',
+      ageMs: 2_000,
+      from: 'ses_layout_board01',
+      title: 'open thing',
+      priority: 'urgent',
+      workspace: '/data/project/collab'
+    }
+  ],
+  queue: [{ queueId: 'q_layout', target: 'ses_p', ageMs: 1_000, summary: 'req', seen: false }]
+};
+
+{
+  let layoutLoads = 0;
+  let layoutReply = LAYOUT;
+  const layoutClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        layoutLoads += 1;
+        return { ...layoutReply, at: layoutLoads };
+      }
+    })
+  };
+  const ME = 'ses_layout_board01';
+  const LAYOUT_SESSION = serverSession(ME, 'srv-layout', layoutClient);
+  const h = harness(LAYOUT_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, LAYOUT_SESSION);
+  const text = () => el?.textContent ?? '';
+  const byClass = name => findIn(el, node => String(node.className).includes(name));
+  const selectedRow = () => findIn(el, node => String(node.className).includes('collab-session-selected'));
+
+  expect(
+    'PN8 the panel is a split: a sidebar and a detail pane (CSS grid, 320px + 1fr)',
+    Boolean(byClass('collab-split')) && Boolean(byClass('collab-sidebar')) && Boolean(byClass('collab-detail-pane')),
+    [byClass('collab-split'), byClass('collab-sidebar'), byClass('collab-detail-pane')]
+      .map(node => node?.className ?? '(missing)')
+      .join(' / ')
+  );
+  expect(
+    'PN8 with nothing selected the detail pane says how to pick one (never blank)',
+    text().includes('选择左侧会话查看详情'),
+    JSON.stringify(text())
+  );
+  const row = findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('layout worker'));
+  expect('PN8 a session row is the selection button', Boolean(row), row?.className);
+  fireClick(row);
+  expect(
+    'PN8 clicking a row selects it: the row is highlighted and the detail names the same session',
+    Boolean(selectedRow()) &&
+      selectedRow().textContent.includes('ses_layo…rd01') &&
+      text().includes('ses_layout_board01'),
+    JSON.stringify({ selected: selectedRow()?.className, text: text() })
+  );
+  expect(
+    'PN8 the graph and action slots are real elements (the next two tasks mount in place)',
+    findIn(el, node => node.attrs?.['data-collab-slot'] === 'graph')?.className ===
+      'collab-detail-section collab-graph-slot' &&
+      findIn(el, node => node.attrs?.['data-collab-slot'] === 'actions')?.className ===
+        'collab-detail-section collab-actions-slot',
+    [findIn(el, node => node.attrs?.['data-collab-slot'] === 'graph'), findIn(el, node => node.attrs?.['data-collab-slot'] === 'actions')]
+      .map(node => node?.className ?? '(missing)')
+      .join(' / ')
+  );
+  // R2: the pane's **direct element children** are header → graph → actions →
+  // items. Swapping the two slots must fail here (a "both exist" assertion
+  // cannot).
+  const paneChildren = () =>
+    (byClass('collab-detail-pane')?.childNodes ?? [])
+      .filter(node => node.nodeType === 1)
+      .map(node => String(node.className));
+  expect(
+    'PN8 the detail pane order is header → graph slot → actions slot → items (R2)',
+    JSON.stringify(paneChildren()) ===
+      JSON.stringify([
+        'collab-detail-header',
+        'collab-detail-section collab-graph-slot',
+        'collab-detail-section collab-actions-slot',
+        'collab-items'
+      ]),
+    JSON.stringify(paneChildren())
+  );
+  expect(
+    'PN8 the detail header carries title / agent / full sid / [urgent]',
+    text().includes('layout worker') && text().includes('build') && text().includes('ses_layout_board01') && text().includes('[urgent]'),
+    JSON.stringify(text())
+  );
+  expect(
+    'PN8 the detail lists leases → hand-offs → queue → ↳ spawned, from the same derivation',
+    text().includes('named:layout-window') &&
+      text().includes('b_layout_spawn') &&
+      text().includes('b_layout_open') &&
+      text().includes('q_layout') &&
+      text().includes('↳') &&
+      text().indexOf('资源租约 (1)') < text().indexOf('未闭环交接 (2)') &&
+      text().indexOf('未闭环交接 (2)') < text().indexOf('受保护目标队列 (1)') &&
+      text().indexOf('受保护目标队列 (1)') < text().indexOf('拉起的会话 (1)'),
+    JSON.stringify(text())
+  );
+
+  // R3: the 2 s poll replaces the whole snapshot — the selection must survive it.
+  const atBefore = el.getAttribute('data-collab-at');
+  const loadsBefore = layoutLoads;
+  await sleep(2100);
+  expect(
+    'PN8 a poll really replaced the snapshot during the wait (loads and `at` both moved)',
+    layoutLoads > loadsBefore && el.getAttribute('data-collab-at') !== atBefore,
+    `${loadsBefore} → ${layoutLoads} loads; at ${atBefore} → ${el.getAttribute('data-collab-at')}`
+  );
+  expect(
+    'PN8 … and the selection survived it: still highlighted, same session in the detail',
+    Boolean(selectedRow()) && text().includes('ses_layout_board01') && text().includes('named:layout-window'),
+    JSON.stringify({ loads: layoutLoads, text: text() })
+  );
+
+  // R3: the selected session leaves the snapshot → selection cleared + a toast.
+  layoutReply = { ...LAYOUT, sessions: LAYOUT.sessions.filter(session => session.sid !== ME) };
+  await sleep(2100);
+  expect(
+    'PN8 a selected session that is gone from the snapshot clears the selection (and the detail)',
+    !selectedRow() && text().includes('选择左侧会话查看详情') && !text().includes('ses_layout_board01'),
+    JSON.stringify({ text: text(), toast: h.toasts.at(-1) ?? null })
+  );
+  expect(
+    'PN8 … and says why: 该会话已不在快照中',
+    h.toasts.some(toast => String(toast?.description ?? '').includes('该会话已不在快照中')),
+    JSON.stringify(h.toasts)
+  );
+  dispose();
+}
+
+/* ------------------------------- 9. 0.8.0: the narrow window falls back to one pane */
+
+{
+  const NARROW = {
+    at: 1,
+    reachable: true,
+    sessions: [
+      { sid: 'ses_narrow_me', title: 'narrow worker', agent: 'build', busy: true, workspace: '/data/project/collab' },
+      { sid: 'ses_narrow_child', title: 'narrow child', agent: 'explore', busy: false, workspace: '/data/project/collab' }
+    ],
+    locks: [
+      {
+        resource: 'named:narrow-window',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: ['ses_narrow_me'],
+        waiters: 0,
+        waiting: [],
+        expiresInMs: 600_000
+      }
+    ],
+    handoffs: [],
+    queue: []
+  };
+  // The one breakpoint the panel reads. This stub **evaluates** the query
+  // against a mutable viewport, so the assertions below pin the number (639 =
+  // one pane, 641 = split) instead of "any max-width query matches".
+  let viewport = 640;
+  globalThis.matchMedia = query => {
+    const limit = Number((String(query).match(/max-width:\s*(\d+)px/) ?? [])[1] ?? NaN);
+    return {
+      get matches() {
+        return Number.isFinite(limit) ? viewport <= limit : false;
+      },
+      addEventListener() {},
+      removeEventListener() {}
+    };
+  };
+  const NARROW_SESSION = serverSession('ses_narrow_me', 'srv-narrow', fakeClient({ reply: NARROW }));
+  /** Mount one fresh panel at `width` (the panel reads the query once per mount). */
+  const openAt = async width => {
+    viewport = width;
+    const h = harness(NARROW_SESSION, { locale: 'zh' });
+    const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+    await sleep(150);
+    const el = renderPanel(h, NARROW_SESSION);
+    return { h, el, dispose, byClass: name => findIn(el, node => String(node.className).includes(name)), text: () => el?.textContent ?? '' };
+  };
+
+  // R1: the breakpoint is 640px — 639 is one pane, 641 is the split. A changed
+  // number (say 100) flips the 639 side and fails here.
+  const below = await openAt(639);
+  expect(
+    'PN9 639px is one pane: the list only, no detail placeholder',
+    Boolean(below.byClass('collab-sidebar')) &&
+      !below.byClass('collab-detail-pane') &&
+      !below.text().includes('选择左侧会话查看详情'),
+    JSON.stringify(below.text())
+  );
+  below.dispose();
+
+  const above = await openAt(641);
+  expect(
+    'PN9 641px is the split: list + detail pane, no 返回列表 button',
+    Boolean(above.byClass('collab-sidebar')) &&
+      Boolean(above.byClass('collab-detail-pane')) &&
+      above.text().includes('选择左侧会话查看详情') &&
+      !above.byClass('collab-back'),
+    JSON.stringify(above.text())
+  );
+  above.dispose();
+
+  const { el, dispose, byClass, text } = await openAt(639);
+  const row = findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('narrow worker'));
+  fireClick(row);
+  expect(
+    'PN9 selecting a session replaces the list with the detail and offers ← 返回列表',
+    !byClass('collab-sidebar') &&
+      Boolean(byClass('collab-detail-pane')) &&
+      Boolean(byClass('collab-back')) &&
+      text().includes('返回列表') &&
+      text().includes('ses_narrow_me'),
+    JSON.stringify(text())
+  );
+
+  const back = byClass('collab-back');
+  expect('PN9 the detail offers a real ← 返回列表 button', Boolean(back), JSON.stringify(text()));
+  if (back) fireClick(back);
+  expect(
+    'PN9 返回列表 clears the selection and brings the list back',
+    Boolean(byClass('collab-sidebar')) && !byClass('collab-detail-pane') && text().includes('narrow child'),
+    JSON.stringify(text())
+  );
+
+  delete globalThis.matchMedia;
   dispose();
 }
 
