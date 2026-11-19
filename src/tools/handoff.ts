@@ -1,6 +1,7 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, EXPECTED } from '../constants.ts';
 import { persistRefresh, readBroadcast, writeBroadcast } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
+import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
 import { newThreadID } from '../ids.ts';
@@ -57,6 +58,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       if (!body) throw invalid('text 不能为空');
       const expected = normalizeExpected(input?.expected);
       const notes: string[] = [];
+      const lineage = createLineage(ctx);
 
       let target: Target;
       let ranking: Awaited<ReturnType<typeof chain.rankCandidates>> | undefined;
@@ -99,6 +101,14 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       }
 
       const { mode, forced } = resolveMode('queue', context?.agent);
+      // 0.6.0 (`collab_freeze`): a frozen target — itself, one of its ancestors,
+      // or its workspace — refuses a *new* hand-off. Checked after the target is
+      // known and before anything is delivered / written; a preview only says so.
+      const freeze = await frozenBy(
+        { session: target.sessionID, workspace: target.info?.location?.directory ?? workspace },
+        { lineage }
+      );
+      if (freeze && input?.confirm === true) throw invalid(freezeDenyText(freeze));
       const threadID = newThreadID();
       const bid = broadcastID({
         scope: 'local',
@@ -129,13 +139,14 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
 
       if (input?.confirm !== true) {
         const config = readConfig();
-        const guard = await createLineage(ctx).protectedAncestor(target.sessionID, config.protect);
+        const guard = await lineage.protectedAncestor(target.sessionID, config.protect);
         return {
           content: [
             '未投递（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。',
             `目标: ${target.sessionID} agent=${target.info?.agent ?? '?'} state=${sessionState(target.info)} ` +
               `title="${truncate(target.info?.title ?? '(untitled)', 60)}"`,
             guard ? `拒绝提示: 目标在 protect 名单内（depth=${guard.depth}），确认后仍会被拒绝。` : '',
+            freeze ? `拒绝提示: ${freezeHintText(freeze)}` : '',
             `kind=request mode=${forced ? 'queue(forced)' : mode} thread=${threadID} bid=${bid}`,
             ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
             ...notes.map(note => `注: ${note}`),
@@ -166,7 +177,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       // R4 (0.1.6): a protected requester can never receive a pushed ack (the
       // same guard refuses the delivery), so the record says so up front.
       const requesterProtected = Boolean(
-        me && (await createLineage(ctx).protectedAncestor(String(me), readConfig().protect))
+        me && (await lineage.protectedAncestor(String(me), readConfig().protect))
       );
       writeBroadcast({
         bid,

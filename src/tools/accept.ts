@@ -1,6 +1,7 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_MAX_ATTEMPTS, BROADCAST_DIR, MAX_STORED } from '../constants.ts';
 import { claimLock, isValidBid, persistRefresh, readBroadcast, releaseLock, writeBroadcast } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
+import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { BroadcastRecord, JsonObject, ToolDefinition } from '../types.ts';
 import { shortID, truncate } from '../util.ts';
@@ -103,7 +104,8 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       // preview as well — a protected session may not even look like a
       // candidate for the hand-off (fail-closed, same as `collab_send`), and
       // before `persistRefresh` so a refused call cannot touch the record.
-      const guard = await createLineage(ctx).protectedAncestor(me, readConfig().protect);
+      const lineage = createLineage(ctx);
+      const guard = await lineage.protectedAncestor(me, readConfig().protect);
       if (guard) {
         throw invalid(
           `拒绝领取：${me} 在 protect 名单内${
@@ -111,6 +113,12 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           }，受保护会话及其子会话不参与广播领取。`
         );
       }
+
+      // 0.6.0 (`collab_freeze`): a frozen **bid**, a frozen claimant session (or
+      // one of its ancestors) or a frozen workspace refuses the claim. Checked
+      // before `persistRefresh`, so a refused call cannot even touch the record.
+      const freeze = await frozenBy({ session: me, bid, workspace: existing.workspace }, { lineage });
+      if (freeze) throw invalid(freezeDenyText(freeze));
 
       let record = persistRefresh(existing, await chain.refresh(existing, now, { actor: me }));
 

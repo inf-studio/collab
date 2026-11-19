@@ -1,7 +1,7 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：十九个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列、
-即时状态回执、加急催办与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
+多会话（含跨工作区）协作插件：二十个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列、
+即时状态回执、加急催办、临时冻结与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
 `bid` 算法与单文件版逐字一致，差别只有「可选类型 + 模块边界 + 默认只读」三点。
@@ -23,6 +23,7 @@
 | `collab_wait`      | 等某 thread 的回执，或等某会话空闲                                         | 只读              |
 | `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 下一步（非阻塞、零写入） | 只读              |
 | `collab_escalate` | 加急一单：默认 `delivery:steer` 进对方当前轮（只读 agent / 受保护目标自动降级：queue 或 owner-queue 项），回执打印**实际** delivery；只追加 `priority/urgentAt/urgentReason/urgentBy` | 发消息 / 写队列 |
+| `collab_freeze`   | **临时冻结**一个会话（含子会话）/ 工作区 / 一单：`handoff`/`broadcast`/`accept`/`escalate` 对它的**新建**协作可读拒绝（0 写入），`until` 到期自动失效；通知一次（受保护目标 → urgent 队列项）；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
 | `collab_send`      | 往另一个会话投递消息（`queue` 默认，不打断）                               | 发消息            |
 | `collab_reply`     | 按 thread 自动路由的回执                                                   | 发消息            |
 | `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread                              | 发消息            |
@@ -259,7 +260,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 696 项 harness + 12 项只读默认 + 42 项快照/产物 + 32 项 TUI 渲染 + 47 项 GUI 入口 + 7 项 GUI 面板渲染
+pnpm test          # build + 735 项 harness + 12 项只读默认 + 48 项快照/产物 + 32 项 TUI 渲染 + 47 项 GUI 入口 + 7 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），

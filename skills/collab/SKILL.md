@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十九个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -26,6 +26,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
 | `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
+| `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
 | `collab_send` | `target, text, kind?, threadID?, mode?, confirm` | 投递消息；`kind=request/reply/note` | 发消息 |
 | `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, confirm` | **同工作区**交接：选人 + 开 thread | 发消息 |
@@ -173,6 +174,31 @@ collab_escalate { session:"ses_…", reason:"…", confirm:true }               
 - 受保护目标（含血缘）**0 条 prompt** → 写一条 urgent owner-queue 项，回执 `canPush:false` + 队列位置。
 - 同 `bid + reason` **5 分钟**内重复调用只刷新 `urgentAt`、不重复投递；换措辞才是新加急。
 - 没闭环就想看结果：`collab_status { bid }`（admitted / seen / 队列位置）。
+
+## 一点十、临时冻结（`collab_freeze`，0.6.0）
+
+「先别动」不能只靠一条消息——插件必须自己知道，否则新会话 / 新的交接还会继续往里写：
+
+```text
+collab_freeze { scope:"session", target:"ses_…", reason:"等 schema 线确认", until:"2h", confirm:true }
+collab_freeze { scope:"workspace", target:"/data/project/mux", reason:"本仓暂停接管", confirm:true }
+collab_freeze { scope:"bid", target:"b_…", reason:"这一单先别改", confirm:true }
+collab_freeze { scope:"session", target:"ses_…", freeze:false, confirm:true }   # 解冻（幂等 no-op）
+```
+
+- `until` 默认 30 分钟、上限 30 天；相对（`"30m"`/`"2h"`/`"45s"`）或绝对 ISO 都行。**到期在读取时失效**，
+  没有定时器、没有清理任务。
+- 被冻结对象上的**新建**协作全部可读拒绝（0 写入）：`collab_handoff`（目标本身 / 祖先 / 目标工作区）、
+  `collab_broadcast`（该工作区，spawn 前再判一次）、`collab_accept`（该单或本会话）、
+  `collab_escalate`（冻结优先，加急也不行）。拒绝文案带可复制的解冻命令。
+- 血缘：冻结会话会覆盖它的**子会话**（`parentID` 链，`createLineage` 同一套走查）。
+- `collab_list` / `collab_status` **不受限**：只在已有行尾标 `[frozen] 冻结至 HH:MM`（截图/侧栏同样只加标记）。
+- 通知一次：非受保护目标 → 1 条 `queue` prompt（不用 `steer`；`cid`/`messageId` 存进条目的 `delivery[]`）；
+  受保护目标（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项。被冻会话自己的
+  `context` 只提示一次（写 `notifiedAt`）。
+- 存储 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename +
+  短锁），两个工作区同时写不会互相覆盖。
+- **冻结 ≠ 归档 ≠ 删除**：不隐藏会话、不删文件、不写 permissions、不切 agent；`freeze:false` 立刻恢复。
 
 ## 二、同工作区（local）
 

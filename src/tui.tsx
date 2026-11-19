@@ -326,18 +326,25 @@ function handoffLines(handoffs: SnapshotHandoff[], width: number): Line[] {
     // 0.6.0 (`collab_escalate`): one marker at the end of the existing row — no
     // column is added and nothing is re-laid-out.
     const urgent = handoff.priority === 'urgent' ? ' [urgent]' : '';
+    // 0.6.0 (`collab_freeze`): the same rule — one marker, no layout change.
+    const frozen = handoff.freeze ? ` [frozen] ${fmtClock(handoff.freeze.until).slice(0, 5)}` : '';
     const text = narrow
-      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}${urgent}`, width - 2)}`
+      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}${urgent}${frozen}`, width - 2)}`
       : `${tableRow([
           [handoff.bid, 16],
           [handoff.state, 9],
           [age, 8],
           [from, Math.max(6, width - 35)]
-        ])}${urgent}`;
+        ])}${urgent}${frozen}`;
     // `open` = nobody has taken it yet; that is the row worth noticing.
     out.push({
       text,
-      tone: handoff.priority === 'urgent' ? 'danger' : handoff.state === 'open' ? 'warning' : 'base'
+      tone:
+        handoff.priority === 'urgent' || handoff.freeze
+          ? 'danger'
+          : handoff.state === 'open'
+            ? 'warning'
+            : 'base'
     });
   }
   return out;
@@ -496,9 +503,11 @@ function sidebarRows(data: Snapshot, me: string): SidebarRow[] {
   }
   for (const handoff of data.handoffs) {
     rows.push({
-      text: `→ ${handoff.bid} · ${handoff.state} · ${fmtAge(handoff.ageMs)} · ${shortSid(handoff.from)}`,
+      text: `→ ${handoff.bid} · ${handoff.state} · ${fmtAge(handoff.ageMs)} · ${shortSid(handoff.from)}${
+        handoff.priority === 'urgent' ? ' · urgent' : ''
+      }${handoff.freeze ? ` · frozen ${fmtClock(handoff.freeze.until).slice(0, 5)}` : ''}`,
       // `open` = nobody has taken it yet; that is the row worth noticing.
-      tone: handoff.state === 'open' ? 'warning' : 'base'
+      tone: handoff.freeze || handoff.priority === 'urgent' ? 'danger' : handoff.state === 'open' ? 'warning' : 'base'
     });
   }
   for (const item of data.queue) {

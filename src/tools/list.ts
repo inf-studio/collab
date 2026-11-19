@@ -9,6 +9,7 @@ import {
   takeInvalidFollowUpNotice
 } from '../core/followup.ts';
 import { createLineage } from '../core/lineage.ts';
+import { clockOf, freezeFor, readFreezes } from '../core/freeze.ts';
 import { fmtTtl, locksFor } from '../core/locks.ts';
 import { mineFor } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
@@ -99,6 +100,22 @@ export function listTool(kit: ToolKit): ToolDefinition {
       }
       const records = allBroadcasts();
       const me = context?.sessionID;
+      const now = Date.now();
+      // 0.6.0 (`collab_freeze`): read-only — a listing only *shows* a freeze
+      // (never stamps `notifiedAt`, never rewrites the file).
+      const freezes = readFreezes(now);
+      const freezeLines = (): string[] =>
+        freezes.length
+          ? [
+              `冻结（临时，到期自动失效；${freezes.length} 条）:`,
+              ...freezes.map(
+                entry =>
+                  `- [frozen] scope=${entry.scope} target=${entry.target} 到 ${clockOf(entry.until)}` +
+                  `${entry.notifiedAt ? '（目标已收到提示）' : ''} 原因=${entry.reason || '-'}` +
+                  `  解冻: collab_freeze {scope:"${entry.scope}", target:"${entry.target}", freeze:false, confirm:true}`
+              )
+            ]
+          : [];
       // F2 (0.3.1): computed before the empty-workspace early return — a session
       // whose only hand-off has an unusable append still has to learn about it.
       const invalidFollowUpNotes = await invalidFollowUpNotice(ctx, me, records);
@@ -109,6 +126,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
           content: [
             `${directory ? `工作区 ${directory} 下` : ''}没有可列出的会话。`,
             ...(queueLines.length ? [...queueLines, ''] : []),
+            ...freezeLines(),
             ...invalidFollowUpNotes,
             hintLine()
           ].join('\n')
@@ -130,11 +148,22 @@ export function listTool(kit: ToolKit): ToolDefinition {
       );
 
       const lines: string[] = [];
+      const frozenSessions = freezes.filter(entry => entry.scope === 'session').map(entry => entry.target);
       for (const info of sessions) {
         const aliases = aliasesOf(info.id);
         // `protected` = on the list; `protected-child` = inherits it through
         // parentID (a sub-agent of a protected line is not a legal target).
         const guard = await lineage.protectedAncestor(info.id, config.protect);
+        // 0.6.0: a session is frozen itself, through an ancestor, or because its
+        // workspace is — all three read the same way (`[frozen] 冻结至 HH:MM`).
+        const frozenHit = frozenSessions.length
+          ? await lineage.protectedAncestor(info.id, frozenSessions)
+          : undefined;
+        const freeze = frozenHit
+          ? freezes.find(entry => entry.scope === 'session' && entry.target === frozenHit.sessionID)
+          : freezes.find(
+              entry => entry.scope === 'workspace' && entry.target === (info?.location?.directory ?? '')
+            );
         const state = sessionState(info);
         const marks = [
           info.id === context?.sessionID ? 'self' : '',
@@ -147,6 +176,10 @@ export function listTool(kit: ToolKit): ToolDefinition {
         const suffix = [
           aliases.length ? `alias=${aliases.join(',')}` : '',
           marks.length ? `[${marks.join(',')}]` : '',
+          freeze
+            ? `[frozen] 冻结至 ${clockOf(freeze.until)}` +
+              `${frozenHit && frozenHit.depth > 0 ? `（继承 ${shortID(frozenHit.sessionID)}）` : ''}`
+            : '',
           info.parentID ? `parent=${shortID(info.parentID)}` : ''
         ]
           .filter(Boolean)
@@ -167,7 +200,6 @@ export function listTool(kit: ToolKit): ToolDefinition {
         );
       }
 
-      const now = Date.now();
       const broadcasts = records
         .filter(
           record =>
@@ -176,6 +208,9 @@ export function listTool(kit: ToolKit): ToolDefinition {
         .map(record => {
           // R1-4: read-only lease verdict — no refresh, no lock release here.
           const lease = leaseVerdict(record, now);
+          // 0.6.0 (`collab_freeze`): a frozen bid, or one in a frozen workspace,
+          // is marked — the same precedence the enforced tools use.
+          const freeze = freezeFor(freezes, { bid: record.bid, workspace: record.workspace });
           // R8: `acked` has no lease; after ACKED_EXTRACT_MS of silence the
           // requester's next refresh may close it from the claimant's answer.
           const claimAt = Number(record.claim?.at ?? 0);
@@ -188,6 +223,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
           return (
             `- ${record.bid} ${record.state}${record.priority === 'urgent' ? ' [urgent]' : ''}` +
             `${record.archivedAt ? ' [archived]' : ''}` +
+            `${freeze ? ` [frozen] 冻结至 ${clockOf(freeze.entry.until)}` : ''}` +
             `${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''
@@ -228,6 +264,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
           `${sessions.length} 个会话（id / agent / state / loc / updated / title）:`,
           ...lines,
           '[protected] / [protected-child] 均不可投递（后者是受保护会话的子会话）；[bootstrap] 是广播拉起的会话。',
+          ...freezeLines(),
           ...(broadcasts.length
             ? [
                 '未闭环交接:',

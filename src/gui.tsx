@@ -338,6 +338,14 @@ function SessionRow(props: { session: SnapshotSession; current: string }) {
       <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
       <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
       <span class="collab-badge">{props.session.agent}</span>
+      <Show when={props.session.frozen}>
+        <span
+          class="collab-badge collab-tone-danger"
+          title={`冻结至 ${new Date(props.session.frozen!.until).toLocaleTimeString()}（${props.session.frozen!.reason}）`}
+        >
+          frozen
+        </span>
+      </Show>
       <span class="collab-row-title">{props.session.title}</span>
       <Show when={props.session.sid === props.current}>
         <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
@@ -385,6 +393,14 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
       <span class="collab-badge">{props.handoff.state}</span>
       <Show when={props.handoff.priority === 'urgent'}>
         <span class="collab-badge collab-tone-warning">urgent</span>
+      </Show>
+      <Show when={props.handoff.freeze}>
+        <span
+          class="collab-badge collab-tone-danger"
+          title={`冻结至 ${new Date(props.handoff.freeze!.until).toLocaleTimeString()}（${props.handoff.freeze!.reason}）`}
+        >
+          frozen
+        </span>
       </Show>
       <span class="collab-muted">{fmtTtl(props.handoff.ageMs)}</span>
       <span class="collab-row-title collab-muted">{props.handoff.title}</span>

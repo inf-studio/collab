@@ -375,6 +375,63 @@ export interface OwnerQueueItem {
   seenAt?: number | null;
 }
 
+// ------------------------------------------------------- temporary freeze (0.6.0)
+
+/**
+ * One **temporary freeze** (`~/.config/opencode/collab-freeze.json`,
+ * `collab_freeze`).
+ *
+ * A freeze is a *collaboration-layer* mark, not a session flag: it is
+ * reversible (`freeze:false`), self-expiring (`until`, no scheduler) and never
+ * touches `permissions` / `agent` / the archive bit. `scope` says what is
+ * frozen, `target` is the session id / absolute workspace path / bid, and
+ * `notifiedAt` records the one context notice the frozen session gets.
+ */
+export interface FreezeEntry {
+  scope: 'session' | 'workspace' | 'bid';
+  /** sid / absolute workspace path / bid. */
+  target: string;
+  /** One line (≤200 chars, control characters stripped) — shown in refusals. */
+  reason: string;
+  /** The session that froze it. */
+  by: string;
+  at: number;
+  /** Epoch ms; expired entries are ignored on read and swept on write. */
+  until: number;
+  /** The frozen session already saw the context notice (once per freeze). */
+  notifiedAt?: number;
+  /**
+   * The sessions that already saw the notice (0.6.0). `notifiedAt` is the last
+   * stamp; this list is what makes "once" true per session when a frozen
+   * ancestor covers several sub-sessions.
+   */
+  notifiedFor?: string[];
+  /**
+   * Delivery receipts of the freeze notice (additive, 0.6.0): a `queue` prompt
+   * admission or the owner-queue item of a protected target. Kept so a human can
+   * tell "did it actually reach anybody" without re-reading the tool result.
+   */
+  delivery?: FreezeDelivery[];
+}
+
+/** One freeze notice that was really delivered (or queued). */
+export interface FreezeDelivery {
+  to: string;
+  /** `queue` prompt admission. */
+  cid?: string;
+  messageId?: string;
+  /** Protected target: the owner-queue item id (`q_…`) instead of a prompt. */
+  queueId?: string;
+  at: number;
+  error?: string;
+}
+
+/** The whole freeze file — `{ version: 1, entries: [] }`. */
+export interface FreezeFile {
+  version: 1;
+  entries: FreezeEntry[];
+}
+
 // ------------------------------------------------------------ resource leases
 
 /** `exclusive` (default) locks out everything; `shared` coexists with `shared`. */

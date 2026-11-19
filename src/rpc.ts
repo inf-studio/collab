@@ -21,6 +21,15 @@
  */
 import type { Rpc } from '@opencode/plugin/rpc';
 
+/** One optional freeze marker (0.6.0) — display only, read from the freeze file. */
+export interface SnapshotFreeze {
+  scope: 'session' | 'workspace' | 'bid';
+  target?: string;
+  /** Epoch ms; an expired freeze is never reported at all. */
+  until: number;
+  reason: string;
+}
+
 /** One session the host lists, as the panel groups it. */
 export interface SnapshotSession {
   /** OpenCode session id (`ses_…`) — the same id the tool context reports. */
@@ -32,6 +41,11 @@ export interface SnapshotSession {
   workspace: string;
   /** Parent session id, for a sub-agent line. */
   parent?: string;
+  /**
+   * 0.6.0 (`collab_freeze`): this session is frozen — itself, through an
+   * ancestor, or because its workspace is. Optional: an older server omits it.
+   */
+  frozen?: SnapshotFreeze;
 }
 
 /** One resource lease, from `stateOf()` — never a second source of truth. */
@@ -83,6 +97,11 @@ export interface SnapshotHandoff {
    * only — the panel keeps its layout and adds one marker.
    */
   priority?: 'urgent';
+  /**
+   * 0.6.0 (`collab_freeze`): this hand-off (its bid) or its workspace is frozen.
+   * Display only — the row stays, one marker is added.
+   */
+  freeze?: SnapshotFreeze;
 }
 
 /**
@@ -153,7 +172,10 @@ export const CollabState = {
           sessions: {
             type: 'array',
             items: obj(
-              { sid: str, title: str, agent: str, busy: bool, workspace: str, parent: str },
+              { sid: str, title: str, agent: str, busy: bool, workspace: str, parent: str,
+                // 0.6.0 (`collab_freeze`): optional marker — an older server omits it.
+                frozen: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason'])
+              },
               ['sid', 'title', 'agent', 'busy', 'workspace']
             )
           },
@@ -188,7 +210,9 @@ export const CollabState = {
                 claimBy: str,
                 workspace: str,
                 title: str,
-                archived: bool
+                archived: bool,
+                // 0.6.0 (`collab_freeze`): optional freeze marker (bid or workspace).
+                freeze: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason'])
               },
               ['bid', 'state', 'ageMs', 'from', 'title']
             )

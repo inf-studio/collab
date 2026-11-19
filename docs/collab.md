@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十九个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态/加急各一组）
+### 11.2 二十个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态/加急/冻结各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -269,6 +269,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
 | `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
 | `collab_escalate` | `{ bid?, threadID?, session?, reason, mode?, confirm }` | **加急（0.6.0）**：让被加急的一单**现在就进对方当前轮**——复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递。`bid` / `threadID` / `session` 三选一；`reason` 必填（≤200，剥控制字符）。`mode` 默认 **`steer`**（显式 `"queue"` 才排队），只读 agent（`explore`/`plan`）目标**强制 `queue`**（回执标 `forced`）；回执打印**宿主实际采用**的 `delivery`（空闲目标会降级为 `queue`）与 `messageID`。记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state` / `claim` / `receipt`。受保护目标（含血缘）**0 条 prompt** → 写一条 `priority:"urgent"` 的 owner-queue 项，回执 `canPush:false` + 队列位置。同 `bid + reason` 5 分钟内只刷新 `urgentAt`、不重复投递。`confirm:false` 零写入预览。见 §11.14.1 |
+| `collab_freeze` | `{ scope, target?, reason, until?, freeze?, confirm }` | **临时冻结（0.6.0）**：让协作层自己遵守「先别动」。`scope` = `session`（覆盖其子会话，血缘）/ `workspace`（目录）/ `bid`（一单）；`target` 除 `workspace` 外必填（`session` 收别名，`workspace` 缺省 = 当前工作区）。`until` 支持相对 `"30m"`/`"2h"`/`"45s"` 或绝对 ISO，默认 **30 分钟**、上限 30 天；**到期在读取时失效**（无定时器、无清理）。写入 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename + 短锁，并发不丢条目）。被冻结对象上的**新建**协作一律可读拒绝（0 写入）：`collab_handoff`（目标 / 祖先 / 目标工作区）、`collab_broadcast`（工作区，spawn 前再判一次）、`collab_accept`（该单或本会话）、`collab_escalate`（冻结优先）；读取类 `collab_list` / `collab_status` 只标 `[frozen]`。通知一次：非受保护 → 1 条 `queue` prompt（回执 `cid` / `messageId` 存 `delivery[]`）；受保护（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项。被冻会话自己的 `context` 只提示一次（写 `notifiedAt`）。`freeze:false` 解冻（幂等 no-op）；`confirm:false` 零写入预览。冻结 ≠ 归档 ≠ 删除。见 §11.14.2 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
@@ -1183,6 +1184,58 @@ collab_escalate { session:"ses_e105…d85", reason:"…", confirm:true }        
   `collab_status` 读 `priority=urgent`；`collab.state.snapshot` 的 `handoffs[]` / `queue[]` 增**可选**
   `priority:"urgent"`（TUI / GUI 只在已有行尾加标记，不改布局）。
 - **边界**：不因加急放宽任何护栏——不 push 受保护线、不改 permissions、不改 `state`；已闭环的单拒绝加急。
+
+#### 11.14.2 冻结（`collab_freeze`，0.6.0）
+
+「先别动」如果只是一句话，插件并不知道：新会话 / 新的交接还会继续往里写，冻结只靠人记。所以 0.6.0 把它做成本地
+**可逆、可过期**的一层标记，被工具与展示共同遵守：
+
+```text
+collab_freeze { scope:"session",   target:"ses_…",       reason:"等 schema 线确认", until:"2h", confirm:true }
+collab_freeze { scope:"workspace", target:"/data/project/mux", reason:"本仓暂停接管", confirm:true }
+collab_freeze { scope:"bid",       target:"b_…",         reason:"这一单先别改", confirm:true }
+collab_freeze { scope:"session",   target:"ses_…",       freeze:false, confirm:true }   # 解冻（幂等 no-op）
+```
+
+- **输入**：`scope` 三选一；`target` 除 `workspace` 外必填（`session` 收别名；`workspace` 缺省 = 当前工作区，
+  且必须是绝对路径；`bid` 必须是真实存在的记录，拼错给可读错误）。`reason` 冻结时必填（≤200，剥控制字符）。
+  `until` 相对（`"30m"`/`"2h"`/`"45s"`/`"1d"`）或绝对 ISO，默认 **30 分钟**、上限 30 天；解析不出直接报错，
+  **不会**静默回落默认值。`confirm:false` 是零写入预览（作用域 / 到期 / 受影响会话 / 将写入的文件）。
+- **存储**：`~/.config/opencode/collab-freeze.json` = `{ version:1, entries:[{scope,target,reason,by,at,until,notifiedAt?,notifiedFor?,delivery?}] }`。
+  每次写都是 **读-合并-写**（读当前 → 变异 → 清理过期 / 去重 → `tmp + rename`），并有一个 `<file>.lock` 短锁
+  （`open(…,"wx")`，2 秒视为陈旧可回收），所以两个工作区（不同进程）同时写不会互相覆盖。文件坏 / 读不出按
+  **空** 处理并记一次日志——冻结是协作元数据，不能让工具挂掉。
+- **到期**：`readFreezes(now)` 只返回 `until > now` 的项，过期即不存在；**写入时**顺手清理。没有定时器，
+  没有清理任务，`until` 就是唯一真源。
+- **优先级**：`session`（自身，或 `parentID` 链上任一祖先）> `bid` > `workspace`；血缘复用
+  `createLineage(...).protectedAncestor` 的同一套有界、防环走查，所以子会话绕不过被冻结的父线。
+- **强制点**（全部是「新建协作」，0 写入，错误文案统一带可复制的解冻命令）：
+
+  | 工具 | 判定 |
+  | --- | --- |
+  | `collab_handoff` | 目标本身 / 祖先 / 目标工作区冻结 → 拒绝（预览只提示） |
+  | `collab_broadcast` | 工作区冻结 → 拒绝（读提案之前）；spawn 前再判一次 |
+  | `collab_accept` | 该 `bid`、领取方会话（含祖先）或该单工作区冻结 → 拒绝（在 `persistRefresh` 之前） |
+  | `collab_escalate` | 冻结优先 → 拒绝（加急也不行） |
+  | `collab_list` / `collab_status` | **不受限**，只展示 |
+
+- **展示（只读）**：`collab_list` 的会话行尾 `[frozen] 冻结至 HH:MM`（继承时附 `（继承 ses_…）`），未闭环交接行尾
+  `[frozen]`，并单独列一段「冻结（临时，到期自动失效；N 条）」+ 解冻命令；`collab.state.snapshot` 的 `sessions[]`
+  增**可选** `frozen`、`handoffs[]` 增**可选** `freeze`（`{scope,target,until,reason}`，TUI / GUI 只在已有行尾加
+  `frozen` 标记，不改布局）。列 / 看都不写文件、不写 `notifiedAt`。
+- **送达（通知一次）**：写入后给目标投一条 `[frozen] …`——非受保护目标走 `session.prompt { delivery:"queue" }`
+  （**不用 `steer`**：冻结不是加急打断），回执 `cid` / `messageId` 记进条目 `delivery[]`；受保护目标（含血缘）
+  **0 条 prompt**，改写一条 `priority:"urgent"` 的 owner-queue 项（同一队列 / 上限 / 回收），条目里记 `queueId`。
+  投递失败只记录（`delivery[].error`），**不影响冻结生效**。`scope:"workspace"` 只通知该目录的根会话
+  （排除自己 / 子会话 / 已归档，最多 5 个），不制造 prompt 风暴。
+- **被冻会话自己**：它下一次 `context` 注入里看到一次 `[collab-freeze] 你被冻结：原因 / 到期 / 解冻命令 / 只阻止新建协作`
+  （继承时写明 `继承自祖先 ses_…`）；`notifiedAt` / `notifiedFor[]` 在**注入块 push 成功之后**才写（与 §11.9.3 的
+  F1 规则一致），所以注入失败会在下一轮重试而不是永久丢失。`notifiedFor[]` 让「一次」是**按会话**的：被冻结的父线
+  覆盖多个子会话时，每个子会话各得到一次提示。重新冻结（新 entry）会再提示一次。
+- **解冻**：`freeze:false` + 同 `scope`/`target` 删除条目，删除不存在的条目是 no-op（幂等）；解冻不通知任何人。
+- **语义边界**：冻结 **≠** 归档 **≠** 删除——不隐藏会话、不删文件、不写 `permissions`、不切 agent；
+  也不覆盖既有硬边界（受保护线依然 0 投递、只读 agent 依然被强制 `queue`），只是**叠加**一层拒绝。
+- **回滚**：删掉 `~/.config/opencode/collab-freeze.json`（或 `rm` 单条）即全量解除；代码回滚见任务目录 `implement.md`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

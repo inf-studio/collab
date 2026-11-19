@@ -2,6 +2,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_THRESHOLD, BROADCAST_DIR, EXPECTED } from '../constants.ts';
 import { invalid } from '../core/errors.ts';
 import { claimLock, persistRefresh, readBroadcast, releaseLock, updateLock, writeBroadcast } from '../core/claim.ts';
+import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { grantFile } from '../core/grants.ts';
 import { createLineage } from '../core/lineage.ts';
 import {
@@ -106,6 +107,12 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       const { workspace, issuePath, abs, mtimeMs } = resolveBroadcastTargets(input?.workspace, input?.issuePath);
       // D4: refuse a same-workspace broadcast before any read / write.
       assertOtherWorkspace(workspace);
+      // 0.6.0 (`collab_freeze`): a frozen workspace accepts no new hand-off —
+      // checked before the proposal is even read, so a refused call writes
+      // nothing (preview included) and makes no model call.
+      const lineage = createLineage(ctx);
+      const frozenWorkspace = await frozenBy({ workspace }, { lineage });
+      if (frozenWorkspace) throw invalid(freezeDenyText(frozenWorkspace, `工作区 ${workspace} `));
       const expected = normalizeExpected(input?.expected);
       const agent = String(input?.agent ?? 'explore').trim() || 'explore';
       const content = readFileSync(abs, 'utf8');
@@ -124,7 +131,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       // `pull`: the claimant writes the `[handoff]` line in its own last answer
       // and the requester extracts it once the lease lapses (`refresh`).
       const requesterProtected = Boolean(
-        me && (await createLineage(ctx).protectedAncestor(String(me), readConfig().protect))
+        me && (await lineage.protectedAncestor(String(me), readConfig().protect))
       );
       const receiptMode: 'push' | 'pull' = requesterProtected ? 'pull' : 'push';
       const head = [
@@ -217,6 +224,11 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       }
 
       if (!top) {
+        // 0.6.0 (`collab_freeze`): re-check right before the spawn. A freeze may
+        // have been written while the ranking was running; creating a session in
+        // a frozen workspace is exactly the "new collaboration" R3 forbids.
+        const frozenNow = await frozenBy({ workspace }, { lineage });
+        if (frozenNow) throw invalid(freezeDenyText(frozenNow, `工作区 ${workspace} `));
         // Atomic spawn claim: two concurrent broadcasts must create only one
         // session.
         const claimer = me ?? 'unknown';

@@ -213,6 +213,19 @@
  *        disappearing; different proposals keep their own line; queue items for
  *        the same proposal collapse the same way
  *
+ * S98 (`11-19-collab-freeze`, 0.6.0) covers the temporary freeze mark:
+ *   S98  `collab_freeze` writes one read-merge-write entry (default 30m) and one
+ *        `queue` notice (cid/messageId kept in `delivery[]`); a frozen session,
+ *        its **sub-sessions** (lineage), its workspace and a frozen bid all
+ *        refuse new collaboration (handoff / broadcast / accept / escalate) with
+ *        a readable error and 0 writes / 0 prompts; `collab_list` only marks
+ *        `[frozen] 冻结至 HH:MM` (mtime unchanged); expiry is read-time
+ *        (fake clock), `freeze:false` is immediate + idempotent; a protected
+ *        target gets 0 prompts + one urgent owner-queue item; the frozen session
+ *        sees the context notice exactly once (`notifiedFor[]`, per session);
+ *        two child processes merging concurrently both survive; `confirm:false`
+ *        is a zero-write preview.
+ *
  * Exits 1 if any assertion-based check fails; S1–S16 stay print-only.
  */
 import { spawn, spawnSync } from 'node:child_process';
@@ -268,6 +281,11 @@ const collabConfigPath = join(dir, 'collab.json');
 // Must be set before the plugin module is imported: the path is read once at
 // module load, exactly like `COLLAB_BROADCAST_DIR`.
 process.env.COLLAB_CONFIG = collabConfigPath;
+
+// 0.6.0 (`collab_freeze`): the freeze file is global too. Read once at module
+// load, so it must be set before the plugin import (same as the config path).
+const freezeFile = join(dir, 'freeze.json');
+process.env.COLLAB_FREEZE_FILE = freezeFile;
 
 // 0.5.0 (S94): the archive HTTP fallback. `constants.ts` reads
 // `COLLAB_SERVER_URL` **once at module load**, so the mock server is started
@@ -8753,6 +8771,495 @@ expect(
 
 // Cleanup: no S97 records / queue items left for the closing summary.
 for (const bid of [...Object.values(S97), s97PreviewBid]) rmSync(bcFile(bid), { force: true });
+rmSync(ownerQueueDir, { recursive: true, force: true });
+
+// ================== S98 (0.6.0: `collab_freeze` — 临时冻结标记)
+// R1–R6: one reversible, self-expiring mark that the tools themselves obey.
+// Frozen session / ancestor / workspace / bid refuse **new** collaboration
+// (handoff / broadcast / accept / escalate) with a readable error and 0 writes;
+// read commands only mark `[frozen]`; the target is notified once (queue prompt,
+// or an urgent owner-queue item when protected) and the frozen session sees one
+// context notice; the file is read-merge-write, so two writers keep both entries.
+const S98_WS = ws('s98');
+const S98_WS2 = ws('s98b');
+const ISSUE_S98 = issueFile(S98_WS, 'fix-freeze.md', '# freeze scope\n\n`src/store.ts`\n');
+const S98_REQ = 'ses_s98_req';
+const S98_PEER = 'ses_s98_peer';
+const S98_CHILD = 'ses_s98_child';
+const S98_MATE = 'ses_s98_mate';
+const S98_OTHER = 'ses_s98_other';
+const S98_PROTECTED = 'ses_e1eb91cebffeTv1467ubJLKebk';
+const S98_BID = 'b_9800000000000001';
+const S98_FROZEN_BID = 'b_9800000000000002';
+for (const sid of [S98_REQ, S98_PEER, S98_MATE, S98_OTHER]) {
+  sessions[sid] = {
+    id: sid,
+    agent: 'build',
+    title: `S98 ${sid}`,
+    time: { updated: Date.now(), busy: 0 },
+    location: { directory: sid === S98_OTHER ? S98_WS2 : S98_WS }
+  };
+}
+sessions[S98_CHILD] = {
+  id: S98_CHILD,
+  parentID: S98_PEER,
+  agent: 'trellis-implement',
+  title: 'S98 child of the frozen peer',
+  time: { updated: Date.now(), busy: 0 },
+  location: { directory: S98_WS }
+};
+sessions.ses_s98b_mate = {
+  id: 'ses_s98b_mate',
+  agent: 'build',
+  title: 'S98 other workspace',
+  time: { updated: Date.now(), busy: 0 },
+  location: { directory: S98_WS2 }
+};
+// A frozen bid: one open hand-off addressed to S98_PEER.
+writeFileSync(
+  bcFile(S98_BID),
+  JSON.stringify(
+    {
+      bid: S98_BID,
+      scope: 'peer',
+      workspace: S98_WS,
+      title: 'S98 冻结这一单',
+      expected: 'implement',
+      state: 'open',
+      asked: { sid: S98_PEER, at: Date.now() - 10_000, leaseMs: 300_000 },
+      attempts: 0,
+      skipped: [],
+      seenBy: [],
+      replies: [],
+      from: { sid: S98_REQ, directory: S98_WS },
+      createdAt: Date.now() - 60_000
+    },
+    null,
+    2
+  )
+);
+const freezeRaw = () => {
+  try {
+    return JSON.parse(readFileSync(freezeFile, 'utf8'));
+  } catch {
+    return { version: 1, entries: [] };
+  }
+};
+const freezeEntries = () => freezeRaw().entries ?? [];
+const freezeOf = (scope, target) => freezeEntries().find(entry => entry.scope === scope && entry.target === target);
+const s98Handoff = text =>
+  call('collab_handoff', { target: S98_PEER, text, confirm: true }, as(S98_REQ));
+
+// --- S98a: freeze a session — file entry + one queue notice (R1/R2/R5).
+const s98BeforeA = prompts.length;
+const s98A = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_PEER, reason: 'S98 store.ts 先别动，等 schema 线确认', confirm: true },
+  as(S98_REQ)
+);
+out('S98 freeze session', s98A);
+const s98EntryA = freezeOf('session', S98_PEER);
+const s98PromptA = prompts[prompts.length - 1];
+expect(
+  'S98 freezing a session writes one entry (scope/target/reason/by/until, default 30m) and returns it readably',
+  freezeRaw().version === 1 &&
+    s98EntryA?.reason === 'S98 store.ts 先别动，等 schema 线确认' &&
+    s98EntryA?.by === S98_REQ &&
+    s98EntryA.until - s98EntryA.at === 30 * 60_000 &&
+    s98A.includes('已冻结') &&
+    s98A.includes('30m 后') &&
+    /解冻: collab_freeze \{ scope:"session", target:"ses_s98_peer", freeze:false, confirm:true \}/.test(s98A),
+  `${s98EntryA?.scope}/${s98EntryA?.target}/${s98EntryA?.until - s98EntryA?.at}`
+);
+expect(
+  'S98 the notice is one `queue` prompt (never steer) and its admission receipt is kept on the entry',
+  prompts.length === s98BeforeA + 1 &&
+    s98PromptA.sessionID === S98_PEER &&
+    s98PromptA.delivery === 'queue' &&
+    String(s98PromptA.text).startsWith('[frozen] ') &&
+    /^c_/.test(String(s98EntryA?.delivery?.[0]?.cid)) &&
+    /^msg_/.test(String(s98EntryA?.delivery?.[0]?.messageId)) &&
+    s98A.includes('送达（queue）'),
+  `${s98PromptA?.delivery} / ${JSON.stringify(s98EntryA?.delivery)}`
+);
+
+// --- S98b: a frozen session refuses a new hand-off with 0 writes (R3).
+const s98BidsB = bcBids().length;
+const s98PromptsB = prompts.length;
+const s98B = await expectFail(
+  'S98 freeze session → collab_handoff is refused with the unfreeze command',
+  () => s98Handoff('S98 冻结后不该投出去'),
+  /被冻结[\s\S]*collab_freeze[\s\S]*freeze:false/
+);
+out('S98 handoff refused', s98B);
+expect(
+  'S98 … and the refusal wrote nothing: no broadcast file, 0 prompts',
+  bcBids().length === s98BidsB && prompts.length === s98PromptsB,
+  `${bcBids().length - s98BidsB} file(s) / ${prompts.length - s98PromptsB} prompt(s)`
+);
+
+// --- S98c: lineage — a sub-session of the frozen peer is refused too (R3).
+const s98C = await expectFail(
+  'S98 ancestor freeze: a sub-session cannot bypass it (血缘)',
+  () => call('collab_handoff', { target: S98_CHILD, text: 'S98 子会话也不能绕过', confirm: true }, as(S98_REQ)),
+  /被冻结[\s\S]*继承自祖先 ses_s98_peer/
+);
+
+// --- S98d: read commands only mark [frozen]; they never write / stamp (R4).
+const s98FreezeMtime = statSync(freezeFile).mtimeMs;
+const s98D = await call('collab_list', { directory: S98_WS, limit: 50 }, as(S98_REQ));
+out('S98 list', s98D.split('\n').filter(line => line.includes('frozen')).join('\n'));
+expect(
+  'S98 collab_list marks the frozen session [frozen] 冻结至 HH:MM and lists the entry + unfreeze command',
+  s98D.includes(`[frozen] 冻结至`) &&
+    s98D.includes('冻结（临时，到期自动失效；1 条）') &&
+    s98D.includes('解冻: collab_freeze {scope:"session", target:"ses_s98_peer"'),
+  s98D.split('\n').find(line => line.includes('[frozen] 冻结至')) ?? '(no marker)'
+);
+expect(
+  'S98 collab_list is read-only: the freeze file is not rewritten',
+  statSync(freezeFile).mtimeMs === s98FreezeMtime,
+  `${s98FreezeMtime} → ${statSync(freezeFile).mtimeMs}`
+);
+
+// --- S98d-2: the notice is once **per session** — a frozen ancestor tells each
+// sub-session once (notifiedFor[]), instead of only the first one that runs.
+const s98CtxPeer = contextEvent(S98_PEER);
+await hooks.context(s98CtxPeer);
+const s98CtxChild = contextEvent(S98_CHILD);
+await hooks.context(s98CtxChild);
+const s98CtxPeer2 = contextEvent(S98_PEER);
+await hooks.context(s98CtxPeer2);
+expect(
+  'S98 both the frozen session and its sub-session get the notice (each once, notifiedFor[])',
+  textOf(s98CtxPeer).includes('你被冻结') &&
+    textOf(s98CtxChild).includes('你被冻结') &&
+    textOf(s98CtxChild).includes('继承自祖先 ses_s98_peer') &&
+    freezeOf('session', S98_PEER)?.notifiedFor?.length === 2 &&
+    Number(freezeOf('session', S98_PEER)?.notifiedAt) > 0,
+  JSON.stringify(freezeOf('session', S98_PEER)?.notifiedFor)
+);
+expect(
+  'S98 … and the second request of the same session carries no notice',
+  !textOf(s98CtxPeer2).includes('你被冻结'),
+  textOf(s98CtxPeer2).slice(0, 80)
+);
+
+// --- S98e: expiry is read-time (mutation: removing the `until > now` filter
+// makes the second half of this check return the entry again).
+const s98Until = s98EntryA.until;
+const s98Live = internals.readFreezes(s98Until - 1);
+const s98Expired = internals.readFreezes(s98Until + 1);
+const s98PureLegacy = internals.freezeFor(s98Expired, { session: S98_PEER });
+expect(
+  'S98 until expires on read: live a millisecond before, gone a millisecond after (no cleanup needed)',
+  s98Live.some(entry => entry.target === S98_PEER) && s98Expired.length === 0 && s98PureLegacy === undefined,
+  `${s98Live.length} live / ${s98Expired.length} expired`
+);
+// The lineage half is what makes S98c pass: without the ancestor list the child
+// is simply not frozen (the mutation the review asked to record).
+const s98NoAncestors = internals.freezeFor(s98Live, { session: S98_CHILD });
+const s98WithAncestors = internals.freezeFor(s98Live, { session: S98_CHILD, ancestors: [S98_PEER] });
+expect(
+  'S98 ancestry lookup: the child alone is not frozen, the same child with its parent chain is',
+  s98NoAncestors === undefined && s98WithAncestors?.entry.target === S98_PEER,
+  `${s98NoAncestors ? 'hit' : 'none'} / ${s98WithAncestors?.entry.target ?? 'none'}`
+);
+
+// --- S98f: freeze:false lifts it immediately; a repeat is a no-op (R1/R6).
+const s98F = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_PEER, freeze: false, confirm: true },
+  as(S98_REQ)
+);
+out('S98 unfreeze', s98F);
+expect(
+  'S98 freeze:false removes the entry and says collaboration is usable again',
+  s98F.includes('已解冻') && !freezeOf('session', S98_PEER) && s98F.includes('剩余 0 条冻结'),
+  s98F.split('\n')[0]
+);
+const s98F2 = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_PEER, freeze: false, confirm: true },
+  as(S98_REQ)
+);
+expect(
+  'S98 unfreezing twice is a no-op (idempotent, not an error)',
+  s98F2.includes('no-op'),
+  s98F2.split('\n')[0]
+);
+const s98PromptsF = prompts.length;
+const s98G = await s98Handoff('S98 解冻后可以交接了');
+const s98Gbid = bidOf(s98G);
+expect(
+  'S98 after unfreezing, the same hand-off goes through (prompt + record)',
+  prompts.length === s98PromptsF + 1 && Boolean(s98Gbid) && s98G.includes('已投递'),
+  s98G.split('\n')[0]
+);
+
+// --- S98g: freeze a workspace → broadcast refused, other workspaces untouched.
+const s98PromptsH = prompts.length;
+const s98H = await call(
+  'collab_freeze',
+  { scope: 'workspace', target: S98_WS, reason: 'S98 本仓暂停接管', confirm: true },
+  as(S98_REQ)
+);
+out('S98 freeze workspace', s98H);
+expect(
+  'S98 freezing a workspace notifies its root sessions only (self / sub-sessions excluded)',
+  freezeOf('workspace', S98_WS)?.reason === 'S98 本仓暂停接管' &&
+    prompts.length === s98PromptsH + 2 &&
+    [S98_PEER, S98_MATE].every(sid => prompts.slice(s98PromptsH).some(prompt => prompt.sessionID === sid)) &&
+    !prompts.slice(s98PromptsH).some(prompt => prompt.sessionID === S98_REQ || prompt.sessionID === S98_CHILD),
+  `${prompts.length - s98PromptsH} prompt(s)`
+);
+const s98BidsI = bcBids().length;
+const s98I = await expectFail(
+  'S98 freeze workspace → collab_broadcast is refused (0 writes, before spawn)',
+  () => call('collab_broadcast', { workspace: S98_WS, issuePath: ISSUE_S98, confirm: true }, as(S98_REQ)),
+  /被冻结[\s\S]*collab_freeze/
+);
+expect(
+  'S98 … and no broadcast file was written',
+  bcBids().length === s98BidsI,
+  `${bcBids().length - s98BidsI} file(s)`
+);
+const s98PromptsEsc = prompts.length;
+await expectFail(
+  'S98 freeze workspace → collab_escalate to a session inside it is refused too',
+  () => call('collab_escalate', { session: S98_MATE, reason: 'S98 加急也不行', confirm: true }, as(S98_REQ)),
+  /被冻结[\s\S]*scope=workspace/
+);
+expect(
+  'S98 … with 0 prompts delivered',
+  prompts.length === s98PromptsEsc,
+  `${prompts.length - s98PromptsEsc} prompt(s)`
+);
+const s98Other = await call('collab_list', { directory: S98_WS2, limit: 50 }, as(S98_REQ));
+expect(
+  'S98 a freeze of one workspace is not shown for another workspace\'s sessions',
+  s98Other.includes(S98_OTHER) &&
+    !new RegExp(`${S98_OTHER}[^\\n]*\\[frozen\\]`).test(s98Other) &&
+    !s98Other.includes(`[frozen] 冻结至`),
+  s98Other.split('\n').find(line => line.includes(S98_OTHER)) ?? '(no line)'
+);
+await call('collab_freeze', { scope: 'workspace', target: S98_WS, freeze: false, confirm: true }, as(S98_REQ));
+
+// --- S98h: freeze a bid → accept / escalate refused; the record is untouched.
+const s98J = await call(
+  'collab_freeze',
+  { scope: 'bid', target: S98_BID, reason: 'S98 这一单先别改', confirm: true },
+  as(S98_REQ)
+);
+out('S98 freeze bid', s98J);
+expect(
+  'S98 freezing a bid notifies its addressee and keeps the record unchanged',
+  freezeOf('bid', S98_BID)?.reason === 'S98 这一单先别改' &&
+    prompts[prompts.length - 1]?.sessionID === S98_PEER &&
+    bcRead(S98_BID).state === 'open' &&
+    !bcRead(S98_BID).receipt,
+  s98J.split('\n').filter(line => line.includes('送达') || line.includes('交接')).join(' / ')
+);
+const s98PromptsK = prompts.length;
+await expectFail(
+  'S98 freeze bid → collab_accept is refused',
+  () => call('collab_accept', { bid: S98_BID, confirm: true }, as(S98_MATE)),
+  /被冻结[\s\S]*scope=bid/
+);
+await expectFail(
+  'S98 freeze bid → collab_escalate is refused (freeze wins over urgent)',
+  () => call('collab_escalate', { bid: S98_BID, reason: 'S98 加急也不行', confirm: true }, as(S98_REQ)),
+  /被冻结[\s\S]*collab_freeze/
+);
+expect(
+  'S98 the refused accept / escalate delivered nothing and left the record alone',
+  prompts.length === s98PromptsK && bcRead(S98_BID).state === 'open' && !bcRead(S98_BID).priority,
+  `${prompts.length - s98PromptsK} prompt(s) / ${bcRead(S98_BID).state}`
+);
+await call('collab_freeze', { scope: 'bid', target: S98_BID, freeze: false, confirm: true }, as(S98_REQ));
+
+// --- S98i: a protected target → 0 prompts, one urgent owner-queue item (R5).
+rmSync(ownerQueueDir, { recursive: true, force: true });
+const s98PromptsL = prompts.length;
+const s98L = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_PROTECTED, reason: 'S98 schema 线暂停', confirm: true },
+  as(S98_REQ)
+);
+out('S98 protected target', s98L);
+const s98QueueFiles = (() => {
+  try {
+    return readdirSync(join(ownerQueueDir, S98_PROTECTED)).filter(name => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+})();
+const s98QueueItem = s98QueueFiles.length
+  ? JSON.parse(readFileSync(join(ownerQueueDir, S98_PROTECTED, s98QueueFiles[0]), 'utf8'))
+  : {};
+expect(
+  'S98 protected: 0 prompts, one priority:"urgent" owner-queue item starting with [frozen]',
+  prompts.length === s98PromptsL &&
+    s98QueueFiles.length === 1 &&
+    s98QueueItem.priority === 'urgent' &&
+    String(s98QueueItem.summary).startsWith('[frozen] ') &&
+    freezeOf('session', S98_PROTECTED)?.delivery?.[0]?.queueId === s98QueueItem.id &&
+    s98L.includes('受保护目标（0 条 prompt，已排队）'),
+  `${s98QueueFiles.length} item(s) / ${s98QueueItem.priority}`
+);
+
+// --- S98j: the frozen session sees the notice exactly once (R4).
+const s98Ctx1 = contextEvent(S98_PROTECTED);
+await hooks.context(s98Ctx1);
+const s98Ctx2 = contextEvent(S98_PROTECTED);
+await hooks.context(s98Ctx2);
+const s98CtxText1 = textOf(s98Ctx1);
+const s98CtxText2 = textOf(s98Ctx2);
+out('S98 frozen context notice', s98CtxText1);
+expect(
+  'S98 the frozen session is told once: reason / expiry / unfreeze command in its own context',
+  s98CtxText1.includes('你被冻结') &&
+    s98CtxText1.includes('S98 schema 线暂停') &&
+    s98CtxText1.includes('到期:') &&
+    s98CtxText1.includes('collab_freeze { scope:"session"'),
+  s98CtxText1.split('\n').find(line => line.includes('你被冻结')) ?? '(no notice)'
+);
+expect(
+  'S98 … and only once: the second request carries no notice, the entry is stamped notifiedAt',
+  !s98CtxText2.includes('你被冻结') && Number(freezeOf('session', S98_PROTECTED)?.notifiedAt) > 0,
+  `second=${s98CtxText2.includes('你被冻结')} notifiedAt=${freezeOf('session', S98_PROTECTED)?.notifiedAt}`
+);
+await call('collab_freeze', { scope: 'session', target: S98_PROTECTED, freeze: false, confirm: true }, as(S98_REQ));
+
+// --- S98k: concurrent writers keep each other's entries (read-merge-write).
+const s98Child = (target, reason) => `
+process.env.COLLAB_FREEZE_FILE = ${JSON.stringify(freezeFile)};
+const mod = await import(${JSON.stringify(`file://${distEntry}`)});
+const now = Date.now();
+mod.__internals.mergeFreezes(list => [...list, { scope: 'session', target: ${JSON.stringify(
+  target
+)}, reason: ${JSON.stringify(reason)}, by: 'ses_s98_child', at: now, until: now + 60000 }]);
+`;
+const s98RunChild = code =>
+  new Promise(resolveChild => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], { stdio: 'ignore' });
+    child.on('exit', code_ => resolveChild(code_));
+    child.on('error', () => resolveChild(-1));
+  });
+const s98Exits = await Promise.all([
+  s98RunChild(s98Child('ses_s98_c1', 'S98 并发写 A')),
+  s98RunChild(s98Child('ses_s98_c2', 'S98 并发写 B'))
+]);
+expect(
+  'S98 two concurrent writers both survive the merge (read-merge-write + guard, no lost entry)',
+  s98Exits.every(exit => exit === 0) &&
+    freezeOf('session', 'ses_s98_c1')?.reason === 'S98 并发写 A' &&
+    freezeOf('session', 'ses_s98_c2')?.reason === 'S98 并发写 B',
+  `exits=${s98Exits.join(',')} entries=${freezeEntries().length}`
+);
+
+// --- S98l: preview is a zero-write, zero-prompt dry run.
+const s98Mtime = statSync(freezeFile).mtimeMs;
+const s98PromptsM = prompts.length;
+const s98M = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_MATE, reason: '仅预览', until: '5m', confirm: false },
+  as(S98_REQ)
+);
+out('S98 preview', s98M);
+expect(
+  'S98 confirm:false previews scope/target/expiry/recipients and writes / prompts nothing',
+  s98M.includes('未冻结') &&
+    s98M.includes('到期:') &&
+    s98M.includes('将影响:') &&
+    statSync(freezeFile).mtimeMs === s98Mtime &&
+    prompts.length === s98PromptsM &&
+    !freezeOf('session', S98_MATE),
+  `${s98Mtime} → ${statSync(freezeFile).mtimeMs}`
+);
+const s98N = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_MATE, reason: '相对时间', until: '5m', confirm: true },
+  as(S98_REQ)
+);
+const s98EntryN = freezeOf('session', S98_MATE);
+expect(
+  'S98 a relative until ("5m") is accepted (≈300000ms) and quoted back',
+  s98EntryN && s98EntryN.until - s98EntryN.at === 300_000 && s98N.includes('已冻结'),
+  `${s98EntryN?.until - s98EntryN?.at}ms`
+);
+await call('collab_freeze', { scope: 'session', target: S98_MATE, freeze: false, confirm: true }, as(S98_REQ));
+
+// --- S98n (review P3②): freezing yourself marks, but never queues a prompt to you.
+const s98SelfPrompts = prompts.length;
+const s98Self = await call(
+  'collab_freeze',
+  { scope: 'session', target: S98_REQ, reason: '自己停手', confirm: true },
+  as(S98_REQ)
+);
+expect(
+  'S98 a self-freeze sets the marker without queuing a [frozen] prompt to yourself',
+  s98Self.includes('已冻结') &&
+    prompts.length === s98SelfPrompts &&
+    freezeOf('session', S98_REQ)?.reason === '自己停手',
+  `prompts ${s98SelfPrompts} → ${prompts.length}`
+);
+await call('collab_freeze', { scope: 'session', target: S98_REQ, freeze: false, confirm: true }, as(S98_REQ));
+
+// --- S98m: validation is readable and writes nothing.
+await expectFail(
+  'S98 an unknown scope is a readable error',
+  () => call('collab_freeze', { scope: 'planet', target: S98_PEER, reason: 'x', confirm: true }, as(S98_REQ)),
+  /scope 不合法/
+);
+await expectFail(
+  'S98 scope:"session" without a target is refused',
+  () => call('collab_freeze', { scope: 'session', reason: 'x', confirm: true }, as(S98_REQ)),
+  /需要 target/
+);
+await expectFail(
+  'S98 an empty reason is refused',
+  () => call('collab_freeze', { scope: 'session', target: S98_PEER, reason: '   ', confirm: true }, as(S98_REQ)),
+  /reason 不能为空/
+);
+await expectFail(
+  'S98 an unparseable until is refused (not silently defaulted)',
+  () => call('collab_freeze', { scope: 'session', target: S98_PEER, reason: 'x', until: 'soon', confirm: true }, as(S98_REQ)),
+  /until 不合法/
+);
+await expectFail(
+  'S98 an unknown bid is a readable error',
+  () => call('collab_freeze', { scope: 'bid', target: 'b_98000000000000ff', reason: 'x', confirm: true }, as(S98_REQ)),
+  /没有交接单/
+);
+await expectFail(
+  'S98 a workspace target must be absolute',
+  () => call('collab_freeze', { scope: 'workspace', target: 'relative/path', reason: 'x', confirm: true }, as(S98_REQ)),
+  /绝对路径/
+);
+
+// --- S98n: registered exactly once; the description states the contract.
+expect(
+  'S98 collab_freeze is registered exactly once (19 → 20 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 20,
+  `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
+);
+const s98Desc = String(tool('collab_freeze').description);
+expect(
+  'S98 the description states scope / until / read-merge-write / freeze≠archive / the enforced tools',
+  /scope:"session"\|"workspace"\|"bid"/.test(s98Desc) &&
+    /until/.test(s98Desc) &&
+    /read-merge-write/.test(s98Desc) &&
+    /not\*\* an archive/.test(s98Desc) &&
+    /collab_handoff/.test(s98Desc) &&
+    /collab_escalate/.test(s98Desc),
+  s98Desc.slice(0, 160)
+);
+
+// Cleanup: no S98 freeze entries / records / queue items left behind.
+for (const bid of [S98_BID, s98Gbid].filter(Boolean)) rmSync(bcFile(bid), { force: true });
+rmSync(freezeFile, { force: true });
+rmSync(`${freezeFile}.lock`, { force: true });
 rmSync(ownerQueueDir, { recursive: true, force: true });
 
 const failed = checks.filter(check => !check.ok);

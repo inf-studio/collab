@@ -12,10 +12,11 @@
  * the assembly is unit-testable without a host or a real `~/.config` directory
  * (`test/snapshot-shape.mjs`), and `index.ts` binds the real ones.
  */
-import { BCAST_DONE_STATES } from '../constants.ts';
-import type { BroadcastRecord, LockRecord, OwnerQueueItem, SessionInfoLike } from '../types.ts';
-import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from '../rpc.ts';
+import { BCAST_DONE_STATES, MAX_LINEAGE_DEPTH } from '../constants.ts';
+import type { BroadcastRecord, FreezeEntry, LockRecord, OwnerQueueItem, SessionInfoLike } from '../types.ts';
+import type { Snapshot, SnapshotFreeze, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from '../rpc.ts';
 import { asObject, sessionState, truncate, withTimeout } from '../util.ts';
+import { freezeFor } from './freeze.ts';
 import { stateOf } from './locks.ts';
 
 /** A hung `session.list` must not hang the panel: the lock/hand-off half still answers. */
@@ -34,6 +35,12 @@ export interface SnapshotSource {
    * block stays empty — it is never an error.
    */
   queue?(from: string): OwnerQueueItem[];
+  /**
+   * Every **live** freeze (`readFreezes`, read-only). Optional for the same
+   * reason as `queue`: omitted = no `frozen` / `freeze` markers at all, never an
+   * error (an older server answers without them).
+   */
+  freezes?(): FreezeEntry[];
 }
 
 export interface SnapshotReader {
@@ -61,7 +68,21 @@ export function readSession(input: unknown): string | undefined {
   return session || undefined;
 }
 
-function toSession(info: SessionInfoLike, workspace: string | undefined): SnapshotSession | undefined {
+/** One freeze hit → the optional marker the panel reads (display only). */
+function toFreeze(hit: { entry: FreezeEntry }): SnapshotFreeze {
+  return {
+    scope: hit.entry.scope,
+    target: hit.entry.target,
+    until: hit.entry.until,
+    reason: hit.entry.reason
+  };
+}
+
+function toSession(
+  info: SessionInfoLike,
+  workspace: string | undefined,
+  frozen?: SnapshotFreeze
+): SnapshotSession | undefined {
   const sid = String(info?.id ?? '');
   if (!sid) return undefined;
   const state = sessionState(info);
@@ -73,7 +94,8 @@ function toSession(info: SessionInfoLike, workspace: string | undefined): Snapsh
     agent: String(info.agent ?? '?'),
     busy: state === 'busy',
     workspace: info?.location?.directory ?? workspace ?? '',
-    ...(parent ? { parent: String(parent) } : {})
+    ...(parent ? { parent: String(parent) } : {}),
+    ...(frozen ? { frozen } : {})
   };
 }
 
@@ -98,7 +120,7 @@ function toLock(record: LockRecord, now: number): SnapshotLock | undefined {
   };
 }
 
-function toHandoff(record: BroadcastRecord, now: number): SnapshotHandoff | undefined {
+function toHandoff(record: BroadcastRecord, now: number, freeze?: SnapshotFreeze): SnapshotHandoff | undefined {
   const bid = String(record.bid ?? '');
   if (!bid) return undefined;
   const state = String(record.state ?? 'open');
@@ -116,7 +138,9 @@ function toHandoff(record: BroadcastRecord, now: number): SnapshotHandoff | unde
     // 0.5.0: read-only marker for a hand-off whose spawned session was archived.
     ...(Number(record.archivedAt) > 0 ? { archived: true } : {}),
     // 0.6.0 (`collab_escalate`): read-only marker; the panel layout is unchanged.
-    ...(asObject(record).priority === 'urgent' ? { priority: 'urgent' as const } : {})
+    ...(asObject(record).priority === 'urgent' ? { priority: 'urgent' as const } : {}),
+    // 0.6.0 (`collab_freeze`): the bid or its workspace is frozen (read-only).
+    ...(freeze ? { freeze } : {})
   };
 }
 
@@ -157,8 +181,43 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
     listed = []; // an unreachable session list is an empty list, not a failed snapshot
   }
 
+  // 0.6.0 (`collab_freeze`): live freezes, read-only. A source without the
+  // reader (an older server / a unit test) simply has no markers; an expired
+  // entry is dropped here as well, so a reader that returns the raw file still
+  // cannot mark a freeze that is over.
+  const freezes = (typeof source.freezes === 'function' ? source.freezes() : []).filter(
+    entry => Number(entry?.until) > now
+  );
+
+  // 0.6.0 (`collab_freeze`): the freeze marker per session, computed once from
+  // the page we already have (its `parentID` chain) — no host call, no write.
+  const frozenSessions = new Map<string, SnapshotFreeze>();
+  if (freezes.length) {
+    const parentOf = new Map(
+      listed.map(info => [String(info?.id ?? ''), String(info?.parentID ?? info?.parentId ?? '')] as const)
+    );
+    for (const info of listed) {
+      const sid = String(info?.id ?? '');
+      if (!sid) continue;
+      const chain: string[] = [];
+      const seen = new Set<string>([sid]);
+      let parent = parentOf.get(sid) ?? '';
+      while (parent && chain.length < MAX_LINEAGE_DEPTH && !seen.has(parent)) {
+        chain.push(parent);
+        seen.add(parent);
+        parent = parentOf.get(parent) ?? '';
+      }
+      const hit = freezeFor(freezes, {
+        session: sid,
+        ancestors: chain,
+        workspace: info?.location?.directory ?? workspace
+      });
+      if (hit) frozenSessions.set(sid, toFreeze(hit));
+    }
+  }
+
   const sessions = listed
-    .map(info => toSession(info, workspace))
+    .map(info => toSession(info, workspace, frozenSessions.get(String(info?.id ?? ''))))
     .filter((session): session is SnapshotSession => Boolean(session))
     .filter(session => (workspace ? !session.workspace || session.workspace === workspace : true))
     .sort(
@@ -176,7 +235,12 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
 
   const handoffs = source
     .handoffs()
-    .map(record => toHandoff(record, now))
+    .map(record => {
+      const hit = freezes.length
+        ? freezeFor(freezes, { bid: record.bid, workspace: record.workspace })
+        : undefined;
+      return toHandoff(record, now, hit ? toFreeze(hit) : undefined);
+    })
     .filter((handoff): handoff is SnapshotHandoff => Boolean(handoff))
     .filter(handoff => (workspace ? handoff.workspace === workspace : true))
     .sort((left, right) => right.ageMs - left.ageMs || left.bid.localeCompare(right.bid));

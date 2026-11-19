@@ -148,11 +148,49 @@ const broadcasts = [
   }
 ];
 
+// 0.6.0 (`collab_freeze`): live freezes the panel should mark. The expired one
+// must be ignored by the view (an expired freeze simply stops existing).
+const freezes = [
+  {
+    scope: 'session',
+    target: 'ses_a1',
+    reason: 'alpha worker 冻结：等 schema 线确认',
+    by: 'ses_a2',
+    at: now - 60_000,
+    until: now + 600_000
+  },
+  {
+    scope: 'workspace',
+    target: wsB,
+    reason: 'beta 仓暂停接管',
+    by: 'ses_a1',
+    at: now - 30_000,
+    until: now + 300_000
+  },
+  {
+    scope: 'bid',
+    target: 'b_00000000a1',
+    reason: '这一单先别改',
+    by: 'ses_a1',
+    at: now - 10_000,
+    until: now + 120_000
+  },
+  {
+    scope: 'session',
+    target: 'ses_a2',
+    reason: '已过期的冻结',
+    by: 'ses_a1',
+    at: now - 120_000,
+    until: now - 1
+  }
+];
+
 const source = {
   sessions: async input =>
     sessions.filter(session => (input?.directory ? session.location.directory === input.directory : true)),
   locks: () => records,
   handoffs: () => broadcasts,
+  freezes: () => freezes,
   queue: from =>
     [
       {
@@ -327,6 +365,52 @@ expect(
   JSON.stringify(snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4'))
 );
 
+/* ------------------------------------------------- 4b. freeze markers (0.6.0) */
+
+// `collab_freeze` is display-only in the snapshot: a frozen session / hand-off
+// keeps its row and gains an optional marker. The expired entry is ignored, an
+// ancestor's freeze reaches the sub-session, and a workspace freeze marks both
+// its sessions and its hand-offs.
+const frozenA1 = snapshot.sessions.find(session => session.sid === 'ses_a1')?.frozen;
+const frozenSub = snapshot.sessions.find(session => session.sid === 'ses_sub')?.frozen;
+expect(
+  'C2 a frozen session carries frozen{scope,until,reason} and its sub-session inherits it',
+  frozenA1?.scope === 'session' &&
+    frozenA1?.target === 'ses_a1' &&
+    frozenA1?.until === now + 600_000 &&
+    frozenA1?.reason.includes('alpha worker') &&
+    frozenSub?.scope === 'session' &&
+    frozenSub?.target === 'ses_a1',
+  JSON.stringify({ frozenA1, frozenSub })
+);
+expect(
+  'C2 an expired freeze is not reported (it simply stops existing)',
+  !snapshot.sessions.find(session => session.sid === 'ses_a2')?.frozen,
+  JSON.stringify(snapshot.sessions.find(session => session.sid === 'ses_a2'))
+);
+expect(
+  'C2 a frozen workspace marks its sessions and its hand-offs',
+  snapshot.sessions.find(session => session.sid === 'ses_b1')?.frozen?.scope === 'workspace' &&
+    snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2')?.freeze?.scope === 'workspace',
+  JSON.stringify({
+    session: snapshot.sessions.find(session => session.sid === 'ses_b1')?.frozen,
+    handoff: snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2')?.freeze
+  })
+);
+expect(
+  'C2 a frozen bid marks its hand-off (and only that one)',
+  snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000a1')?.freeze?.scope === 'bid' &&
+    !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.freeze,
+  JSON.stringify(snapshot.handoffs.map(handoff => [handoff.bid, handoff.freeze?.scope]))
+);
+const noFreezeSource = { sessions: source.sessions, locks: source.locks, handoffs: source.handoffs };
+const withoutFreezes = await buildSnapshot(noFreezeSource, {}, now);
+expect(
+  'C2 a source without a freezes reader answers no markers (older server, no crash)',
+  withoutFreezes.sessions.every(session => !session.frozen) &&
+    withoutFreezes.handoffs.every(handoff => !handoff.freeze)
+);
+
 /* ------------------------------------------------------- 4. workspace filter */
 
 const onlyBeta = await buildSnapshot(source, { workspace: wsB }, now);
@@ -400,6 +484,19 @@ expect(
   Boolean(output.properties?.handoffs?.items?.properties?.archived) &&
     !output.properties?.handoffs?.items?.required?.includes('archived'),
   JSON.stringify(output.properties?.handoffs?.items?.properties)
+);
+// 0.6.0 (`collab_freeze`): both markers are optional — an older server's answer
+// stays valid, and a consumer must tolerate their absence.
+expect(
+  'C2 the session row declares optional frozen and the hand-off row optional freeze (0.6.0)',
+  Boolean(output.properties?.sessions?.items?.properties?.frozen) &&
+    !output.properties?.sessions?.items?.required?.includes('frozen') &&
+    Boolean(output.properties?.handoffs?.items?.properties?.freeze) &&
+    !output.properties?.handoffs?.items?.required?.includes('freeze'),
+  JSON.stringify({
+    session: output.properties?.sessions?.items?.properties?.frozen,
+    handoff: output.properties?.handoffs?.items?.properties?.freeze
+  })
 );
 expect(
   'C2 the lock row declares optional waiterAgeMs / staleWaiters / stale (0.6.0)',

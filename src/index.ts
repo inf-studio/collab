@@ -7,6 +7,8 @@ import { allBroadcasts } from './core/claim.ts';
 import { archiveSession, shouldArchive } from './core/archive.ts';
 import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason, touchWaiters } from './core/locks.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
+import { freezeFor, freezeNotice, freezeNoticeText, markFreezeNotified, mergeFreezes, readFreezes } from './core/freeze.ts';
+import { createLineage } from './core/lineage.ts';
 import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { CollabState } from './rpc.ts';
@@ -160,7 +162,23 @@ const plugin: Plugin.Plugin = {
           log('waiter heartbeat failed:', (error as Error)?.message ?? error);
         }
       }
-      return contextHook(event);
+      await contextHook(event);
+      // 0.6.0 (`collab_freeze`): a frozen session learns it once. The block is
+      // pushed **first** and `notifiedAt` is stamped after — the same F1 rule the
+      // follow-up hint uses, so an injection that throws shows it again next
+      // request instead of losing it for good.
+      try {
+        if (event?.sessionID && Array.isArray(event.system)) {
+          const notice = await freezeNotice(event.sessionID, { lineage: createLineage(ctx) });
+          if (notice) {
+            event.system.push({ type: 'text', text: freezeNoticeText(notice.entry, notice.via) });
+            markFreezeNotified(notice.entry, event.sessionID);
+          }
+        }
+      } catch (error) {
+        // A freeze notice is bookkeeping: it must never fail a model request.
+        log('freeze notice failed:', (error as Error)?.message ?? error);
+      }
     });
 
     // 4) Read-only RPC for the desktop sidebar (C2, 0.3.0). Optional: an older
@@ -172,7 +190,10 @@ const plugin: Plugin.Plugin = {
       handoffs: allBroadcasts,
       // 0.4.2: the requester's own owner-queue items, for the TUI panel's third
       // block. Read-only, and only for the session the caller names.
-      queue: from => mineFor(from)
+      queue: from => mineFor(from),
+      // 0.6.0 (`collab_freeze`): live freezes → the optional `frozen` / `freeze`
+      // markers. Read-only; an empty file is simply "nothing is frozen".
+      freezes: () => readFreezes()
     });
     const rpcDomain = (host as { rpc?: Plugin.Context['rpc'] }).rpc;
     const rpcRegistration = rpcDomain
@@ -269,5 +290,11 @@ export const __internals = {
   // Spawned-session archive (0.5.0) — the eight-rule gate and the one writer,
   // unit-testable with an injected gate (no host).
   shouldArchive,
-  archiveSession
+  archiveSession,
+  // Temporary freeze (0.6.0) — the file is a global, read-merge-write store, so
+  // its merge and precedence lookup are unit-testable without a host (the
+  // harness also proves two concurrent writers keep each other's entries).
+  readFreezes,
+  mergeFreezes,
+  freezeFor
 };

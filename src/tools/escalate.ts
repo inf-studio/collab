@@ -30,6 +30,7 @@ import { BCAST_DONE_STATES } from '../constants.ts';
 import { deliveryOf } from '../core/ack.ts';
 import { isValidBid, allBroadcasts, readBroadcast, writeBroadcast } from '../core/claim.ts';
 import { deliveryFailure, invalid } from '../core/errors.ts';
+import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { enqueue, listFor, queueDir, queueID } from '../core/owner-queue.ts';
 import { isValidThreadID, newCorrelationID, normalizeThreadID } from '../ids.ts';
@@ -262,8 +263,22 @@ export function escalateTool(kit: ToolKit): ToolDefinition {
         throw invalid('拒绝加急：target 就是当前会话本身（不会给自己投递）。');
       }
 
-      const target = await resolveTarget(targetSid);
+      // 0.6.0 (`collab_freeze`): the freeze wins over the escalation — a frozen
+      // object accepts no *new* collaboration, an urgent nudge included. The
+      // refusal text names the exact `collab_freeze {freeze:false}` command.
+      // The target is resolved first so a frozen **workspace** is caught too.
       const lineage = createLineage(ctx);
+      const target = await resolveTarget(targetSid);
+      const freeze = await frozenBy(
+        {
+          session: targetSid,
+          bid: record?.bid,
+          workspace: target.info?.location?.directory ?? record?.workspace
+        },
+        { lineage }
+      );
+      if (freeze) throw invalid(freezeDenyText(freeze));
+
       const guard = await lineage.protectedAncestor(targetSid, config.protect);
       const { mode, forced } = resolveMode(requestsSteer ? 'steer' : 'queue', target.info?.agent);
       const targetLine =

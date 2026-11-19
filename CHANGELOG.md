@@ -47,6 +47,33 @@
   - 展示：`collab_list` 未闭环行尾 `[urgent]`、我提交的队列项标 `· [urgent]`；`collab_status` 读
     `priority=urgent`；`collab.state.snapshot` 的 `handoffs[]` / `queue[]` 增可选 `priority`（TUI / GUI 只在
     已有行尾加标记，不改布局）。文档：`docs/collab.md` §11.2 + §11.14.1；`README.md`；`skills/collab`（一点九）。
+- **`collab_freeze`（新文件 `src/core/freeze.ts` + `src/tools/freeze.ts`）**：**临时冻结**一个
+  `session`（含其子会话，血缘）/ `workspace` / `bid`，19 → 20 个工具。协作层自己遵守，不靠人记。
+  - 输入 `{ scope, target?, reason, until?, freeze?, confirm }`：`target` 除 `workspace` 外必填（`session`
+    收别名；`workspace` 缺省 = 当前工作区且必须绝对路径；`bid` 必须是真实记录）；`reason` 冻结时必填
+    （≤200，剥控制字符）；`until` 相对（`"30m"`/`"2h"`/`"45s"`/`"1d"`）或绝对 ISO，默认 **30 分钟**、上限
+    30 天，解析不出直接报错；`confirm:false` 零写入预览；`freeze:false` 解冻（幂等 no-op）。
+  - **存储** `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[{scope,target,reason,by,at,until,
+    notifiedAt?,notifiedFor?,delivery?}]}`）：`mergeFreezes(mutate)` 读-合并-写 + `tmp+rename` + `<file>.lock` 短锁
+    （2s 陈旧可回收），两个进程并发写不丢条目；**到期在读取时失效**（`until > now`），写入时顺带清理；
+    坏文件按空处理并记一次日志。
+  - **判定** `frozenBy({session,bid,workspace})`：`session`（自身或 `parentID` 链上的祖先，复用
+    `createLineage(...).protectedAncestor` 的有界走查）> `bid` > `workspace`。
+  - **强制点**（0 写入，错误文案统一 `拒绝：…被冻结（scope=…, 到 HH:MM，原因：…）；用 collab_freeze
+    {scope,target,freeze:false,confirm:true} 解冻`）：`collab_handoff`（目标 / 祖先 / 目标工作区）、
+    `collab_broadcast`（工作区，读提案前 + spawn 前各一次）、`collab_accept`（该 bid / 领取方会话 / 该单
+    工作区，在 `persistRefresh` 之前）、`collab_escalate`（冻结优先）。`collab_list` / `collab_status` 不受限。
+  - **展示**：`collab_list` 会话行尾 `[frozen] 冻结至 HH:MM`（继承时 `（继承 ses_…）`）、未闭环交接行尾
+    `[frozen]`、单独一段「冻结（临时，到期自动失效；N 条）」+ 解冻命令；`collab.state.snapshot` 的
+    `sessions[]` 增可选 `frozen`、`handoffs[]` 增可选 `freeze`（TUI / GUI 只在已有行尾加 `frozen`，不改布局）。
+    读命令不写文件、不写 `notifiedAt`。
+  - **送达一次**：非受保护目标 → 1 条 `session.prompt {delivery:"queue"}`（不用 `steer`；`cid`/`messageId`
+    存进条目 `delivery[]`）；受保护（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项
+    （记 `queueId`）；投递失败只记录，不影响冻结生效。`workspace` 只通知该目录的根会话（排除自己 / 子会话 /
+    已归档，≤5 个）。被冻会话在自己的 `context` 里**只提示一次**（push 成功后才写 `notifiedAt`）。
+  - **语义**：冻结 ≠ 归档 ≠ 删除——不隐藏会话、不删文件、不写 permissions、不切 agent，也不放宽任何既有
+    硬边界（受保护线仍 0 投递、只读 agent 仍被强制 `queue`）。
+  - 文档：`docs/collab.md` §11.2 + 新增 §11.14.2；`README.md` 工具表；`skills/collab`（一点十）。
 
 ### Fixed
 
@@ -117,6 +144,20 @@
   `test/gui-entry.mjs`：`header.counts` 改为四个占位符。
 - 变异验证（各还原）：删 `reapWaiters` → 4 条失败；删去重 → 4 条失败；`held = locks.length` →
   GUI / TUI / `countsOf` 三处失败。
+- `test/handoff-harness.mjs`：新增 **S98**（38 条，`collab_freeze`）——冻结会话写一条 entry（默认 30m）+
+  一条 `queue` 通知（`cid`/`messageId` 入 `delivery[]`）、`collab_handoff` 可读拒绝且 0 写入（无广播文件 /
+  0 prompt）、**祖先冻结 → 子会话也被拒**（`继承自祖先`）、`collab_list` 标 `[frozen] 冻结至` 且 mtime 不变、
+  到期（假时钟：`until-1` 有 / `until+1` 无）+ 纯 lineage 查询（无祖先=不命中，有祖先=命中）、
+  `freeze:false` 解冻后可立即交接 / 重复解冻 no-op、工作区冻结（只通知根会话 + 别的目录不显示）+
+  `collab_broadcast` 与 `collab_escalate`（该目录内的会话）均拒绝且 0 写入 / 0 prompt、bid 冻结 →
+  `collab_accept` / `collab_escalate` 拒绝（记录与 prompt 均未动）、
+  受保护目标 0 prompt + `priority:"urgent"` 队列项、被冻会话 context **只提示一次**（第二次无、`notifiedAt`
+  已写；父线冻结时父/子各一次，`notifiedFor[]` 记录）、**两个子进程并发 merge 两条都在**、`confirm:false` 零写入预览、相对 `until:"5m"`、六条可读错误、
+  注册一次 + `tools.length === 20` + 描述。`test/readonly-default.mjs`：注册表 19 → 20。
+  `test/snapshot-shape.mjs`（42 → 48 条）：`frozen` / `freeze` 可选字段 + 可选 schema、过期条目不显示、
+  祖先继承、工作区冻结同时标会话与交接、无 `freezes` reader 的旧源不崩。
+  变异（各还原，dist 打补丁后跑 S98）：① 去掉 `frozenBy` 的 lineage 走查 → 「祖先冻结」断言失败
+  （子会话交接成功）；② 去掉 `readFreezes` 的 `until > now` 过滤 → 「到期」断言失败（1 live / 1 expired）。
 
 ## [0.5.3] - 2026-11-19
 

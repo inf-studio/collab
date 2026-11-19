@@ -17,6 +17,7 @@ import type { ToolKit } from './shared.ts';
 import { statusTool } from './status.ts';
 import { waitTool } from './wait.ts';
 import { escalateTool } from './escalate.ts';
+import { freezeTool } from './freeze.ts';
 
 export { createToolKit } from './shared.ts';
 export type { ToolDeps, ToolKit, Target, DeliveryMode } from './shared.ts';
@@ -45,6 +46,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     waitTool(kit),
     statusTool(kit),
     escalateTool(kit),
+    freezeTool(kit),
     grantTool(kit),
     promoteTool(kit),
     reportTool(kit),
