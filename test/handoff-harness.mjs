@@ -8117,6 +8117,347 @@ for (const resource of ['named:stale-queue', 'named:live-queue', 'named:stale-vi
 store.delete(`collab/threads/${S95_THREAD}`);
 store.delete(`collab/threads/${S95_THREAD_OFF}`);
 
+// ================== S96 (0.6.0: `collab_status` — read-only, non-blocking)
+// R1–R5: one hand-off, resolved — state / claim + remaining lease / priority /
+// delivery / owner-queue items with the position / last reply / receipt / one
+// suggested next step. `bid` / `threadID` / `session` are exclusive; none = the
+// unresolved hand-offs of this session (≤5, newest first). Zero writes: no
+// refresh (a lapsed claim is *described*, never reopened), no delivery, no lock
+// release — asserted with a strict host (every write method throws) plus an
+// unchanged broadcast / owner-queue directory and storage.
+const s96Now = Date.now();
+const s96Seed = (bid, over = {}) => {
+  const record = {
+    bid,
+    scope: 'local',
+    workspace: WS_A,
+    title: `S96 ${bid.slice(-2)}`,
+    createdAt: s96Now - 3_600_000,
+    updatedAt: s96Now - 60_000,
+    from: { sid: 'ses_s96', directory: WS_A },
+    ...over
+  };
+  writeFileSync(bcFile(bid), JSON.stringify(record, null, 2));
+  return record;
+};
+const S96 = {
+  claimed: 'b_9600000000000001',
+  done: 'b_9600000000000002',
+  blocked: 'b_9600000000000003',
+  expired: 'b_9600000000000004',
+  queued: 'b_9600000000000005',
+  lapsed: 'b_960000000000000c',
+  // A second lapsed claim, read for the first time *inside* the read-only block:
+  // a "refresh + persist" mutation must trip the directory snapshot there.
+  lapsedStrict: 'b_960000000000000d',
+  many: [
+    'b_9600000000000006',
+    'b_9600000000000007',
+    'b_9600000000000008',
+    'b_9600000000000009',
+    'b_960000000000000a',
+    'b_960000000000000b'
+  ]
+};
+const S96_PROTECTED = 'ses_e1eb91cebffeTv1467ubJLKebk';
+for (const sid of ['ses_s96', 'ses_s96_peer', 'ses_s96_open', 'ses_s96_q', 'ses_s96_lapsed', 'ses_s96_empty']) {
+  sessions[sid] = { id: sid, agent: 'build', title: sid, time: { updated: s96Now, busy: 0 }, location: { directory: WS_A } };
+}
+
+s96Seed(S96.claimed, {
+  state: 'claimed',
+  threadID: 't_s96_claimed',
+  priority: 'urgent',
+  urgentAt: s96Now - 50_000,
+  claim: { by: 'ses_s96_peer', kind: 'handoff', at: s96Now - 60_000, leaseMs: 300_000 },
+  delivery: { cid: 'c_s96_claimed', to: 'ses_s96_peer', admittedAt: s96Now - 59_000, seenAt: s96Now - 45_000 },
+  replies: [{ from: 'ses_s96_peer', at: s96Now - 40_000, text: '已接管，先读交接包' }],
+  updatedAt: s96Now - 30_000
+});
+s96Seed(S96.done, {
+  state: 'done',
+  threadID: 't_s96_done',
+  claim: { by: 'ses_s96_peer', kind: 'handoff', at: s96Now - 600_000, leaseMs: 300_000 },
+  receipt: { from: 'ses_s96_peer', at: s96Now - 50_000, note: '修好了，回归全绿' },
+  updatedAt: s96Now - 50_000
+});
+s96Seed(S96.blocked, {
+  state: 'blocked',
+  threadID: 't_s96_blocked',
+  claim: { by: 'ses_s96_peer', kind: 'handoff', at: s96Now - 600_000, leaseMs: 300_000 },
+  receipt: { from: 'ses_s96_peer', at: s96Now - 55_000, note: '回执被硬拒：受保护目标' },
+  updatedAt: s96Now - 55_000
+});
+s96Seed(S96.expired, {
+  state: 'expired',
+  threadID: 't_s96_expired',
+  receipt: { from: 'ses_s96_peer', at: s96Now - 58_000, note: '候选耗尽，需人工' },
+  updatedAt: s96Now - 58_000
+});
+// A protected target that can never be pushed to: the only channel left is the
+// owner queue, so the status must show `canPush:false` + the item + its position.
+s96Seed(S96.queued, {
+  state: 'open',
+  threadID: 't_s96_queued',
+  from: { sid: 'ses_s96_q', directory: WS_A },
+  updatedAt: s96Now - 20_000
+});
+// A claim whose lease lapsed: described as expired, never reopened by a read.
+s96Seed(S96.lapsed, {
+  state: 'claimed',
+  threadID: 't_s96_lapsed',
+  from: { sid: 'ses_s96_lapsed', directory: WS_A },
+  claim: { by: 'ses_s96_peer', kind: 'handoff', at: s96Now - 400_000, leaseMs: 300_000 },
+  updatedAt: s96Now - 400_000
+});
+s96Seed(S96.lapsedStrict, {
+  state: 'claimed',
+  threadID: 't_s96_lapsed_strict',
+  from: { sid: 'ses_s96_lapsed', directory: WS_A },
+  claim: { by: 'ses_s96_peer', kind: 'handoff', at: s96Now - 400_000, leaseMs: 300_000 },
+  updatedAt: s96Now - 420_000
+});
+// Six unresolved hand-offs of one session → the no-input list caps at 5, newest first.
+S96.many.forEach((bid, index) => {
+  s96Seed(bid, {
+    state: 'open',
+    threadID: `t_s96_many_${index}`,
+    from: { sid: 'ses_s96_open', directory: WS_A },
+    updatedAt: s96Now - (index + 1) * 10_000
+  });
+});
+
+const s96Queue = await call(
+  'collab_request_owner',
+  { target: S96_PROTECTED, text: 'S96 请处理这一单', bid: S96.queued, confirm: true },
+  as('ses_s96_q')
+);
+out('S96 owner queue item', s96Queue);
+/** The one action line, isolated (the footer also mentions collab_wait / collab_list). */
+const s96NextOf = text => text.split('\n').find(line => line.trim().startsWith('下一步:')) ?? '';
+
+// --- S96a: a pending (claimed) hand-off — every field + the next step.
+const s96Claimed = await call('collab_status', { bid: S96.claimed });
+out('S96 claimed', s96Claimed);
+expect(
+  'S96 a claimed hand-off reports state / priority / claim + remaining lease / delivery / queue / last reply',
+  s96Claimed.includes('state=claimed') &&
+    s96Claimed.includes('priority=urgent') &&
+    /承接=\S+（handoff，剩 \d+m/.test(s96Claimed) &&
+    s96Claimed.includes('canPush=true') &&
+    s96Claimed.includes('投递: admitted=') &&
+    s96Claimed.includes('seen=') &&
+    s96Claimed.includes('队列: 0 项') &&
+    s96Claimed.includes('最近回复:') &&
+    s96Claimed.includes('已接管，先读交接包'),
+  s96Claimed.split('\n')[0]
+);
+expect(
+  'S96 … and the suggested next step names collab_wait with this thread',
+  s96Claimed.includes('下一步: 等回执') && s96Claimed.includes('collab_wait {threadID:"t_s96_claimed"}'),
+  s96Claimed.split('\n').find(line => line.includes('下一步'))
+);
+
+// --- S96b: a closed hand-off — receipt + 无需动作, no wait advice.
+const s96Done = await call('collab_status', { bid: S96.done });
+out('S96 done', s96Done);
+expect(
+  'S96 a done hand-off shows its receipt and says 无需动作',
+  s96Done.includes('state=done') &&
+    s96Done.includes('回执:') &&
+    s96Done.includes('修好了，回归全绿') &&
+    s96Done.includes('下一步: 无需动作') &&
+    !s96NextOf(s96Done).includes('collab_wait'),
+  s96Done.split('\n')[0]
+);
+const s96Blocked = await call('collab_status', { bid: S96.blocked });
+const s96Expired = await call('collab_status', { bid: S96.expired });
+expect(
+  'S96 blocked / expired are closed the same way (receipt + 无需动作)',
+  s96Blocked.includes('state=blocked') &&
+    s96Blocked.includes('回执被硬拒') &&
+    s96Blocked.includes('下一步: 无需动作') &&
+    s96Expired.includes('state=expired') &&
+    s96Expired.includes('候选耗尽') &&
+    s96Expired.includes('下一步: 无需动作'),
+  `${s96Blocked.split('\n')[0]} / ${s96Expired.split('\n')[0]}`
+);
+
+// --- S96c: a protected target — canPush:false + the queue item + its position.
+const s96Protected = await call('collab_status', { bid: S96.queued });
+out('S96 protected', s96Protected);
+expect(
+  'S96 a protected target is canPush:false and the next step is the queue, not a push',
+  s96Protected.includes('canPush=false') &&
+    s96Protected.includes('下一步: 只能队列') &&
+    s96Protected.includes('受保护') &&
+    !s96NextOf(s96Protected).includes('collab_wait'),
+  s96Protected.split('\n').find(line => line.includes('下一步'))
+);
+expect(
+  'S96 … with the owner-queue item of this bid and its position in the unread queue',
+  s96Protected.includes('队列: 1 项') &&
+    /q_[0-9a-z]+_[0-9a-z]+/.test(s96Protected) &&
+    /第 1\/1 位（未读）/.test(s96Protected),
+  s96Protected.split('\n').find(line => line.includes('队列'))
+);
+
+// --- S96d: resolution by threadID and by session.
+const s96Thread = await call('collab_status', { threadID: 't_s96_claimed' });
+expect(
+  'S96 threadID resolves to the hand-off(s) of that thread',
+  s96Thread.includes(S96.claimed) && s96Thread.includes('state=claimed'),
+  s96Thread.split('\n')[0]
+);
+const s96Session = await call('collab_status', { session: 'ses_s96' });
+out('S96 session', s96Session);
+expect(
+  'S96 session lists the unresolved hand-offs + the latest closed one (not every closed one)',
+  s96Session.includes(S96.claimed) &&
+    s96Session.includes(S96.done) &&
+    !s96Session.includes(S96.blocked) &&
+    !s96Session.includes(S96.expired),
+  s96Session.split('\n')[0]
+);
+
+// --- S96e: no input — ≤5 unresolved, newest first; nothing pending says so.
+const s96Many = await call('collab_status', {}, as('ses_s96_open'));
+out('S96 no input (many)', s96Many);
+const s96Order = [...s96Many.matchAll(/^b_[0-9a-f]+/gm)].map(match => match[0]);
+expect(
+  'S96 no input lists at most 5 unresolved hand-offs of this session, newest first',
+  s96Order.length === 5 &&
+    s96Order.join(',') === S96.many.slice(0, 5).join(',') &&
+    !s96Many.includes(S96.many[5]),
+  s96Order.join(',')
+);
+const s96Empty = await call('collab_status', {}, as('ses_s96_empty'));
+expect(
+  'S96 no input with nothing pending answers with one line (当前没有未闭环交接)',
+  s96Empty.includes('当前没有未闭环交接'),
+  s96Empty.split('\n')[0]
+);
+
+// --- S96f: a lapsed claim is described, never rewritten.
+const s96LapsedBefore = statSync(bcFile(S96.lapsed)).mtimeMs;
+const s96Lapsed = await call('collab_status', { bid: S96.lapsed });
+const s96LapsedAfter = statSync(bcFile(S96.lapsed)).mtimeMs;
+out('S96 lapsed claim', s96Lapsed);
+expect(
+  'S96 a lapsed claim says 租约已过期 and names the next refresh — the read rewrites nothing',
+  s96Lapsed.includes('租约已过期') &&
+    s96Lapsed.includes('下一次 refresh') &&
+    s96LapsedBefore === s96LapsedAfter &&
+    bcRead(S96.lapsed).state === 'claimed',
+  `${s96LapsedBefore} → ${s96LapsedAfter} / ${bcRead(S96.lapsed).state}`
+);
+
+// --- S96g: input validation (readable errors, no report).
+await expectFail(
+  'S96 a malformed bid is a readable error',
+  () => call('collab_status', { bid: 'nope' }),
+  /bid 格式不合法/
+);
+await expectFail(
+  'S96 an unknown bid is a readable error',
+  () => call('collab_status', { bid: 'b_96000000000000ff' }),
+  /没有交接单/
+);
+await expectFail(
+  'S96 bid + threadID at once is refused (三选一)',
+  () => call('collab_status', { bid: S96.claimed, threadID: 't_s96_claimed' }),
+  /三选一/
+);
+
+// --- S96h: the read-only contract, proven by a strict host + unchanged dirs.
+const s96WriteMethods = [
+  ['session', 'prompt'],
+  ['session', 'update'],
+  ['session', 'create'],
+  ['session', 'remove'],
+  ['session', 'switchAgent'],
+  ['storage', 'set'],
+  ['storage', 'remove']
+];
+const s96Snapshot = dirPath => {
+  const walk = (dirName, prefix = '') => {
+    let entries = [];
+    try {
+      entries = readdirSync(dirName, { withFileTypes: true });
+    } catch {
+      return []; // no directory yet: nothing to compare
+    }
+    return entries
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .flatMap(entry => {
+        const path = join(dirName, entry.name);
+        if (entry.isDirectory()) return walk(path, `${prefix}${entry.name}/`);
+        const stat = statSync(path);
+        return [`${prefix}${entry.name}:${stat.size}:${stat.mtimeMs}`];
+      });
+  };
+  return walk(dirPath).join('|');
+};
+const s96Writes = [];
+const s96Saved = s96WriteMethods.map(([domain, name]) => [domain, name, ctx[domain][name]]);
+for (const [domain, name] of s96WriteMethods) {
+  ctx[domain][name] = () => {
+    s96Writes.push(`${domain}.${name}`);
+    throw new Error(`collab_status 触发了写操作 ${domain}.${name}（只读契约被破坏）`);
+  };
+}
+const s96Before = [
+  s96Snapshot(broadcastDir),
+  s96Snapshot(ownerQueueDir),
+  JSON.stringify([...store.entries()])
+].join('||');
+let s96ReadonlyError = '';
+try {
+  await call('collab_status', { bid: S96.claimed });
+  await call('collab_status', { threadID: 't_s96_done' });
+  await call('collab_status', { session: 'ses_s96' });
+  await call('collab_status', { bid: S96.queued });
+  await call('collab_status', { bid: S96.lapsed });
+  await call('collab_status', { bid: S96.lapsedStrict });
+  await call('collab_status', {}, as('ses_s96_open'));
+  await call('collab_status', {}, as('ses_s96_empty'));
+} catch (error) {
+  s96ReadonlyError = String(error?.message ?? error);
+} finally {
+  for (const [domain, name, fn] of s96Saved) ctx[domain][name] = fn;
+}
+const s96After = [
+  s96Snapshot(broadcastDir),
+  s96Snapshot(ownerQueueDir),
+  JSON.stringify([...store.entries()])
+].join('||');
+expect(
+  'S96 read-only: seven queries, zero write calls, broadcast / owner-queue dirs and storage unchanged',
+  !s96ReadonlyError && s96Writes.length === 0 && s96Before === s96After,
+  s96ReadonlyError || `${s96Writes.length} write(s) / ${s96Before === s96After ? 'dirs identical' : 'dirs CHANGED'}`
+);
+
+// --- S96i: registered exactly once; the description states the contract.
+expect(
+  'S96 collab_status is registered exactly once',
+  tools.filter(definition => definition.name === 'collab_status').length === 1,
+  `${tools.filter(definition => definition.name === 'collab_status').length} registration(s)`
+);
+const s96Desc = String(tool('collab_status').description);
+expect(
+  'S96 the collab_status description states read-only + non-blocking + canPush/queue + the 5 cap',
+  /read-only/i.test(s96Desc) &&
+    /non-blocking/i.test(s96Desc) &&
+    /canPush/.test(s96Desc) &&
+    /at most 5/i.test(s96Desc),
+  s96Desc.slice(0, 160)
+);
+
+// Cleanup: leave no S96 records behind for the closing summary.
+for (const bid of [S96.claimed, S96.done, S96.blocked, S96.expired, S96.queued, S96.lapsed, S96.lapsedStrict, ...S96.many]) {
+  rmSync(bcFile(bid), { force: true });
+}
+
 // Cleanup: leave no queue files behind for the closing summary.
 rmSync(ownerQueueDir, { recursive: true, force: true });
 rmSync(bcFile(s92Bid), { force: true });

@@ -14,6 +14,7 @@ import { replyTool } from './reply.ts';
 import { reportTool } from './report.ts';
 import { sendTool } from './send.ts';
 import type { ToolKit } from './shared.ts';
+import { statusTool } from './status.ts';
 import { waitTool } from './wait.ts';
 
 export { createToolKit } from './shared.ts';
@@ -41,6 +42,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     followupTool(kit),
     inboxTool(kit),
     waitTool(kit),
+    statusTool(kit),
     grantTool(kit),
     promoteTool(kit),
     reportTool(kit),

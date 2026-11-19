@@ -32,7 +32,7 @@ import type { CollabContext } from './types.ts';
  * `@inf-studio/collab` — the zero-dependency port of
  * `.opencode/plugins/collab.js`: cross-session collaboration (threads / inbox)
  * plus the cross-workspace hand-off chain (broadcast → score → atomic claim →
- * receipt), exposed as the seventeen native `collab_*` tools and one `context` hook.
+ * receipt), exposed as the native `collab_*` tools and one `context` hook.
  *
  * The host contract is the plugin `ctx` (in-process capability), never an HTTP
  * client: a plugin that reached the server through a port/token would break as

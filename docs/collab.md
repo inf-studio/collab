@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十七个工具（协作链路六个 + 权限/上报/追加/租约/归档各一组）
+### 11.2 十八个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -267,6 +267,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
+| `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
@@ -1109,6 +1110,50 @@ collab_archive { session:"ses_…", restore:false, confirm:false } # 只预览�
   `collab_list` 里归档会话的 `state` 列显示 `archived`，标记 `[archived]`。
 - **可见性**：`collab.state.snapshot` 的 `handoffs[]` 增可选的 `archived?: boolean`（只读展示，不改变布局）；
   非终态但已被手动归档的单行尾也会标 `[archived]`。
+
+### 11.14 即时状态回执（`collab_status`，0.6.0，只读）
+
+> **口径（容易误会）**：「本会话相关」只算它**发起**（`from.sid`）或**承接**（`claim.by`）的单，
+> **不含**「只是被问询过、还没领取」（`asked.sid`）的单——那种单对它是 context 注入的接管请求，
+> 用 `collab_inbox` / 注入块看，`collab_status` 不重复列。已闭环的单只在显式传 `session` 时附最近一条。
+
+
+冻结 / 加急这类动作需要「这一单现在到哪一步」的**非阻塞**答案。`collab_wait` 会**阻塞**（等到有回执为止），
+`collab_inbox` 只读消息，`collab_list` 是**清单**。所以 0.6.0 新增一个纯查询工具——查询 ≠ 等待：
+
+```text
+collab_status { bid:"b_14528d828f9df27b" }        # 最精确：一单
+collab_status { threadID:"t_m3k9_abcd" }          # 该 thread 的全部交接单
+collab_status { session:"ses_e4c03493…" }         # 它发起（from.sid）或承接（claim.by）的全部未闭环 + 最近一条已闭环
+collab_status { }                                 # 本会话相关未闭环，≤5 条，按 updatedAt 倒序
+```
+
+输出（每条一单）：
+
+```text
+b_14528d828f9df27b  state=claimed  priority=urgent  承接=ses_e105…d85（handoff，剩 4m12s）  canPush=true
+  投递: admitted=03:57:59  seen=03:58:10
+  队列: 1 项（目标 ses_e1eb…Kebk，未读 1 条）:
+    - q_mwmvceyb_7ehl @ 03:58:02 第 1/1 位（未读）[urgent]
+  最近回复: 03:58:12 "已接管，先读交接包"（ses_e105…d85）
+  下一步: 等回执 → collab_wait {threadID:"t_m3k9_abcd"}；超时用 collab_escalate
+```
+
+（已闭环的单多一行 `回执: 03:58:12 "修好了"（…）`，且 `下一步` 为「无需动作」。）
+
+- **`canPush`**：`true` = 对该目标还能 push（`collab_send` / `collab_escalate`）；`false` = 目标本身或祖先
+  在 `protect` 名单内，**只能队列**——`下一步` 会写成「只能队列（该目标受保护）：`collab_request_owner`
+  或等其下一轮」。`session` / 记录里定位不到目标时该字段省略。
+- **队列位置**：该 bid 对应的 `[owner-queue]` 项（`collab_request_owner { bid }` 写入的那些）逐条列出，
+  并给出它在目标**未读**队列里的位置（`第 1/1 位` / `已读 03:58（不在队列）`）。
+- **已闭环**（`done` / `blocked` / `expired`）：显示 `receipt` 摘要，`下一步` 恒为「无需动作」。
+- **过期租约只描述不改写**：`claimed` 且租约已过 → 行内 `租约已过期` + 一行注「下一次 refresh
+  （`collab_accept` / `context` 注入）才会释放并顺延；本命令不改写状态」。顺延是写路径的职责。
+- **只读契约**：只用 `readBroadcast` / `allBroadcasts` / `mineFor` / `listFor` / `session.get|list`；
+  **不**调用 `writeBroadcast`、`persistRefresh`、`session.prompt|update|remove`、`releaseLock`。
+  测试用「写方法一旦调用即抛」的严格宿主 + 广播 / 队列目录（文件名 + 大小 + mtime）与 `ctx.storage`
+  调用前后一致来证明（S96）。
+- **非目标**：不做历史归档查询（用 `collab_list` / 归档过滤）、不做自动催办（用 `collab_escalate`）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

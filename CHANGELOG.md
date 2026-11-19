@@ -6,8 +6,29 @@
 ## [0.6.0] - 2026-11-19
 
 > 一件事：**把「排队」从不可回收的状态变成有生命周期的状态，并把三个面（GUI 会话头 / TUI 侧栏 /
-> TUI 面板）的数字口径统一成四个**。外加一层正文去重。仍然**不新增工具**（17 个不变）、不新增依赖、
+> TUI 面板）的数字口径统一成四个**。外加一层正文去重，以及一个**只读、非阻塞**的状态查询
+> （`collab_status`，17 → 18 个工具）。不新增依赖、
 > 不改任何既有快照字段语义（只追加可选字段）、读命令保持零写入。
+
+### Added
+
+- **`collab_status`（新文件 `src/tools/status.ts`，注册在 `src/tools/index.ts`）**：一单现在到哪一步。
+  输入 `{ bid?, threadID?, session? }` **三选一**（`session` 也接受别名；`bid`/`threadID` 先校验格式，
+  未知目标给可读错误）；都不传 = 本会话（`context.sessionID`）作为 `from.sid` **或** `claim.by` 的未闭环交接，
+  最多 5 条、按 `updatedAt` 倒序，空时一句「当前没有未闭环交接」。
+  - 输出每条：`state` / `priority`（读 0.6.0 可选字段，缺失即 `normal`）/ 承接（`claim.by` + `kind` + 剩余租约，
+    用 `fmtTtl`）/ 投递（`admitted=` `seen=` 绝对时间、`ack=n/a（发起方受保护）`、`unacked=`）/
+    该目标的 owner-queue 队列项（`{id, at, seenAt}` + `第 K/N 位`）/ 最近一次 reply 摘要（≤60 字，**不存正文**）/
+    已闭环时的 `receipt` 摘要 / **下一步**一行。
+  - `session` 模式：全部未闭环 + **最近一条**已闭环（不是全部历史）。`threadID` 模式：该 thread 的全部交接单。
+  - **`canPush`**：对承接方（或 `asked.sid` / `delivery.to` / 该单队列项的目标）跑
+    `createLineage(ctx).protectedAncestor`；受保护 → `canPush=false`，下一步改写「只能队列（该目标受保护）：
+    `collab_request_owner` 或等其下一轮」，并给出队列位置。已闭环 → `下一步: 无需动作`。
+  - **只读（R3）**：只用 `readBroadcast` / `allBroadcasts` / `mineFor` / `listFor` / `session.get|list`；
+    不调 `writeBroadcast` / `persistRefresh` / `session.prompt|update|remove` / `releaseLock`。
+    `claimed` 且租约已过 → 只显示「租约已过期 —— 下一次 refresh 才会释放并顺延」，**不改写**（顺延仍属写路径）。
+    控制台注入/等待/投递一概不触发（非阻塞）。
+  - 文档：`docs/collab.md` §11.2 工具表 + 新增 §11.14；`README.md` 工具表；`skills/collab`（速查表 + 一点八 + 排障）。
 
 ### Fixed
 
@@ -50,6 +71,15 @@
 
 ### Tests
 
+- `test/handoff-harness.mjs`：新增 **S96**（17 条，`collab_status`）——claimed 的字段齐全 + 下一步；
+  done / blocked / expired 显示 `receipt` + 无需动作；受保护目标 `canPush:false` + 队列项 + `第 1/1 位`；
+  `threadID` / `session` 解析（session = 未闭环 + 最近一条已闭环）；无参 ≤5 条按 `updatedAt` 倒序、空时
+  「当前没有未闭环交接」；过期租约只描述（mtime 不变、`state` 仍是 `claimed`）；三条可读错误；
+  **只读证明**（写方法一旦调用即抛的严格宿主 + 广播 / owner-queue 目录（名/大小/mtime）与 `ctx.storage`
+  前后一致，7 次查询 0 次写）；注册一次 + 描述含 read-only / non-blocking / canPush / at most 5。
+  变异（已还原）：`readBroadcast` 之后加 `persistRefresh(record, refreshBroadcast(record))` →
+  「过期租约只描述」与「零写」两条断言同时失败。
+- `test/readonly-default.mjs`：注册表 17 → 18（`collab_status` 在 `collab_wait` 之后）。
 - `test/handoff-harness.mjs`：新增 **S95**（19 条）——free + 3 过期 waiter → 直接授予并清空；
   free + 1 活 waiter → 不插队；`collab_locks` 的 age / `[stale]` / mtime 不变；三条心跳来源（各自独立 sid）
   + 30s 节流；读命令不是心跳；同文 1 次 / 异文 2 次 / `dedupeWindowMs:0` 2 次（含 `collab_reply`）。

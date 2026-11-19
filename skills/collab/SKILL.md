@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十七个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -24,6 +24,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_list` | `limit?`, `directory?` | 列会话（id/agent/state/`loc=`/`parent=`/title）+ 未闭环交接 | 只读 |
 | `collab_inbox` | `limit?` | 本会话收到的跨会话消息全文 | 只读 |
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
+| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
 | `collab_send` | `target, text, kind?, threadID?, mode?, confirm` | 投递消息；`kind=request/reply/note` | 发消息 |
 | `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, confirm` | **同工作区**交接：选人 + 开 thread | 发消息 |
@@ -115,6 +116,8 @@ collab_request_owner {
   `collab_request_owner { id, revoke:true, confirm:true }` 撤回。
 - 发起方自己在 `collab_list` 里能看到「我提交给受保护会话的请求：N 条待处理」。
 - 受保护会话不能给另一个受保护会话投队列项（不做 protected → protected 转发）；普通目标请用 `collab_handoff`。
+- 想看「这一单现在到哪一步」（含队列位置、`canPush:false`）用 `collab_status { bid:"b_…" }`，
+  见一点八。
 
 ## 一点七、spawn 会话会在协作结束后自动归档（0.5.0）
 
@@ -131,6 +134,26 @@ collab_archive { bid:"b_…", restore:true, confirm:true }   # 恢复（archived
 - **归档 ≠ 删除**：归档路径不 `DELETE`（`selftest` 清理与 spawn 落点回滚另有用例）；归档会话仍可用 `GET /api/session?archived=true` 找到。
 - 关掉自动路径：`collab.json { "archiveSpawned": false }`（手动工具仍可用）；窗口 `archiveGraceMs` 夹在 1min–1h。
 - 用户自己的会话 / `collab_handoff` 对象 / requester **永不**归档；`[protected*]` 连手动工具也拒绝。
+
+## 一点八、即时状态回执（`collab_status`，0.6.0，只读）
+
+冻结 / 加急 / 有人问「到哪一步了」时，**不要用 `collab_wait`**（它会阻塞到有回执为止）。用：
+
+```text
+collab_status { bid:"b_…" }          # 一单（最精确）
+collab_status { threadID:"t_…" }     # 该 thread 的交接单
+collab_status { session:"ses_…" }    # 它发起（from.sid）或承接（claim.by）的全部未闭环 + 最近一条已闭环
+collab_status { }                    # 本会话相关未闭环，≤5 条，按 updatedAt 倒序
+```
+
+每条给：`state` / `priority` / 承接（`claim.by` + 剩余租约）/ 投递（`admitted=` `seen=` `ack=n/a`）/
+该目标的 `[owner-queue]` 队列项 + **第 K/N 位** / 最近一次 reply 摘要 / 已闭环时的 `receipt` / **下一步**一行。
+
+- `canPush:false` = 目标（或其祖先）在 `protect` 名单内：**只能队列**，下一步会写
+  「`collab_request_owner` 或等其下一轮」。
+- **零写入**：不刷新状态（过期租约只描述「下次 refresh 会释放」，不改写）、不释放锁、不投递。
+  所以它可以安全地反复问，不会把 `claimed` 的租约提前推进。
+- 已闭环 → `下一步: 无需动作`；全量清单仍用 `collab_list`，阻塞等回执照旧用 `collab_wait`。
 
 ## 二、同工作区（local）
 
@@ -192,6 +215,7 @@ collab_archive { bid:"b_…", restore:true, confirm:true }   # 恢复（archived
 | 改了插件不生效 | 本地文件会热重载；**npm 包插件版本不会热重载到已运行会话** | 重启 OpenCode 或新开会话；用 `collab_report` 预览里的「版本」确认运行时版本 |
 | `collab_wait` 立刻报「没有 thread」 | thread 存储按 `location` 隔离 | 跨仓改用消息回执，不用 thread |
 | 交接卡在 `claimed` | 对端只分析、没调用工具 | 租约到期自动提取结论；或 `collab_promote` 后重发 |
+| 不知道一单到哪一步 / 要不要催 | 查状态与等待是两件事 | `collab_status { bid }` 看承接/投递/队列/下一步（非阻塞、零写入）；要阻塞等回执照旧 `collab_wait` |
 | `collab_broadcast` 报「就是当前工作区」 | 同仓广播（0.4.0 起拒绝） | 改用 `collab_handoff { text, confirm:true }` |
 | 受保护线收不到我的请求 | 投递对它一律拒绝（设计如此） | `collab_request_owner` 排队；对方下次运行时才会看到 |
 | 广播重复拉起会话 | 重复广播且 `bid` 不同（提案内容/mtime 变了） | 改提案后重新广播是预期行为；不要为同一内容反复广播 |
