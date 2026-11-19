@@ -266,6 +266,8 @@ function serverSession(id, serverID, client, { local = false, withServer = true 
 function harness(session, { locale = 'en', dialogs, client } = {}) {
   const registered = [];
   const toasts = [];
+  const opened = [];
+  const copied = [];
   const [current, setCurrent] = createSignal(session);
   const target = {
     id: 'collab',
@@ -279,6 +281,16 @@ function harness(session, { locale = 'en', dialogs, client } = {}) {
       return () => {};
     },
     layout: { open: () => {}, state: () => undefined },
+    tabs: {
+      open: (session, options) => {
+        opened.push({ ...session, focus: options?.focus === true });
+      }
+    },
+    system: {
+      copy: async text => {
+        copied.push(text);
+      }
+    },
     app: { name: 'opencode', version: '2.5.0', channel: 'prod', platform: 'desktop', packaged: true },
     toast: {
       show: toast => {
@@ -302,7 +314,7 @@ function harness(session, { locale = 'en', dialogs, client } = {}) {
       return object[key];
     }
   });
-  return { context, registered, setCurrent, toasts };
+  return { context, registered, setCurrent, toasts, opened, copied };
 }
 
 /** Render the registered panel through a plugin-context provider on the mini DOM. */
@@ -1532,6 +1544,68 @@ async function openBoard({ board = ACTION_BOARD, dialogs, handler, locale = 'zh'
     'PN12 … the second click on the new session executes against it (not the previously armed one)',
     fake.calls.length === 1 && fake.calls[0].action === 'escalate' && fake.calls[0].input.target === 'ses_act_me',
     JSON.stringify(fake.calls)
+  );
+  dispose();
+}
+
+// PN13 (0.8.1): the row's title opens the session and its id copies — neither
+// may also select the row; the row's own click still only selects.
+{
+  const ROWS = {
+    at: 1,
+    reachable: true,
+    sessions: [
+      { sid: 'ses_row_a', title: 'row a', agent: 'build', busy: false, workspace: '/data/project/collab' },
+      { sid: 'ses_row_b', title: 'row b', agent: 'build', busy: false, workspace: '/data/project/collab' }
+    ],
+    locks: [],
+    handoffs: [],
+    queue: []
+  };
+  const rowClient = { rpc: () => ({ snapshot: async () => ({ ...ROWS, at: Date.now() }) }) };
+  const ROW_SESSION = serverSession('ses_row_a', 'srv-row', rowClient);
+  const h = harness(ROW_SESSION);
+  h.context.sessions.list = () => [ROW_SESSION, serverSession('ses_row_b', 'srv-row', rowClient)];
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, ROW_SESSION);
+  const text = () => el?.textContent ?? '';
+  const rowOf = name =>
+    findIn(el, node => String(node.className).includes('collab-session') && String(node.textContent).includes(name));
+  const linkIn = (name, cls) =>
+    findIn(rowOf(name), node => String(node.className).split(/\s+/).includes(cls));
+
+  fireClick(linkIn('row a', 'collab-row-title'));
+  await sleep(40);
+  expect(
+    'PN13 clicking a row title opens that session tab (focus) and does not select the row',
+    h.opened.length === 1 &&
+      h.opened[0].id === 'ses_row_a' &&
+      h.opened[0].server === 'srv-row' &&
+      h.opened[0].focus === true &&
+      !text().includes('详情') &&
+      !text().includes('Details'),
+    JSON.stringify({ opened: h.opened, detail: text().includes('详情') })
+  );
+
+  fireClick(linkIn('row a', 'collab-mono'));
+  await sleep(40);
+  expect(
+    'PN13 clicking a row id copies the FULL sid and toasts, without selecting',
+    h.copied.length === 1 &&
+      h.copied[0] === 'ses_row_a' &&
+      /已复制|copied/i.test(h.toasts.at(-1)?.title ?? '') &&
+      !text().includes('来源') &&
+      h.opened.length === 1,
+    JSON.stringify({ copied: h.copied, toast: h.toasts.at(-1) })
+  );
+
+  fireClick(rowOf('row a'));
+  await sleep(60);
+  expect(
+    'PN13 clicking elsewhere in the row selects it and neither jumps nor copies',
+    h.opened.length === 1 && h.copied.length === 1 && (text().includes('row a') && text().includes('row a')),
+    JSON.stringify({ opened: h.opened.length, copied: h.copied.length, text: text().slice(0, 120) })
   );
   dispose();
 }

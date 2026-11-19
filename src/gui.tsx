@@ -72,7 +72,7 @@ const PANEL_TAB = 'main';
  * where neither exists. It appears in exactly one place (the probe toast's
  * description); `test/gui-entry.mjs` asserts all three agree.
  */
-const PLUGIN_VERSION = '0.8.0';
+const PLUGIN_VERSION = '0.8.1';
 
 /** What the probe calls the app's own server: there is no `ServerRef.id` to show. */
 const LOCAL_SERVER = 'this computer';
@@ -524,6 +524,24 @@ function SessionRow(props: {
   onSelect: () => void;
 }) {
   const ctx = usePlugin();
+  const store = storeFor(ctx);
+  /** Jump to this session's tab. Read the server from the snapshot's source: the
+   * rows all come from one server, and a remote one is the interesting case. */
+  const jump = (): void => {
+    const server = store.state.source?.server ?? ctx.sessions.current()?.server?.id;
+    try {
+      if (!server) throw new Error('no server');
+      ctx.tabs.open({ server, id: props.session.sid }, { focus: true });
+    } catch {
+      ctx.toast.show({ title: ctx.t('row.jumpFailed'), description: props.session.sid, variant: 'error' });
+    }
+  };
+  const copy = (): void => {
+    void ctx.system
+      .copy(props.session.sid)
+      .then(() => ctx.toast.show({ title: ctx.t('row.copied'), description: props.session.sid, variant: 'success' }))
+      .catch(() => ctx.toast.show({ title: ctx.t('row.copyFailed'), variant: 'error' }));
+  };
   return (
     <button
       type="button"
@@ -534,13 +552,7 @@ function SessionRow(props: {
     >
       <span class="collab-caret">{props.selected ? '›' : '·'}</span>
       <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
-      <span class="collab-mono collab-muted">{shortSid(props.session.sid)}</span>
-      <span class="collab-badge">{props.session.agent}</span>
-      <SessionBadges session={props.session} />
-      <span class="collab-row-title">{props.session.title}</span>
-      <Show when={props.session.sid === props.current}>
-        <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
-      </Show>
+      <span class="collab-row-body"><span class="collab-row-main"><span class="collab-row-title collab-link" title={`${props.session.title} · ${ctx.t('row.jumpHint')}`} onClick={event => { event.stopPropagation?.(); jump(); }}>{props.session.title}</span><Show when={props.session.sid === props.current}><span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span></Show><SessionBadges session={props.session} /></span><span class="collab-row-meta"><span class="collab-badge">{props.session.agent}</span><span class="collab-mono collab-muted collab-link" title={`${props.session.sid} · ${ctx.t('row.copyHint')}`} onClick={event => { event.stopPropagation?.(); copy(); }}>{shortSid(props.session.sid)}</span></span></span>
     </button>
   );
 }
@@ -658,7 +670,7 @@ function DetailHeader(props: { session: BoardSession; current: string }) {
         <span class="collab-badge">{props.session.agent}</span>
         {/* The **full** sid: the list row is shortened, the detail pane is where
             a human copies it into a command. */}
-        <span class="collab-mono collab-muted">{props.session.sid}</span>
+        <span class="collab-mono collab-muted collab-link" title={`${props.session.sid} · ${ctx.t('row.copyHint')}`} onClick={() => { void ctx.system.copy(props.session.sid).then(() => ctx.toast.show({ title: ctx.t('row.copied'), description: props.session.sid, variant: 'success' })).catch(() => ctx.toast.show({ title: ctx.t('row.copyFailed'), variant: 'error' })); }}>{props.session.sid}</span>
         <SessionBadges session={props.session} />
         <Show when={props.session.sid === props.current}>
           <span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span>
@@ -1557,6 +1569,11 @@ export default Plugin.define({
       'header.counts': '{{held}} held · {{waiting}} waiting · {{protected}} for protected · {{host}} host queue',
       'header.title': 'Collab status — open the panel',
       'header.unreachable': 'collab: n/a',
+      'row.copyHint': 'click to copy the session id',
+      'row.jumpHint': 'click to open this session',
+      'row.copied': 'Session id copied',
+      'row.copyFailed': 'Could not copy the session id',
+      'row.jumpFailed': 'Could not open that session',
       'titlebar.title': 'Collab status — open the panel',
       'probe.title': 'Collab GUI loaded',
       'probe.description': 'plugin v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',
@@ -1639,6 +1656,11 @@ export default Plugin.define({
       'header.counts': '持有 {{held}} · 排队 {{waiting}} · 待受保护 {{protected}} · 宿主排队 {{host}}',
       'header.title': '协作状态 — 打开面板',
       'header.unreachable': 'collab: n/a',
+      'row.copyHint': '点击复制会话 id',
+      'row.jumpHint': '点击打开该会话',
+      'row.copied': '已复制会话 id',
+      'row.copyFailed': '复制会话 id 失败',
+      'row.jumpFailed': '无法打开该会话',
       'titlebar.title': '协作状态 — 打开面板',
       'probe.title': 'Collab GUI 已加载',
       'probe.description': '插件 v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',

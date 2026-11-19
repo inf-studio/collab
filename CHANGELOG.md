@@ -3,6 +3,28 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.1] - 2026-11-19
+
+> 0.8.0 漏掉的行内交互补齐；列表行改成与宿主的会话列表一致的两行。
+
+### Added
+
+- **行内交互**：点**标题**在标签栏打开该会话（`tabs.open({server,id},{focus:true})`），点**会话 id** 复制完整 id 并 toast；
+  两者都阻止冒泡，整行点击仍然只做选中。
+- **右侧详情头**：完整 sid 可点击复制。
+- **TUI**：`o` 打开选中会话（`ui.tabs.focus`），不支持标签页时给可读提示；详情首行显示**完整** sid 便于终端选中复制。
+
+### Changed
+
+- 会话列表行改为**两行**（与宿主会话列表同构）：第一行标题 + `[current]/[archived]/[frozen]/[urgent]`，
+  第二行 agent + 短 id（小字、muted）。
+- 链接不再常驻下划线：仅在 hover 时出现；整行 hover 有底色。
+
+### Tests
+
+- `test/gui-panel.mjs` 65 → 68：标题只跳不选中 / id 只复制不选中 / 整行只选中。
+- 回归 `899 + 12 + 20 + 36 + 54 + 60 + 47 + 68`。
+
 ## [0.8.0] - 2026-11-19
 
 > 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节已收 `board2-layout`

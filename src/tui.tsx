@@ -551,7 +551,7 @@ function detailLines(session: BoardSession, width: number): Line[] {
     `${session.badges.handoffs} 交接 · ${session.badges.queue} 队列 · ${session.spawned.length} 拉起`;
   const out: Line[] = [
     {
-      text: clip(`详情 ${shortSid(session.sid)} · ${session.agent} · ${session.title}`, width),
+      text: clip(`详情 ${session.sid} · ${session.agent} · ${session.title}`, width),
       tone: 'muted'
     },
     { text: clip(`  ${counts}`, width), tone: 'muted' }
@@ -806,6 +806,7 @@ function StatusPanel(props: { panel: PanelInput }) {
     return keys[Math.min(cursor(), keys.length - 1)];
   };
   const selectedKey = () => (active() ? cursorKey() : undefined);
+  const selectedSession = () => sessionByKey(board(), selectedKey());
   const toggle = (key: string): void => {
     setExpanded(previous => {
       const next = new Set(previous);
@@ -860,7 +861,23 @@ function StatusPanel(props: { panel: PanelInput }) {
       { id: 'collab.board.up', title: 'Collab 上一项', group: 'Collab', bind: 'k', run: () => move(-1) },
       { id: 'collab.board.toggle', title: 'Collab 展开/收起', group: 'Collab', bind: 'enter', run: () => toggleSelected() },
       { id: 'collab.board.toggle-space', title: 'Collab 展开/收起', group: 'Collab', bind: 'space', run: () => toggleSelected() },
-      { id: 'collab.board.clear', title: 'Collab 清除选中', group: 'Collab', bind: 'escape', run: () => clearSelection() }
+      { id: 'collab.board.clear', title: 'Collab 清除选中', group: 'Collab', bind: 'escape', run: () => clearSelection() },
+      {
+        id: 'collab.board.open',
+        title: 'Collab 打开选中会话',
+        group: 'Collab',
+        bind: 'o',
+        run: () => {
+          const sid = selectedSession()?.sid;
+          if (!sid) {
+            ctx.ui.toast.show({ message: '先 j/k 选一个会话', variant: 'warning' });
+            return;
+          }
+          if (!ctx.ui.tabs.enabled() || !ctx.ui.tabs.focus(sid)) {
+            ctx.ui.toast.show({ message: '该终端不支持会话标签页；用 collab_status 查看', variant: 'warning' });
+          }
+        }
+      }
     ]
   }));
 
