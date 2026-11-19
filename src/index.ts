@@ -16,6 +16,16 @@ import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
 import { buildGraph } from './core/graph.ts';
+import {
+  GRAPH_LABEL_MAX,
+  clampPan,
+  clampZoom,
+  layoutGraph,
+  truncateLabel,
+  viewBoxAttr,
+  viewBoxOf,
+  zoomBy
+} from './core/graph-layout.ts';
 import { CollabState } from './rpc.ts';
 import type { ActionReceipt, Snapshot } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
@@ -419,6 +429,16 @@ export const __internals = {
   boardOrphans,
   // Three-level relation graph (0.8.0) — the one pure derivation GUI / TUI share.
   buildGraph,
+  // 0.8.2 (`graph-zoom`): the pure layout + view transform (zoom / pan / labels).
+  // GUI-only, but unit-testable without a window — which is the point.
+  layoutGraph,
+  truncateLabel,
+  GRAPH_LABEL_MAX,
+  clampZoom,
+  clampPan,
+  viewBoxOf,
+  viewBoxAttr,
+  zoomBy,
   // The four-number vocabulary (0.6.0, R4) — pure, shared by GUI / TUI / tests.
   countsOf,
   pendingCountOf,

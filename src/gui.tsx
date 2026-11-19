@@ -59,6 +59,19 @@ import { CollabState } from './rpc.ts';
 import type { ActionReceipt, Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
+import {
+  GRAPH_BADGE_W,
+  GRAPH_BOX_H,
+  GRAPH_BOX_MIN_W,
+  GRAPH_VIEW,
+  clampPan,
+  layoutGraph,
+  viewBoxAttr,
+  viewBoxOf,
+  zoomBy,
+  type GraphPoint,
+  type GraphRect
+} from './core/graph-layout.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
@@ -72,7 +85,7 @@ const PANEL_TAB = 'main';
  * where neither exists. It appears in exactly one place (the probe toast's
  * description); `test/gui-entry.mjs` asserts all three agree.
  */
-const PLUGIN_VERSION = '0.8.1';
+const PLUGIN_VERSION = '0.8.2';
 
 /** What the probe calls the app's own server: there is no `ServerRef.id` to show. */
 const LOCAL_SERVER = 'this computer';
@@ -347,7 +360,8 @@ const CSS = `
 .collab-counts:hover{opacity:.9;background:color-mix(in srgb, currentColor 10%, transparent);}
 .collab-counts:focus-visible{outline:1px solid currentColor;outline-offset:1px;opacity:.9;}
 .collab-graph{display:flex;flex-direction:column;gap:2px;min-width:0;}
-.collab-graph-svg{display:block;width:100%;max-width:320px;height:auto;overflow:visible;color:inherit;}
+.collab-graph-svg{display:block;width:100%;max-width:560px;height:auto;overflow:hidden;color:inherit;cursor:grab;touch-action:none;}
+.collab-graph-dragging{cursor:grabbing;}
 .collab-graph-edge{stroke:currentColor;stroke-width:1;fill:none;opacity:.45;}
 .collab-graph-edge-active{opacity:1;stroke-width:2;}
 .collab-graph-node{cursor:pointer;}
@@ -694,52 +708,98 @@ function slotClass(kind: 'graph' | 'actions'): string {
 
 /* ---------------------------------------------------------------------- graph */
 
-/** The little SVG's fixed coordinate space; CSS scales it to the pane width. */
-const GRAPH_W = 320;
-const GRAPH_H = 180;
-const GRAPH_CX = GRAPH_W / 2;
-const GRAPH_CY = GRAPH_H / 2;
-/** Room for the node box + its `▸/▾` corner badge. */
-const GRAPH_LABEL_MAX = 14;
-
-interface GraphPoint {
-  x: number;
-  y: number;
-}
-
-/**
- * A deliberately dumb layout: one ring, ordered by the (already sorted) node
- * list. No force solver, no randomness — the same snapshot always produces the
- * same circles, so the SVG is byte-identical between polls (R4) and a test can
- * click a node by its stable `data-graph-node` id.
- */
-function graphPositions(nodes: GraphNode[]): Map<string, GraphPoint> {
-  const points = new Map<string, GraphPoint>();
-  if (!nodes.length) return points;
-  if (nodes.length === 1) {
-    points.set(nodes[0]!.id, { x: GRAPH_CX, y: GRAPH_CY });
-    return points;
-  }
-  const radius = nodes.length <= 4 ? 50 : 62;
-  nodes.forEach((node, index) => {
-    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / nodes.length;
-    points.set(node.id, {
-      x: Math.round((GRAPH_CX + radius * Math.cos(angle)) * 10) / 10,
-      y: Math.round((GRAPH_CY + radius * Math.sin(angle)) * 10) / 10
-    });
-  });
-  return points;
-}
-
-/**
- * R1/R2 (0.8.0, `board2-graph`): the detail pane's graph slot.
+/*
+ * 0.8.2 (`graph-zoom`): the graph's coordinate space and layout moved to
+ * `src/core/graph-layout.ts` (pure, unit-tested without a window). This half
+ * only renders it:
  *
- * The derivation is `core/graph.ts` (the TUI renders the same object). This
- * component owns exactly two pieces of **window-local** state:
+ *   - `layoutGraph` → where each box goes (centre + inner ring + outer ring,
+ *     labels cut to 8 code points, no two boxes overlap);
+ *   - `viewBoxOf` / `zoomBy` / `clampPan` → the view transform (R1/R2);
+ *   - the SVG keeps every node at its layout coordinate, so a zoom or a pan
+ *     cannot move node geometry — hit-testing stays the browser's job and a
+ *     click on a node after zooming is still a click on that node (R1).
+ */
+
+/** Is the event's target (or an ancestor) a node group? Used by dblclick / drag. */
+interface GraphDomNode {
+  parentNode?: GraphDomNode | null;
+  getAttribute?: (name: string) => string | null;
+  attrs?: Record<string, string>;
+}
+
+/** The little of the SVG element this file touches (the bundle has no DOM lib). */
+interface GraphSvgElement {
+  getBoundingClientRect?: () => {
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+  };
+}
+
+/** The fields of the three gestures, declared locally (no `lib.dom` in this bundle). */
+interface GraphWheelEvent {
+  deltaY?: number;
+  clientX?: number;
+  clientY?: number;
+  preventDefault?: () => void;
+}
+interface GraphPointerEvent {
+  button?: number;
+  clientX?: number;
+  clientY?: number;
+  target?: unknown;
+}
+interface GraphMouseEvent {
+  target?: unknown;
+}
+
+function insideGraphNode(target: unknown): boolean {
+  let node = target as GraphDomNode | null;
+  let guard = 0;
+  while (node && guard < 32) {
+    const attr =
+      typeof node.getAttribute === 'function'
+        ? node.getAttribute('data-graph-node')
+        : node.attrs?.['data-graph-node'];
+    if (attr !== null && attr !== undefined) return true;
+    node = node.parentNode ?? null;
+    guard += 1;
+  }
+  return false;
+}
+
+/** The document, when this window has one (a test host provides both methods). */
+function documentOf():
+  | {
+      addEventListener(type: string, listener: (event: never) => void): void;
+      removeEventListener(type: string, listener: (event: never) => void): void;
+    }
+  | undefined {
+  const doc = (globalThis as { document?: never }).document as
+    | { addEventListener?: unknown; removeEventListener?: unknown }
+    | undefined;
+  if (!doc || typeof doc.addEventListener !== 'function' || typeof doc.removeEventListener !== 'function') {
+    return undefined;
+  }
+  return doc as never;
+}
+
+/**
+ * R1/R2 (0.8.0 `board2-graph`, 0.8.2 `graph-zoom`): the detail pane's graph slot.
+ *
+ * The derivation is `core/graph.ts` (the TUI renders the same object); the
+ * geometry and the view transform are `core/graph-layout.ts` (pure, no window).
+ * This component owns **window-local** state only:
  *
  *   - `collapsed` — a set of node ids whose one-hop neighbours are folded away
  *     (a poll that replaces `data` must not unfold them);
- *   - `hovered` — the node under the pointer, used to brighten its edges.
+ *   - `hovered` — the node under the pointer, used to brighten its edges;
+ *   - `zoom` / `pan` — the **view** (0.8.2): the SVG's `viewBox`, nothing else.
+ *     Zooming and dragging never touch a node coordinate, which is exactly why
+ *     a click after zooming still hits the node the browser draws (R1) and why
+ *     a poll can never "move" anything because the pointer moved (R4/R5).
  *
  * Level follows the selection, which the panel owns: no selection = `global`
  * (workspaces), a workspace = `workspace` (its sessions + ghost workspace
@@ -759,6 +819,12 @@ function GraphSlot(props: {
   const ctx = usePlugin();
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
   const [hovered, setHovered] = createSignal<string | null>(null);
+  /* 0.8.2 view state: pure view numbers, reset by a double-click on the canvas. */
+  const [zoom, setZoom] = createSignal(1);
+  const [pan, setPan] = createSignal<GraphPoint>({ x: 0, y: 0 });
+  const [dragging, setDragging] = createSignal(false);
+  let svgRef: GraphSvgElement | undefined;
+  let endDrag: (() => void) | undefined;
 
   const graph = createMemo(() =>
     buildGraph(props.snapshot, [], { level: props.level, workspace: props.workspace, session: props.session })
@@ -794,7 +860,115 @@ function GraphSlot(props: {
   const edges = createMemo(() =>
     graph().edges.filter(edge => !hidden().has(edge.from) && !hidden().has(edge.to))
   );
-  const positions = createMemo(() => graphPositions(nodes()));
+
+  /**
+   * R3: positions and the printed labels come from the one pure layout — the
+   * selected session is the centre at L2, everything else follows the (already
+   * sorted) node order. `layoutGraph` verifies that no two boxes overlap; this
+   * component never re-derives geometry.
+   */
+  const layout = createMemo(() =>
+    layoutGraph(nodes(), {
+      width: GRAPH_VIEW.width,
+      height: GRAPH_VIEW.height,
+      center: props.session,
+      label: node => (node.kind === 'workspace' ? node.label || ctx.t('panel.global') : node.label)
+    })
+  );
+  const pointOf = (id: string): GraphPoint =>
+    layout().points.get(id) ?? { x: GRAPH_VIEW.width / 2, y: GRAPH_VIEW.height / 2 };
+  const widthOf = (id: string): number => layout().widths.get(id) ?? GRAPH_BOX_MIN_W;
+  const labelOf = (id: string): string => layout().labels.get(id) ?? '';
+
+  /* ------------------------------------------------------------- view (R1/R2) */
+
+  const viewBox = createMemo(() => viewBoxAttr(viewBoxOf(zoom(), pan())));
+
+  /** The SVG's on-screen box; without layout (a test DOM) the canvas itself. */
+  const rectOf = (): GraphRect => {
+    try {
+      const rect = svgRef?.getBoundingClientRect?.();
+      if (rect && Number(rect.width) > 0 && Number(rect.height) > 0) return rect;
+    } catch {
+      // A host without measurement: fall through to the canvas size.
+    }
+    return { left: 0, top: 0, width: GRAPH_VIEW.width, height: GRAPH_VIEW.height };
+  };
+
+  /**
+   * R1: wheel / trackpad pinch zoom, **around the pointer** (the graph point
+   * under the pointer stays put — `zoomBy`). `ctrlKey` needs no branch: a
+   * trackpad pinch arrives as a ctrl+wheel with the same `deltaY` shape.
+   */
+  const onWheel = (event: GraphWheelEvent): void => {
+    if (typeof event.preventDefault === 'function') event.preventDefault();
+    const next = zoomBy(
+      zoom(),
+      pan(),
+      Number(event.deltaY) || 0,
+      { x: Number(event.clientX) || 0, y: Number(event.clientY) || 0 },
+      rectOf()
+    );
+    setZoom(next.zoom);
+    setPan(next.pan);
+  };
+
+  /** R2: reset to 1× / centred — only on the **blank** canvas, never on a node. */
+  const onDblClick = (event: GraphMouseEvent): void => {
+    if (insideGraphNode(event.target)) return;
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
+
+  /**
+   * R2: drag the blank canvas to pan. The listeners live on `document` for the
+   * duration of the gesture (a pointer that leaves the SVG still pans), and are
+   * removed on pointerup / cancel **and** when the slot unmounts — a disposed
+   * plugin must not keep a listener alive.
+   */
+  const stopDragging = (): void => {
+    const stop = endDrag;
+    endDrag = undefined;
+    setDragging(false);
+    stop?.();
+  };
+
+  const onPointerDown = (event: GraphPointerEvent): void => {
+    if (typeof event.button === 'number' && event.button !== 0) return;
+    if (insideGraphNode(event.target)) return;
+    const doc = documentOf();
+    if (!doc) return;
+    stopDragging();
+    const rect = rectOf();
+    const box = viewBoxOf(zoom(), pan());
+    const startX = Number(event.clientX) || 0;
+    const startY = Number(event.clientY) || 0;
+    const startPan = pan();
+    // Client px → view units: the same drag moves the same amount of graph at
+    // any zoom (one graph unit per *rendered* pixel).
+    const scaleX = box.width / Math.max(1, Number(rect.width) || GRAPH_VIEW.width);
+    const scaleY = box.height / Math.max(1, Number(rect.height) || GRAPH_VIEW.height);
+    const onMove = (moveEvent: GraphPointerEvent): void => {
+      const dx = ((Number(moveEvent.clientX) || 0) - startX) * scaleX;
+      const dy = ((Number(moveEvent.clientY) || 0) - startY) * scaleY;
+      // Dragging right moves the content right, i.e. the view left.
+      setPan(clampPan({ x: startPan.x - dx, y: startPan.y - dy }, zoom()));
+    };
+    const onUp = (): void => stopDragging();
+    setDragging(true);
+    doc.addEventListener('pointermove', onMove as (event: never) => void);
+    doc.addEventListener('pointerup', onUp as (event: never) => void);
+    doc.addEventListener('pointercancel', onUp as (event: never) => void);
+    endDrag = () => {
+      doc.removeEventListener('pointermove', onMove as (event: never) => void);
+      doc.removeEventListener('pointerup', onUp as (event: never) => void);
+      doc.removeEventListener('pointercancel', onUp as (event: never) => void);
+    };
+  };
+
+  onCleanup(() => {
+    stopDragging();
+  });
 
   const neighbours = (id: string): number =>
     graph().edges.reduce((total, edge) => total + (edge.from === id || edge.to === id ? 1 : 0), 0);
@@ -806,11 +980,6 @@ function GraphSlot(props: {
       else next.add(id);
       return next;
     });
-  };
-
-  const labelOf = (node: GraphNode): string => {
-    const text = node.kind === 'workspace' ? node.label || ctx.t('panel.global') : node.label;
-    return text.length > GRAPH_LABEL_MAX ? `${text.slice(0, GRAPH_LABEL_MAX - 1)}…` : text;
   };
 
   const isSelected = (node: GraphNode): boolean =>
@@ -857,11 +1026,23 @@ function GraphSlot(props: {
   return (
     <div class={slotClass('graph')} data-collab-slot="graph">
       <div class="collab-graph" data-graph-level={props.level}>
-        <svg class="collab-graph-svg" viewBox={`0 0 ${GRAPH_W} ${GRAPH_H}`} aria-label={ctx.t('graph.title')}>
+        <svg
+          class={dragging() ? 'collab-graph-svg collab-graph-dragging' : 'collab-graph-svg'}
+          ref={(node: GraphSvgElement) => {
+            svgRef = node;
+          }}
+          viewBox={viewBox()}
+          data-graph-zoom={zoom()}
+          data-graph-pan={`${Math.round(pan().x * 10) / 10},${Math.round(pan().y * 10) / 10}`}
+          aria-label={ctx.t('graph.title')}
+          onWheel={onWheel}
+          onDblClick={onDblClick}
+          onPointerDown={onPointerDown}
+        >
           <For each={edges()}>
             {edge => {
-              const from = () => positions().get(edge.from);
-              const to = () => positions().get(edge.to);
+              const from = () => layout().points.get(edge.from);
+              const to = () => layout().points.get(edge.to);
               return (
                 <Show when={from() && to()}>
                   <line
@@ -881,7 +1062,8 @@ function GraphSlot(props: {
           </For>
           <For each={nodes()}>
             {node => {
-              const point = () => positions().get(node.id) ?? { x: GRAPH_CX, y: GRAPH_CY };
+              const point = () => pointOf(node.id);
+              const width = () => widthOf(node.id);
               return (
                 <>
                   <g
@@ -893,14 +1075,20 @@ function GraphSlot(props: {
                   >
                     <rect
                       class="collab-graph-box"
-                      x={point().x - 38}
-                      y={point().y - 11}
-                      width="76"
-                      height="22"
+                      x={point().x - width() / 2}
+                      y={point().y - GRAPH_BOX_H / 2}
+                      width={width()}
+                      height={GRAPH_BOX_H}
                       rx="4"
                     />
-                    <text class="collab-graph-label" x={point().x} y={point().y + 3} text-anchor="middle">
-                      {labelOf(node)}
+                    {/* The badge owns the right `GRAPH_BADGE_W`, the label the rest. */}
+                    <text
+                      class="collab-graph-label"
+                      x={point().x - GRAPH_BADGE_W / 2}
+                      y={point().y + 3}
+                      text-anchor="middle"
+                    >
+                      {labelOf(node.id)}
                     </text>
                   </g>
                   <Show when={neighbours(node.id) > 0}>
@@ -911,16 +1099,16 @@ function GraphSlot(props: {
                     >
                       <rect
                         class="collab-graph-toggle-box"
-                        x={point().x + 26}
-                        y={point().y - 18}
-                        width="12"
+                        x={point().x + width() / 2 - GRAPH_BADGE_W - 2}
+                        y={point().y - 5}
+                        width="10"
                         height="10"
                         rx="2"
                       />
                       <text
                         class="collab-graph-toggle-label"
-                        x={point().x + 32}
-                        y={point().y - 10}
+                        x={point().x + width() / 2 - GRAPH_BADGE_W + 3}
+                        y={point().y + 3}
                         text-anchor="middle"
                       >
                         {collapsed().has(node.id) ? '▸' : '▾'}
@@ -946,6 +1134,8 @@ function GraphSlot(props: {
               max: GRAPH_NODE_LIMIT,
               level: ctx.t(`graph.level.${props.level}`)
             })}
+            {' · '}
+            {ctx.t('graph.hint')}
           </div>
         </Show>
       </div>
@@ -1582,6 +1772,7 @@ export default Plugin.define({
       'graph.title': 'Relations',
       'graph.empty': 'No relations to draw.',
       'graph.legend': '{{level}} · click a node to select it · ▸/▾ folds one hop · at most {{max}} nodes',
+      'graph.hint': 'wheel zooms · drag pans · double-click resets',
       'graph.truncated': '{{count}} more node(s) not shown',
       'graph.level.global': 'global',
       'graph.level.workspace': 'workspace',
@@ -1669,6 +1860,7 @@ export default Plugin.define({
       'graph.title': '关系图',
       'graph.empty': '没有可画的关系。',
       'graph.legend': '{{level}} · 点节点选中 · ▸/▾ 折叠一跳 · 最多 {{max}} 个节点',
+      'graph.hint': '滚轮缩放 · 拖拽平移 · 双击复位',
       'graph.truncated': '另有 {{count}} 个节点未显示',
       'graph.level.global': '全局',
       'graph.level.workspace': '工作区',

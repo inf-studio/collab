@@ -30,7 +30,18 @@ import { join, resolve } from 'node:path';
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const built = await import(`file://${entry}`);
-const { buildGraph, buildSnapshot } = built.__internals ?? {};
+const {
+  buildGraph,
+  buildSnapshot,
+  layoutGraph,
+  truncateLabel,
+  GRAPH_LABEL_MAX,
+  clampZoom,
+  clampPan,
+  viewBoxOf,
+  viewBoxAttr,
+  zoomBy
+} = built.__internals ?? {};
 
 const checks = [];
 const expect = (title, ok, detail = '') => {
@@ -343,6 +354,201 @@ expect(
   ) ===
     JSON.stringify(['ses_n00', 'ses_n01', 'ses_n02', 'ses_n03', 'ses_n04', 'ses_n05', 'ses_n06']),
   JSON.stringify(capped.nodes.map(node => node.id))
+);
+
+/* --------------------------------------- 0.8.2 layout + view (graph-zoom) ---- */
+
+/*
+ * R3 (640×360, centre + two rings, labels ≤ 8 code points) and R1/R2 (zoom
+ * around the pointer, clamped pan). All of it is pure — no window, no DOM — so
+ * this is where the arithmetic is pinned; `test/gui-panel.mjs` only proves the
+ * same functions are wired to the wheel / pointer events.
+ */
+expect(
+  'GR layout: __internals exports the layout + view functions (pure, no host)',
+  typeof layoutGraph === 'function' &&
+    typeof truncateLabel === 'function' &&
+    typeof viewBoxOf === 'function' &&
+    typeof viewBoxAttr === 'function' &&
+    typeof zoomBy === 'function' &&
+    typeof clampPan === 'function' &&
+    typeof clampZoom === 'function' &&
+    GRAPH_LABEL_MAX === 8
+);
+
+const BOX_H = 22;
+/** A rendered box: its centre, width, height (the same numbers the SVG gets). */
+const boxOf = (layout, id) => {
+  const point = layout.points.get(id);
+  const width = layout.widths.get(id);
+  return point && width
+    ? { x: point.x - width / 2, y: point.y - BOX_H / 2, w: width, h: BOX_H }
+    : undefined;
+};
+/** Axis-aligned overlap: strict on both axes (touching is not overlapping). */
+const boxesOverlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+const overlappingPairs = layout => {
+  const ids = [...layout.points.keys()];
+  const pairs = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    for (let j = i + 1; j < ids.length; j += 1) {
+      const a = boxOf(layout, ids[i]);
+      const b = boxOf(layout, ids[j]);
+      if (a && b && boxesOverlap(a, b)) pairs.push(`${ids[i]}×${ids[j]}`);
+    }
+  }
+  return pairs;
+};
+
+const crowded = layoutGraph(capped.nodes, { center: 'ses_center' });
+expect(
+  'GR layout R3: 8 nodes at 640×360 — no two node boxes intersect',
+  capped.nodes.length === 8 && crowded.points.size === 8 && overlappingPairs(crowded).length === 0,
+  `overlaps: ${overlappingPairs(crowded).join(', ') || 'none'}`
+);
+expect(
+  'GR layout R3: the selected session is the centre, the rest sit on the two rings',
+  JSON.stringify(crowded.points.get('ses_center')) === JSON.stringify({ x: 320, y: 180 }) &&
+    [...crowded.points.values()].filter(point => point.x === 320 && point.y === 180).length === 1,
+  JSON.stringify([...crowded.points.entries()])
+);
+expect(
+  'GR layout R4: two layouts of the same nodes are byte-identical',
+  JSON.stringify([...crowded.points]) === JSON.stringify([...layoutGraph(capped.nodes, { center: 'ses_center' }).points]),
+  JSON.stringify([...crowded.points])
+);
+expect(
+  'GR layout R4: a reversed snapshot still yields the same layout (buildGraph sorts first)',
+  (() => {
+    const forward = layoutGraph(buildGraph(crowd, [], { level: 'session', session: 'ses_center', now }).nodes, {
+      center: 'ses_center'
+    });
+    const reversed = layoutGraph(
+      buildGraph({ ...crowd, sessions: [...crowd.sessions].reverse(), handoffs: [...crowd.handoffs].reverse() }, [], {
+        level: 'session',
+        session: 'ses_center',
+        now
+      }).nodes,
+      { center: 'ses_center' }
+    );
+    return JSON.stringify([...forward.points]) === JSON.stringify([...reversed.points]);
+  })()
+);
+expect(
+  'GR layout R3: every count 1…24 is non-overlapping (the ring layout is verified, not assumed)',
+  (() => {
+    const bad = [];
+    for (let count = 1; count <= 24; count += 1) {
+      const nodes = Array.from({ length: count }, (_, index) => ({
+        id: `ses_l${String(index).padStart(2, '0')}`,
+        kind: 'session',
+        label: `node ${index}`
+      }));
+      const pairs = overlappingPairs(layoutGraph(nodes));
+      if (pairs.length) bad.push(`${count}:${pairs[0]}`);
+    }
+    return bad.length === 0;
+  })()
+);
+expect(
+  'GR layout R3: a label is cut to 8 code points including the ellipsis',
+  (() => {
+    const long = {
+      at: now,
+      reachable: true,
+      sessions: [
+        { sid: 'ses_zoom_long', title: '定点复核 P2/P3 修一下这个很长的标题', agent: 'build', busy: true, workspace: wsA }
+      ],
+      locks: [],
+      handoffs: [],
+      queue: []
+    };
+    const view = buildGraph(long, [], { level: 'session', session: 'ses_zoom_long', now });
+    const layout = layoutGraph(view.nodes);
+    const text = layout.labels.get('ses_zoom_long') ?? '';
+    return Array.from(text).length === 8 && text.endsWith('…') && text.startsWith('定点复核');
+  })(),
+  truncateLabel('定点复核 P2/P3 修一下这个很长的标题')
+);
+expect(
+  'GR layout R3: a short label is printed as-is, a 12-char one is cut (box stays 44…96 wide)',
+  (() => {
+    const view = buildGraph(snapshot, [], { level: 'session', session: 'ses_a1', now });
+    const layout = layoutGraph(view.nodes);
+    const short = layoutGraph([{ id: 'ses_s', kind: 'session', label: 'abc' }]).labels.get('ses_s');
+    const long = layout.labels.get('ses_a1') ?? '';
+    const width = layout.widths.get('ses_a1') ?? 0;
+    return short === 'abc' && long === 'alpha w…' && width >= 44 && width <= 96;
+  })(),
+  JSON.stringify([...layoutGraph(buildGraph(snapshot, [], { level: 'session', session: 'ses_a1', now }).nodes).labels])
+);
+expect(
+  'GR labels: truncation counts code points, never halves a surrogate pair',
+  (() => {
+    const emoji = truncateLabel('🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀', 4);
+    return Array.from(emoji).length === 4 && emoji === '🚀🚀🚀…';
+  })(),
+  truncateLabel('🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀', 4)
+);
+
+/* R1: the three acceptance zooms. */
+expect(
+  'GR zoom R1: 1× is the whole 640×360 canvas',
+  viewBoxAttr(viewBoxOf(1, { x: 0, y: 0 })) === '0 0 640 360',
+  viewBoxAttr(viewBoxOf(1, { x: 0, y: 0 }))
+);
+expect(
+  'GR zoom R1: 0.6× shows 1066.7×600 and stays centred (nothing to pan)',
+  viewBoxAttr(viewBoxOf(0.6, { x: 0, y: 0 })) === '-213.3 -120 1066.7 600' &&
+    JSON.stringify(clampPan({ x: 500, y: 500 }, 0.6)) === JSON.stringify({ x: 0, y: 0 }),
+  `${viewBoxAttr(viewBoxOf(0.6, { x: 0, y: 0 }))} · ${JSON.stringify(clampPan({ x: 500, y: 500 }, 0.6))}`
+);
+expect(
+  'GR zoom R1: 2.5× shows 256×144 centred',
+  viewBoxAttr(viewBoxOf(2.5, { x: 0, y: 0 })) === '192 108 256 144',
+  viewBoxAttr(viewBoxOf(2.5, { x: 0, y: 0 }))
+);
+expect(
+  'GR zoom R1: zoom is clamped to [0.6, 2.5] (a wild wheel cannot leave the range)',
+  clampZoom(9) === 2.5 && clampZoom(0.05) === 0.6 && clampZoom(Number.NaN) === 1 && clampZoom(1.7) === 1.7,
+  `${clampZoom(9)} / ${clampZoom(0.05)} / ${clampZoom(Number.NaN)}`
+);
+expect(
+  'GR zoom R1: wheel up zooms in, wheel down zooms back out (exponential, symmetric)',
+  (() => {
+    const inOne = zoomBy(1, { x: 0, y: 0 }, -100, { x: 320, y: 180 }, { left: 0, top: 0, width: 640, height: 360 });
+    const back = zoomBy(inOne.zoom, inOne.pan, 100, { x: 320, y: 180 }, { left: 0, top: 0, width: 640, height: 360 });
+    return inOne.zoom > 1 && Math.abs(back.zoom - 1) < 1e-9 && Math.abs(back.pan.x) < 1e-9 && Math.abs(back.pan.y) < 1e-9;
+  })()
+);
+expect(
+  'GR zoom R1: the graph point under the pointer stays under the pointer',
+  (() => {
+    const rect = { left: 0, top: 0, width: 640, height: 360 };
+    const next = zoomBy(1, { x: 0, y: 0 }, -200, { x: 480, y: 90 }, rect);
+    const box = viewBoxOf(next.zoom, next.pan);
+    const graphX = box.x + (480 / 640) * box.width;
+    const graphY = box.y + (90 / 360) * box.height;
+    return Math.abs(graphX - 480) < 0.5 && Math.abs(graphY - 90) < 0.5;
+  })()
+);
+expect(
+  'GR pan R2: an over-drag is pulled back inside the 10 % margin',
+  (() => {
+    const one = clampPan({ x: 9999, y: -9999 }, 1);
+    const box = viewBoxOf(1, { x: 9999, y: -9999 });
+    return one.x === 64 && one.y === -36 && box.x === 64 && box.y === -36 && box.width === 640;
+  })(),
+  JSON.stringify(clampPan({ x: 9999, y: -9999 }, 1))
+);
+expect(
+  'GR pan R2: at 2.5× the pan range is larger (the canvas is the limit, not the pointer)',
+  (() => {
+    const one = clampPan({ x: 9999, y: 9999 }, 2.5);
+    const box = viewBoxOf(2.5, { x: 9999, y: 9999 });
+    return one.x === 256 && one.y === 144 && box.x === 448 && box.y === 252;
+  })(),
+  JSON.stringify(clampPan({ x: 9999, y: 9999 }, 2.5))
 );
 
 /* ------------------------------------------------------- determinism (R4) */

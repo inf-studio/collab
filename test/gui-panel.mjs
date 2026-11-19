@@ -69,6 +69,11 @@ class Elem {
     this.attrs = {};
     this.parentNode = null;
     this.className = '';
+    // 0.8.2 (`graph-zoom`): a **direct** (`addEventListener`) listener, which is
+    // how Solid attaches the non-delegated `wheel`. Recorded so the test can
+    // fire it for real; the default rect is the 640×360 canvas at the origin.
+    this.listeners = new Map();
+    this.rect = null;
     this.style = { cssText: '', setProperty() {}, removeProperty() {} };
   }
   get firstChild() {
@@ -119,8 +124,17 @@ class Elem {
   getAttribute(name) {
     return name in this.attrs ? this.attrs[name] : null;
   }
-  addEventListener() {}
-  removeEventListener() {}
+  addEventListener(type, fn) {
+    const set = this.listeners.get(type) ?? new Set();
+    set.add(fn);
+    this.listeners.set(type, set);
+  }
+  removeEventListener(type, fn) {
+    this.listeners.get(type)?.delete(fn);
+  }
+  getBoundingClientRect() {
+    return this.rect ?? { left: 0, top: 0, right: 640, bottom: 360, width: 640, height: 360 };
+  }
   remove() {
     this.parentNode?.removeChild(this);
   }
@@ -702,8 +716,32 @@ function findIn(root, predicate) {
 
 /** Click through Solid's delegated listener, with the node as `target`. */
 function fireClick(target) {
-  const event = { type: 'click', target, cancelBubble: false };
-  for (const listener of documentStub.listeners.get('click') ?? []) listener(event);
+  return fireDocumentEvent('click', target);
+}
+
+/**
+ * 0.8.2: a **delegated** event (Solid attaches these to `document`), e.g.
+ * `dblclick` / `pointerdown`. The event object is the minimum Solid's own
+ * handler reads; `currentTarget` is derived by it.
+ */
+function fireDocumentEvent(type, target, props = {}) {
+  const event = { type, target, cancelBubble: false, ...props };
+  for (const listener of documentStub.listeners.get(type) ?? []) listener(event);
+  return event;
+}
+
+/**
+ * 0.8.2: a **direct** element listener (`wheel` is not in Solid's delegated
+ * set), bubbled up the `parentNode` chain like a real DOM event would be.
+ */
+function fireElementEvent(target, type, props = {}) {
+  const event = { type, target, cancelBubble: false, ...props };
+  let node = target;
+  while (node) {
+    for (const listener of node.listeners?.get(type) ?? []) listener(event);
+    node = node.parentNode;
+  }
+  return event;
 }
 
 const LAYOUT = {
@@ -1239,6 +1277,212 @@ const GRAPH = {
     'PN11 the graph caps at 8 nodes and prints +N for the rest (never a silent drop)',
     nodes.length === 8 && more?.textContent === '+5',
     JSON.stringify({ nodes: nodes.length, more: more?.textContent })
+  );
+  // 0.8.2 (R3): the same assertion from the **rendered** SVG — the box every
+  // node group draws, at the 640×360 layout's coordinates.
+  const groups = [];
+  const walkGroups = node => {
+    if (!node) return;
+    if (node.nodeType === 1) {
+      if (node.attrs?.['data-graph-node'] !== undefined) groups.push(node);
+      for (const child of node.childNodes ?? []) walkGroups(child);
+    }
+  };
+  walkGroups(el);
+  const labels = [];
+  const walkLabels = node => {
+    if (!node) return;
+    if (node.nodeType === 1) {
+      if (String(node.className).includes('collab-graph-label')) labels.push(node.textContent);
+      for (const child of node.childNodes ?? []) walkLabels(child);
+    }
+  };
+  walkLabels(el);
+  const boxes = groups.map(group => {
+    const rect = findIn(group, node => node.attrs?.class === 'collab-graph-box');
+    return {
+      id: group.attrs['data-graph-node'],
+      x: Number(rect?.attrs.x),
+      y: Number(rect?.attrs.y),
+      w: Number(rect?.attrs.width),
+      h: Number(rect?.attrs.height)
+    };
+  });
+  const overlaps = [];
+  for (let i = 0; i < boxes.length; i += 1) {
+    for (let j = i + 1; j < boxes.length; j += 1) {
+      const a = boxes[i];
+      const b = boxes[j];
+      if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+        overlaps.push(`${a.id}×${b.id}`);
+      }
+    }
+  }
+  expect(
+    'PN11 R3: the eight rendered boxes do not intersect, and every label is ≤ 8 code points',
+    boxes.length === 8 &&
+      boxes.every(box => box.w > 0 && box.h === 22) &&
+      overlaps.length === 0 &&
+      labels.every(text => Array.from(text).length <= 8),
+    JSON.stringify({ overlaps, labels, boxes })
+  );
+  dispose();
+}
+
+/* ---------- 11b. 0.8.2 (graph-zoom): wheel zoom / drag pan / double-click ---- */
+
+/*
+ * R1/R2 on the **shipped bundle**: the wheel is a direct listener (Solid does
+ * not delegate `wheel`), the drag uses pointer events plus two document-level
+ * listeners for the duration of the gesture, and a double-click on the blank
+ * canvas resets. Every assertion reads the SVG's own `viewBox` — the one thing
+ * that actually changes — so "zoom happened" cannot be faked by a data
+ * attribute.
+ */
+{
+  const ZOOM_SESSION = serverSession('ses_g_alpha01', 'srv-zoom', fakeClient({ reply: GRAPH }));
+  const h = harness(ZOOM_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, ZOOM_SESSION);
+  // L2 (the selected session) so the graph has 4 nodes and every node exists.
+  fireClick(
+    findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('graph alpha'))
+  );
+  const svg = () => findIn(el, node => String(node.className).includes('collab-graph-svg'));
+  const viewBox = () => String(svg()?.getAttribute('viewBox') ?? '').split(' ').map(Number);
+  const zoomOf = () => Number(svg()?.getAttribute('data-graph-zoom'));
+  const panOf = () => String(svg()?.getAttribute('data-graph-pan') ?? '').split(',').map(Number);
+  const wheel = (deltaY, x = 320, y = 180) =>
+    fireElementEvent(svg(), 'wheel', { deltaY, clientX: x, clientY: y });
+
+  expect(
+    'PN14 the SVG draws the 640×360 canvas at 1× (R3: the old one was 320×180)',
+    JSON.stringify(viewBox()) === JSON.stringify([0, 0, 640, 360]) && zoomOf() === 1,
+    JSON.stringify({ viewBox: viewBox(), zoom: zoomOf() })
+  );
+
+  // R1: a wheel notch up zooms in **around the pointer** (the graph point under
+  // the pointer stays put), and the viewBox shrinks — the graph data does not
+  // change (the node rects keep their layout coordinates).
+  const alphaRect = () => findIn(findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_alpha01'), n => n.attrs?.class === 'collab-graph-box');
+  const beforeRect = { ...alphaRect()?.attrs };
+  const beforeNodes = el.textContent;
+  wheel(-200, 480, 90);
+  const zoomed = viewBox();
+  const anchorX = zoomed[0] + (480 / 640) * zoomed[2];
+  const anchorY = zoomed[1] + (90 / 360) * zoomed[3];
+  expect(
+    'PN14 wheel up zooms in around the pointer (viewBox 640 → smaller, anchor fixed)',
+    zoomOf() > 1 && zoomed[2] < 640 && zoomed[3] < 360 && Math.abs(anchorX - 480) < 1 && Math.abs(anchorY - 90) < 1,
+    JSON.stringify({ viewBox: zoomed, zoom: zoomOf(), anchorX, anchorY })
+  );
+  expect(
+    'PN14 … and the node geometry is untouched (only the viewBox changed)',
+    JSON.stringify(alphaRect()?.attrs) === JSON.stringify(beforeRect) &&
+      el.textContent === beforeNodes,
+    JSON.stringify({ before: beforeRect, after: alphaRect()?.attrs })
+  );
+
+  // R1: the range is [0.6, 2.5] — 40 notches in either direction stay inside it.
+  for (let i = 0; i < 40; i += 1) wheel(-100);
+  const top = { zoom: zoomOf(), box: viewBox() };
+  for (let i = 0; i < 80; i += 1) wheel(100);
+  const bottom = { zoom: zoomOf(), box: viewBox() };
+  expect(
+    'PN14 the zoom range is clamped: 2.5× at the top, 0.6× at the bottom (never NaN)',
+    top.zoom === 2.5 &&
+      Math.abs(top.box[2] - 256) < 0.2 &&
+      Math.abs(top.box[3] - 144) < 0.2 &&
+      bottom.zoom === 0.6 &&
+      Math.abs(bottom.box[2] - 1066.7) < 0.2 &&
+      Math.abs(bottom.box[0] - -213.3) < 0.2,
+    JSON.stringify({ top, bottom })
+  );
+
+  // R2: double-click the **blank** canvas → back to 1× / centred.
+  fireDocumentEvent('dblclick', svg());
+  expect(
+    'PN14 double-clicking the blank canvas resets to 1× and pan 0',
+    JSON.stringify(viewBox()) === JSON.stringify([0, 0, 640, 360]) && zoomOf() === 1,
+    JSON.stringify({ viewBox: viewBox(), pan: panOf() })
+  );
+
+  // R2: drag the blank canvas. A drag far past the edge is clamped (10 % of the
+  // canvas may stay blank, never more), so the viewBox stops at -64.
+  fireDocumentEvent('pointerdown', svg(), { button: 0, clientX: 320, clientY: 180 });
+  fireDocumentEvent('pointermove', svg(), { clientX: 2600, clientY: 180 });
+  fireDocumentEvent('pointerup', svg(), { clientX: 2600, clientY: 180 });
+  const panned = { box: viewBox(), pan: panOf() };
+  expect(
+    'PN14 dragging right pans the view left, and an over-drag is clamped',
+    Math.abs(panned.box[0] - -64) < 0.2 && Math.abs(panned.pan[0] - -64) < 0.2,
+    JSON.stringify(panned)
+  );
+  fireDocumentEvent('pointerdown', svg(), { button: 0, clientX: 320, clientY: 180 });
+  fireDocumentEvent('pointermove', svg(), { clientX: -3000, clientY: 180 });
+  fireDocumentEvent('pointerup', svg(), { clientX: -3000, clientY: 180 });
+  expect(
+    'PN14 … and dragging the other way is clamped at +64 (the view never leaves the canvas)',
+    Math.abs(viewBox()[0] - 64) < 0.2,
+    JSON.stringify({ box: viewBox(), pan: panOf() })
+  );
+
+  // A drag started **on a node** must not pan (it is a click, not a canvas drag).
+  const alphaNode = findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_alpha01');
+  const beforeDragOnNode = viewBox();
+  fireDocumentEvent('pointerdown', alphaNode, { button: 0, clientX: 320, clientY: 180 });
+  fireDocumentEvent('pointermove', alphaNode, { clientX: 600, clientY: 300 });
+  fireDocumentEvent('pointerup', alphaNode, { clientX: 600, clientY: 300 });
+  expect(
+    'PN14 a pointerdown on a node is a click, not a pan (the view stays put)',
+    JSON.stringify(viewBox()) === JSON.stringify(beforeDragOnNode),
+    JSON.stringify({ before: beforeDragOnNode, after: viewBox() })
+  );
+
+  // R1: after zoom + pan, clicking a node still selects it — the browser applies
+  // the viewBox to hit-testing, and the node kept its own coordinates.
+  wheel(-200, 320, 180);
+  fireClick(alphaNode);
+  fireClick(findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_child01'));
+  expect(
+    'PN14 after zooming, clicking a node still selects it (hit-testing is the browser’s)',
+    el.textContent.includes('ses_g_child01') &&
+      findIn(el, node => String(node.className).includes('collab-session-selected') && node.textContent.includes('graph child')) !==
+        undefined,
+    JSON.stringify({ zoom: zoomOf(), text: String(el.textContent).slice(0, 120) })
+  );
+
+  // … and the ▸/▾ badge keeps working at that zoom (it is a real element inside
+  // the transformed SVG, not a coordinate the panel recomputes).
+  fireClick(findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_alpha01'));
+  const zoomedToggle = findIn(el, node => node.attrs?.['data-graph-toggle'] === 'ses_g_alpha01');
+  expect('PN14 the fold badge is still there after zooming', Boolean(zoomedToggle), zoomedToggle?.className);
+  fireClick(zoomedToggle);
+  expect(
+    'PN14 … and folding one hop still works at the zoomed-in view',
+    Boolean(findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_alpha01')) &&
+      !findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_child01') &&
+      zoomOf() > 1,
+    JSON.stringify({ zoom: zoomOf(), box: viewBox() })
+  );
+  fireClick(findIn(el, node => node.attrs?.['data-graph-toggle'] === 'ses_g_alpha01'));
+
+  // R2: a double-click **on a node** is not a reset (the reset is for the canvas).
+  const zoomBeforeNodeDbl = zoomOf();
+  fireDocumentEvent('dblclick', findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_child01'));
+  expect(
+    'PN14 a double-click on a node does not reset the view (blank canvas only)',
+    zoomOf() === zoomBeforeNodeDbl,
+    JSON.stringify({ zoomBeforeNodeDbl, after: zoomOf() })
+  );
+
+  // The 2 s poll replaces the snapshot; zoom/pan are window-local and survive it.
+  await sleep(2100);
+  expect(
+    'PN14 a poll keeps the zoom (view state is local memory, never snapshot data)',
+    zoomOf() === zoomBeforeNodeDbl && viewBox()[2] < 640 && Boolean(findIn(el, node => node.attrs?.['data-graph-node'] === 'ses_g_alpha01')),
+    JSON.stringify({ zoom: zoomOf(), box: viewBox() })
   );
   dispose();
 }

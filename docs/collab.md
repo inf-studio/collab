@@ -1126,7 +1126,7 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
 
 **回滚**：`git restore -- src/gui.tsx src/tui.tsx test/gui-panel.mjs test/tui-render.mjs`；没有运行时开关。
 
-#### 11.11.8 三级关系图（0.8.0，`board2-graph`）
+#### 11.11.8 三级关系图（0.8.0 `board2-graph` · 0.8.2 缩放/平移/布局 `graph-zoom`）
 
 主从布局之后还剩一个说不清的关系：**谁和谁在协作**。0.6.0 的看板只能回答「这个会话持有/发起了什么」，
 回答不了「这条工作流从哪个工作区来、下一跳是谁」。这一节加一张图，三个级别，GUI 画 SVG、TUI 画文本树，
@@ -1182,20 +1182,56 @@ GraphEdge  { from, to, kind: 'handoff'|'origin'|'spawn'|'subagent', bid?, state?
 | 悬停节点 | 相邻边加 `collab-graph-edge-active`（只高亮相邻） | 本地 `hovered` 信号 |
 | `+N` | `truncated` 个节点未显示（L2 上限 8） | `graph().truncated` |
 
-布局是**一圈均匀分布 + 列内排序**（没有力导向、没有随机数），所以截图/断言在同一快照上稳定可复现。
+布局与视图（缩放 / 平移）在 0.8.2 拆到 `src/core/graph-layout.ts`（纯函数，窗口之外可单测），见下节。
 所有点击都只写上面两个选中信号——看板仍然**只读**（R5），没有释放 / 归档 / 解冻 / 投递。
 
 **TUI**（`collab.status` 面板）：树下方多一段文本树，级别跟选中走（未选中 = L0，选中 `ses:` 行 = L2）。
 缩进 2 空格、深度上限 3；`─交接─▶` / `┄origin┄▶` / `┈agent┈▶` / `↳`；每行 `clip` 到面板宽度，
 窄终端以 `…` 截断（30 列实测不崩）。展开/收起与选中都是本地状态，`buildGraph` 不额外 `load()`。
 
-**测试与变异**：`test/graph-shape.mjs`（L0/L1/L2 的节点/边/方向/类型、`+N`、两次构建与**输入倒序**一致、
+**测试与变异（0.8.0）**：`test/graph-shape.mjs`（L0/L1/L2 的节点/边/方向/类型、`+N`、两次构建与**输入倒序**一致、
 目录 hash 前后不变；**真实路径** `buildSnapshot → toHandoff → buildGraph` 出 `origin` 边）；`test/gui-panel.mjs` 34 → 47（三级别切换、点节点联动、折叠/展开、悬停高亮、`+N`、轮询后图与选中不变、
 四类边线型逐类断言）。变异：M3 去 `origin` 透传（snapshot 1 + graph 2 条红）、M4 `spawn` 改实线（线型 1 条红）；`test/tui-render.mjs` 56 → 60（L0 `─交接─▶`、会话选中切 L2 的 `↳`、30 列 `…`）。
 变异两组都实测失败：① 把 `handoff`/`spawn` 边方向画反 → 方向断言失败；② 去掉节点/边排序 → 「输入倒序
 一致」与「按 id 排序」断言失败。
 
-**回滚**：`git restore -- src/core/graph.ts src/gui.tsx src/tui.tsx src/index.ts test/graph-shape.mjs test/gui-panel.mjs test/tui-render.mjs`。
+**缩放 / 平移 / 布局（0.8.2，`graph-zoom`）**
+
+0.8.0 的图是 320×180 上的**一圈**均匀分布、标签最多 14 字：节点一多，标签互相压、连线穿过文字，
+而且**不能缩放**（截图见任务）。0.8.2 把三件事一起改：
+
+```ts
+layoutGraph(nodes, { width: 640, height: 360, center?, label? })
+  → { points: Map<id,{x,y}>, labels: Map<id,string>, widths: Map<id,number>, width, height }
+
+truncateLabel(text, max = 8)      // 码点计数，8 个含 `…`
+viewBoxOf(zoom, pan, size?)       // 视图框（已钳制）
+zoomBy(zoom, pan, deltaY, pointer, rect?)  // 一步滚轮/双指，围绕指针
+clampZoom(zoom) / clampPan(pan, zoom) / viewBoxAttr(box)
+```
+
+| 项 | 规则 |
+| --- | --- |
+| 画布（R3） | **640×360**（16:9），`viewBox` 由缩放/平移驱动；CSS 只按面板宽度缩放 |
+| 分层 | 中心 1（L2 是**选中的会话**，其它级别是排序后的第一个）→ 内环 ≤6（椭圆 124×84）→ 外环其余（252×148） |
+| 标签 | 一律截断到 **8 个码点**（含 `…`）；盒宽 = 标签估算宽 + 12 内距 + 12 角标位，夹在 `44…96` |
+| 不重叠 | 布局**自检**：环排布只有在「任意两盒不相交」时才采用，否则退回 6 列网格（≤96 节点不可能重叠）。判定用盒的**真实宽度**（`widths`），不是猜 |
+| 稳定（R4） | 无时钟、无随机、无 `localeCompare`；坐标一次性取 1 位小数，同一节点数组两次布局字节一致；`buildGraph` 先按码位排序，所以**输入倒序也一致** |
+| 缩放（R1） | 滚轮 / 双指（`ctrl+wheel` 同一条路），`0.6×–2.5×`，指数步长 `exp(-deltaY/500)`，**以指针为中心**（指针下的图坐标不动） |
+| 平移（R2） | 空白处 `pointerdown` 起拖、`document` 的 `pointermove` 平移、`pointerup`/`pointercancel` 结束；视图最多离开画布 **10%**，越界被拉回；`zoom<1` 时视图比画布大，直接居中 |
+| 复位 | **双击空白**回 1× / pan 0；双击节点**不**复位 |
+| 命中 | 节点几何永远是布局坐标，缩放/平移只改 `viewBox` —— 命中由浏览器做，缩放后点节点、折叠角标都还准 |
+| 只读（R5） | `zoom` / `pan` 是组件本地信号，不写文件、不写快照、不动图数据；拖拽监听在 `onCleanup` 里摘掉 |
+
+**测试与变异**：`test/graph-shape.mjs` 36 → 53（三档 `viewBox` 逐字、钳制、围绕指针不动、
+8 节点与 1…24 各计数的包围盒不相交、两次布局与输入倒序一致、标签 8 码点含 emoji 不劈半）；
+`test/gui-panel.mjs` 68 → 82（`viewBox` 从 640 起、滚轮上/下的范围钳到 0.6 / 2.5、拖拽越界被夹在 ±64、
+双击复位、双击节点不复位、缩放后点节点仍选中、折叠仍生效且节点几何未变、轮询保留缩放；PN11 另加「渲染出来的 8 个盒不重叠 + 标签 ≤8」）。
+变异实测：M1 去掉布局自检 + 收紧环半径 → 关系图 2 条 + 面板 1 条红；M2 去掉 `clampZoom` → 关系图 1 条 + 面板 1 条红
+（滚到 4447×）；M3 去掉 `clampPan` → 关系图 3 条 + 面板 1 条红（`data-graph-pan` 停在 -2280）。
+
+**回滚**：`git restore -- src/core/graph.ts src/gui.tsx src/tui.tsx src/index.ts test/graph-shape.mjs test/gui-panel.mjs test/tui-render.mjs`，
+再删掉 0.8.2 新增的未跟踪文件 `rm src/core/graph-layout.ts`（`git restore` 对未跟踪文件会整条报错，不能混在一起）。
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 
