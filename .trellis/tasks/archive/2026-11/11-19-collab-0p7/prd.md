@@ -20,13 +20,27 @@
 
 ## 验收（父）
 
-- [ ] 六项各自通过实现 + 独立复核；
-- [ ] 回归：`735 + 12 + 20 + 50 + 49 + 47 + 17` 全绿，工具数 20 → 21（threads 或 decisions 视设计定，最多 +2）；
-- [ ] 证据包里的 4 条可复现链（4 跳→2 跳、3 thread 重发、7 thread 空转、消息 thread 报错）在实现后有对应断言；
-- [ ] 文档与 skill 同步；一次发 `0.7.0`。
+- [x] 六项各自通过实现 + 独立复核（awareness / origin / dedupe-target / threads / blocked / decisions）；
+- [x] 回归：`870 + 12 + 20 + 50 + 49 + 47 + 17` 全绿，工具数 20 → 22；
+- [x] 证据包里的 4 条可复现链（4 跳→2 跳、3 thread 重发、7 thread 空转、消息 thread 报错）均有对应断言；
+- [x] 文档与 skill 同步；一次发 `0.7.0`。
 
 ## 非目标
 
 - 不做「自动判断该找谁」（候选打分已有）；
 - 不做跨机器协作；
 - 不改 `BUILTIN_PROTECT` 与只读 agent 的硬边界。
+
+
+## 完成记录（2026-11-19）
+
+| 子任务 | 交付 | 复核关键修复 |
+| --- | --- | --- |
+| `awareness` | 双计数提示 + 协议头 | 协议头原先给的回执命令缺 `text`，记录会停在 `acked`（已修，改为可照抄且能闭环） |
+| `origin` | 对接人 + 一层继承 | A→B→C 两跳成立；对接人可闭环、第三方不可、protected 零放宽 |
+| `dedupe-target` | 同 target 同文提示 | 查询在前、拒绝优先；`force:true` 可强制 |
+| `threads` | thread 聚合 + status 降级 | 读放大（先排序再读）、`includeClosed` 预留槽位 |
+| `blocked` | 结构化 BLOCKED | 预览写盘、非参与方旁路（抽 `canWriteBlocked`） |
+| `decisions` | 契约决策 | 按 id 覆盖、权限 fail-closed、预览不写 |
+
+版本 `0.7.0`；工具 20 → 22；快照仅追加可选字段。
