@@ -412,3 +412,12 @@ opencode api get "/api/plugin?location%5Bdirectory%5D=/data/project/muke-interfa
 - 落库条件**全部满足**才写：解析出 `bid`、`confirm:true`、记录存在、**调用方是参与方**（`from`/`claim.by`/`asked`/`origin`，
   唯一实现 `canWriteBlocked`）；否则只上正文并注明未落库。保留最近 3 次。
 - 预览（`confirm:false`）与「同文去重命中（未投递）」**都不写**——否则会污染记录或白占最近 3 次名额。
+
+## 契约决策记录（`decisions`）
+
+- `collab_decisions { bid, items:[{id,decision,rationale?}] }`：每单上限 **20**、每次 1–10 条、**按 `id` 覆盖**
+  （`at/by` 取本次）；`id` ≤40、`decision` ≤200、`rationale` ≤400。
+- 权限**仅**本单发起方（`from.sid`）或承接方（`claim.by`）；`asked`/`origin`/第三方一律拒绝且 0 写入（比 `blocked` 更严）。
+- 只写展示字段：不投递、不改 `state/claim/receipt/replies`；预览不写。
+- 展示：`collab_status` 最近 3 条；承接方注入只加一行计数；`collab_list` 行尾 `decisions=N`。
+- 已知低风险：id 若含天文面字符（emoji），「按码点校验 / 按 UTF-16 截断」不一致会让覆盖失效（既有 `truncate` 约定，非本功能引入）。

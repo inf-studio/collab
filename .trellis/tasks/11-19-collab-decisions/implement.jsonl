@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/cross-workspace-collab-guide.md", "reason": "决策记录与回执协议"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "可读拒绝/预览不写"}
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "注入一行计数约定"}

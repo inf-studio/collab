@@ -1,6 +1,6 @@
 # `@inf-studio/collab`
 
-多会话（含跨工作区）协作插件：二十一个原生 `collab_*` 工具（含缺陷上报、闭环后追加、资源租约、受保护目标请求队列、
+多会话（含跨工作区）协作插件：二十二个原生 `collab_*` 工具（含缺陷上报、闭环后追加、契约决策、资源租约、受保护目标请求队列、
 即时状态回执、thread 聚合、加急催办、临时冻结与 spawn 会话自动归档）+ thread/inbox 协议 + 一条「广播 → 打分 → 原子领取 → 回执」的交接链路。
 
 由 `.opencode/plugins/collab.js`（单文件 4000+ 行）迁移而来：行为、文案、存储键、
@@ -18,10 +18,10 @@
 
 | 工具               | 作用                                                                       | 读/写             |
 | ------------------ | -------------------------------------------------------------------------- | ----------------- |
-| `collab_list`      | 列可协作会话（id/agent/state/loc/title/parent/别名）+ 未闭环交接           | 只读              |
+| `collab_list`      | 列可协作会话（id/agent/state/loc/title/parent/别名）+ 未闭环交接（有契约决策的单行尾 `decisions=N`） | 只读              |
 | `collab_inbox`     | 本会话收到的跨会话消息全文（单条 ≤4000 字）                                | 只读              |
 | `collab_wait`      | 等某 thread 的回执，或等某会话空闲                                         | 只读              |
-| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 承接方报过的结构化 BLOCKED（需要对方 / 已排除 / 最小判别）/ 下一步（非阻塞、零写入）；消息 thread（`collab_send`/`collab_reply` 建立）降级为 `kind=messages` + 出入站摘要，不再报错 | 只读              |
+| `collab_status`    | 一单现在到哪一步：state / 承接+剩余租约 / 投递（admitted/seen）/ 队列位置 / 最近回复 / 承接方报过的结构化 BLOCKED（需要对方 / 已排除 / 最小判别）/ 契约决策（`决策 N 条` + 最近 3 条）/ 下一步（非阻塞、零写入）；消息 thread（`collab_send`/`collab_reply` 建立）降级为 `kind=messages` + 出入站摘要，不再报错 | 只读              |
 | `collab_threads`   | 与**一个** target 的全部 thread：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 建议继续哪个（默认只列未闭环，≤20 条） | 只读              |
 | `collab_escalate` | 加急一单：默认 `delivery:steer` 进对方当前轮（只读 agent / 受保护目标自动降级：queue 或 owner-queue 项），回执打印**实际** delivery；只追加 `priority/urgentAt/urgentReason/urgentBy` | 发消息 / 写队列 |
 | `collab_freeze`   | **临时冻结**一个会话（含子会话）/ 工作区 / 一单：`handoff`/`broadcast`/`accept`/`escalate` 对它的**新建**协作可读拒绝（0 写入），`until` 到期自动失效；通知一次（受保护目标 → urgent 队列项）；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
@@ -35,6 +35,7 @@
 | `collab_promote`   | 把一个会话的 agent 切到 `build`/`plan`（`revert` 还原）                    | **写会话 agent**  |
 | `collab_report`    | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方，不改协作状态）              | 写本地证据        |
 | `collab_followup`  | 闭环后追加指针（**仅本单领取人**；只写 `{bid,issuePath,at,by}`，提案文件由调用方自己写） | 写追加记录        |
+| `collab_decisions` | 契约决策记录：把「退出码 2→3」这类**契约级决定**写进记录 `decisions[]`（仅本单发起方/承接方；同一 `id` 覆盖，每单 ≤20；**不投递、不改 state/claim/receipt/replies**） | 写交接记录（本单两方） |
 | `collab_lock`      | 取资源租约（测试窗口/同一文件/构建；exclusive 或 shared，TTL 10s–2h，被占可 `wait` 排队） | 写本地租约        |
 | `collab_unlock`    | 释放**自己**持有的租约（`shared` 组只移除自己；无 force 抢占）             | 写本地租约        |
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
@@ -60,6 +61,14 @@
 写进记录 `blocked[]`（保留最近 3 次），下一跳的承接方注入与 `collab_status` 聚合展示（各段 ≤3 条 + 「还有 N 条」）。
 没有 bid / 预览（`confirm:false`）/ 非参与方 / 同文去重命中（未投递）→ 只上正文、回执注明「未落库」；超条数 / 超长是可读拒绝（0 投递 0 写入），
 不传时输出与旧版**逐字一致**；`state` / `claim` / `receipt` 一律不动。
+
+0.7.0 起 `collab_decisions` 把**契约级决定**写进交接记录（`decisions?: [{ id, decision, rationale?, at, by }]`）：
+一次交付里 3 条偏差（退出码 2→3 / `room:order` 纯事件型 / 断言只看末帧）以前只能口头纠正、散在 3–4 个 thread 里，
+现在落在记录上、只读可拉取。**只有本单发起方（`from.sid`）或承接方（`claim.by`）能写**（第三方拒绝且 0 写入，
+比 `blocked` 更严）；`items` 1–10 条（`id` ≤40 / `decision` ≤200 / `rationale` ≤400 字），**同一 `id` 再写 = 覆盖**，
+每单上限 20 条（超出可读拒绝，不静默淘汰），`confirm:false` 零写入预览。它**不投递、不改 `state` / `claim` /
+`receipt` / `replies`**：`collab_status { bid }` 显示 `决策 N 条` + 最近 3 条，承接方注入只加一行
+`本单决策 N 条（collab_status { bid:"…" } 查看）`，`collab_list` 行尾 ` decisions=N`。
 
 受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
 （每条一次，不含指令、不产生投递；两类合计 ≤3 行，同一提案只渲染 `at` 最新的一条）。
@@ -283,7 +292,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 823 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
+pnpm test          # build + 870 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -316,9 +325,13 @@ pnpm test          # build + 823 项 harness + 12 项只读默认 + 20 项看板
   0.7.0 追加 S101：跨 thread 正文去重（同一 target 的 3 个 thread 同文只投 1 次、回执写明「已在 thread … 发过」）、
   `force:true` 三投三中且标 `dedupeOverridden`（带 `bid` 时记录标 `dedupeOverriddenAt` 且状态字段不变）、
   窗口边界（59s 拦 / 61s 放行，`Date.now` 前跳）、不同 target / 预览 / `dedupeWindowMs:0` 各一条。
+  0.7.0 追加 S106：契约决策（`collab_decisions`）——写 3 条 / 重复 id 覆盖（计数不变、只显示最新）/
+  五类非法输入可读拒绝且 0 写入 / 控制字符折叠 / 第三方拒绝且记录逐字不变 / `confirm:false` 不写 /
+  真实叫醒链路的注入只有一行计数且不含正文 / `collab_list` 行尾 `decisions=N` /
+  `state`/`claim`/`receipt`/`replies` 前后一致 / 无 `decisions` 的旧记录输出不变 / 写满 20 条后新增被拒、覆盖仍可。
   0.7.0 追加 S105：BLOCKED 结构化——投递正文 / 承接方注入（真实叫醒链路）/ `collab_status` 三处都含三段、
   不传时投递正文与信封+正文精确相等、五类非法输入可读拒绝且 0 投递 0 写入、无 bid 与非参与方都不落库、
-  连续 4 次只留最近 3 次、`state/claim/receipt` 前后一致、工具面仍 21 个。
+  连续 4 次只留最近 3 次、`state/claim/receipt` 前后一致、工具面 22 个（同一窗口新增 `collab_decisions`）。
   0.7.0 追加 S102：thread 聚合（`collab_threads` 一次列出 1 handoff + 2 消息 thread、kind/bid/出入站摘要、
   唯一「← 建议继续」、`includeClosed` 才列已闭环 ≤3）与 `collab_status` 降级（消息 thread → `kind=messages`
   + 摘要、未知 thread 保留原错误）；索引只在该消息**真的投递成功**后写（预览零写入）、上限 500 按 `lastAt` 淘汰、
@@ -353,7 +366,7 @@ pnpm test          # build + 823 项 harness + 12 项只读默认 + 20 项看板
   变异验证：`server?.client` 改回 `ctx.client` → 7 条失败；去掉回包前的 key 比对 → 迟到回包那条失败；
   去掉 `adopt()` 的清屏 → 「切走即清」那条失败。
 
-源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照/thread 索引）、`src/tools`（二十一个工具）、
+源码结构：`src/core`（存储/领取/打分/回执/血缘/上报/挂起/租约/队列/归档/侧栏快照/thread 索引）、`src/tools`（二十二个工具）、
 `src/hooks`（context 注入）、`src/config.ts`、`src/rpc.ts`（`collab.state` 契约）、
 `src/gui.tsx`（`./gui-experimental`：Panel + ComposerPill + 命令 + `session.header` 计数条 + 标题栏 pill 探针，只在 `setup` 里跑）、
 `src/tui.tsx`（`./tui`：`collab.status` 面板 + 可展开的侧栏摘要 + `/collab` 命令，只读）、

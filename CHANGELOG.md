@@ -13,7 +13,8 @@
 > 以及 **thread 聚合 + 状态降级**（`11-19-collab-threads`）：一对会话的 7 个并行 thread 一眼看清，
 > 消息 thread 的 `collab_status` 不再报错（工具 20 → 21）；
 > 以及 **BLOCKED 结构化**（`11-19-collab-blocked`）：真正推动进展的那一句「最小判别实验」不再埋在长正文里
-> （投递正文 / 承接方注入 / `collab_status` 三处同显，工具面不变）。
+> （投递正文 / 承接方注入 / `collab_status` 三处同显，工具面不变）；
+> 以及 **契约决策记录**（`11-19-collab-decisions`）：契约级决定写进交接记录、只读可拉取（工具 21 → 22）。
 
 ### Added
 
@@ -84,6 +85,23 @@
   - **兼容（R4）**：不传 `blocked` → 正文、协议头、回执**逐字不变**（`git` 外的旧记录也没有该字段，三处渲染为空）；
     纯展示字段——`state` / `claim` / `receipt` 一律不动，也不放宽任何投递许可（受保护目标照旧拒投）。
   - **测试**：S105（23 条，见 Tests）。
+
+- **契约决策记录（`collab_decisions`，`11-19-collab-decisions`，工具 21 → 22）**：一次交付里 3 条**契约级**偏差
+  （退出码 2→3、`room:order` 是纯事件型、断言只看末帧）全靠口头纠正，跨 3–4 个 thread，最后还要人工回写提案——
+  决定只活在聊天记录里。现在它们写进交接记录本身，只读可拉取。
+  - **存储**：记录新增可选 `decisions?: [{ id, decision, rationale?, at, by }]`；**只写这一个字段**——
+    `state` / `claim` / `receipt` / `replies` 与 `blocked` 一律不动，**不投递任何消息**。
+  - **校验**：`items` 1–10 条；`id` ≤40、`decision` ≤200、`rationale` ≤400 字，控制字符（含换行）剥成空格、
+    空白折叠（永远单行）。超条数 / 超长 / 不是数组 / 条目不是对象 / 缺 `id` / 缺 `decision` → **可读拒绝**，0 写入。
+  - **权限**：**只有本单发起方（`from.sid`）或承接方（`claim.by`）** 能写（`canWriteDecisions`）——比 `blocked`
+    的四类参与方更严（`asked` / `origin` 不行），且**无身份/无参与方时 fail-closed**；其余会话可读拒绝、0 写入。
+  - **覆盖与上限**：同一 `id` 再写 = **覆盖**（`at`/`by` 取本次、位置移到末尾），不追加；每单上限 **20** 条，
+    写后会超 → 可读拒绝（不静默淘汰旧决策）；满 20 时覆盖已有 `id` 仍然可以。
+  - **渲染**：`collab_status` 多一段 `决策 N 条`（>3 时标「最近 3 条」）+ 最近 3 条 `- id: decision`
+    （rationale 截断到 80 字）；承接方注入（`takeoverBody`：spawn / 叫醒 / 重发）只加**一行**
+    `本单决策 N 条（collab_status { bid:"…" } 查看）`，不展开正文；`collab_list` 行尾 ` decisions=N`（仅 N>0）。
+  - **兼容**：`confirm:false` 零写入预览；没有该字段的记录三处输出与 0.7.0 之前**逐字一致**。
+  - **测试**：S106（24 条，见 Tests）；`readonly-default.mjs` 工具面顺序同步（22 个 + `collab_report`）。
 
 ### Changed
 

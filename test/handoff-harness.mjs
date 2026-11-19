@@ -9246,8 +9246,8 @@ await expectFail(
 
 // --- S98n: registered exactly once; the description states the contract.
 expect(
-  'S98 collab_freeze is registered exactly once (19 → 20 → 21 tools)',
-  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 21,
+  'S98 collab_freeze is registered exactly once (19 → 20 → 21 → 22 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 22,
   `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
 );
 const s98Desc = String(tool('collab_freeze').description);
@@ -10816,8 +10816,8 @@ expect(
 
 // --- S102j: registered exactly once; the surface is 21 tools; description states the contract.
 expect(
-  'S102 collab_threads is registered exactly once and the surface is 21 collab_* tools',
-  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 21,
+  'S102 collab_threads is registered exactly once and the surface is 22 collab_* tools',
+  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 22,
   `${tools.length} tools / ${tools.filter(definition => definition.name === 'collab_threads').length} collab_threads`
 );
 const s102Desc = String(tool('collab_threads').description);
@@ -11292,18 +11292,18 @@ expect(
   `${bcRead(s105gBid).blocked?.length}`
 );
 
-// --- S105h: 两个入参都声明 blocked（结构 + 界值写在描述里），工具面仍是 21 个。
+// --- S105h: 两个入参都声明 blocked（结构 + 界值写在描述里），工具面是 22 个。
 const s105SendSchema = tool('collab_send').input.properties.blocked;
 const s105HandoffSchema = tool('collab_handoff').input.properties.blocked;
 expect(
-  'S105 collab_send / collab_handoff 都声明了 blocked（need/excluded/minimalTest），工具面仍 21 个',
+  'S105 collab_send / collab_handoff 都声明了 blocked（need/excluded/minimalTest），工具面 22 个',
   Boolean(s105SendSchema) &&
     Boolean(s105HandoffSchema) &&
     s105SendSchema.properties.excluded.items.type === 'string' &&
     /≤20 条/.test(String(s105SendSchema.properties.excluded.description)) &&
     /≤10 条/.test(String(s105SendSchema.properties.need.description)) &&
     /≤200 字/.test(String(s105SendSchema.properties.minimalTest.description)) &&
-    tools.length === 21,
+    tools.length === 22,
   `${tools.length} tools / ${JSON.stringify(Object.keys(s105SendSchema?.properties ?? {}))}`
 );
 
@@ -11316,6 +11316,347 @@ delete sessions[S105_ME];
 delete sessions[S105_TO];
 delete sessions[S105_THIRD];
 delete sessions[S105_L_CAND];
+
+
+// ================== S106 (0.7.0: contract decisions — `collab_decisions`)
+//   S106  `collab_decisions` 把契约级决定写进交接记录（只写 `decisions[]`）：
+//   写 3 条 / 重复 id 覆盖 / 超 20 条可读拒绝 / 第三方拒绝且 0 写入 /
+//   `confirm:false` 预览不写 / 承接方注入只有一行计数 / `collab_list` 行尾
+//   `decisions=N` / `state`/`claim`/`receipt`/`replies` 前后一致 /
+//   无 `decisions` 的记录输出不变。
+const S106_ME = 'ses_s106me';
+const S106_TO = 'ses_s106to';
+const S106_THIRD = 'ses_s106third';
+const S106_L_CAND = 'ses_s106l';
+sessions[S106_ME] = {
+  id: S106_ME,
+  agent: 'build',
+  title: 'S106 发起方',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S106_TO] = {
+  id: S106_TO,
+  agent: 'build',
+  title: 'S106 对端（承接方）',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S106_THIRD] = {
+  id: S106_THIRD,
+  agent: 'build',
+  title: 'S106 第三方',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+const as106 = sid => ({ sessionID: sid, agent: 'build' });
+
+const S106_REC = 'b_dd06000000001061';
+mkdirSync(broadcastDir, { recursive: true });
+writeFileSync(
+  bcFile(S106_REC),
+  JSON.stringify(
+    {
+      bid: S106_REC,
+      state: 'acked',
+      title: 'S106 契约决策 fixture',
+      from: { sid: S106_ME, directory: HARNESS_LOCATION },
+      claim: { by: S106_TO, kind: 'accept', at: 1, token: 'k_s106' },
+      receipt: { from: S106_TO, at: 2, note: '初始回执，保持不动' },
+      replies: [{ from: S106_TO, at: 3, text: '初始回复，保持不动' }],
+      updatedAt: 4
+    },
+    null,
+    2
+  )
+);
+const s106File = () => readFileSync(bcFile(S106_REC), 'utf8');
+const s106StateOf = () => {
+  const record = bcRead(S106_REC);
+  return JSON.stringify({
+    state: record.state,
+    claim: record.claim,
+    receipt: record.receipt,
+    replies: record.replies
+  });
+};
+const s106Write = (items, { confirm = true, who = S106_ME, bid = S106_REC } = {}) =>
+  call('collab_decisions', { bid, items, confirm }, as106(who));
+
+// --- S106a: 发起方写 3 条决策 → 记录 3 条；status 显示「决策 3 条」+ 最近 3 条；
+//            collab_list 行尾 decisions=3；state/claim/receipt/replies 一字不变。
+const s106StateBefore = s106StateOf();
+const S106_ITEMS = [
+  { id: 'exit-code', decision: '退出码用 3（不是 2）', rationale: 'D-064 与 CLI 约定一致' },
+  { id: 'room-order', decision: 'room:order 是纯事件型，不参与状态断言' },
+  { id: 'assert-last-frame', decision: '断言看状态机最终帧，不看中间帧' }
+];
+const s106a = await s106Write(S106_ITEMS);
+const s106aRecord = bcRead(S106_REC);
+expect(
+  'S106 写 3 条决策：记录 decisions 3 条，回执标明「决策 3 条」且不投递',
+  s106a.includes(`已写入决策：${S106_REC} 决策 3 条`) &&
+    s106a.includes('未投递') &&
+    Array.isArray(s106aRecord.decisions) &&
+    s106aRecord.decisions.length === 3 &&
+    s106aRecord.decisions.map(entry => entry.id).join(',') === 'exit-code,room-order,assert-last-frame' &&
+    s106aRecord.decisions.every(entry => entry.by === S106_ME && Number(entry.at) > 0),
+  `${s106aRecord.decisions?.length} / ${s106a.split('\n')[0]}`
+);
+expect(
+  'S106 state / claim / receipt / replies 前后完全一致（决策是纯展示字段）',
+  s106StateOf() === s106StateBefore,
+  `${s106StateOf()} / ${s106StateBefore}`
+);
+const s106aStatus = await call('collab_status', { bid: S106_REC }, as106(S106_ME));
+out('S106 status', s106aStatus);
+expect(
+  'S106 collab_status：决策 3 条 + 最近 3 条（id: decision，rationale 截断）',
+  s106aStatus.includes('决策 3 条:') &&
+    s106aStatus.includes('- exit-code: 退出码用 3（不是 2）（D-064 与 CLI 约定一致）') &&
+    s106aStatus.includes('- room-order: room:order 是纯事件型，不参与状态断言') &&
+    s106aStatus.includes('- assert-last-frame: 断言看状态机最终帧，不看中间帧'),
+  s106aStatus.split('\n').filter(line => line.includes('决策') || line.includes('- exit-code')).join(' | ')
+);
+const s106aList = await call('collab_list', {}, as106(S106_ME));
+expect(
+  'S106 collab_list 行尾 decisions=3',
+  s106aList.split('\n').some(line => line.includes(S106_REC) && line.includes('decisions=3')),
+  s106aList.split('\n').find(line => line.includes(S106_REC)) ?? '(没有该行)'
+);
+
+// --- S106b: 同一 id 再写（承接方写）→ 覆盖，不重复计数。
+const s106b = await s106Write(
+  [{ id: 'exit-code', decision: '退出码用 3（覆盖：以 CLI 契约为准）' }],
+  { who: S106_TO }
+);
+const s106bRecord = bcRead(S106_REC);
+expect(
+  'S106 重复 id 覆盖：仍 3 条、id 不重复、内容取最新，回执标明「覆盖 1」',
+  s106b.includes('覆盖 1') &&
+    s106bRecord.decisions.length === 3 &&
+    new Set(s106bRecord.decisions.map(entry => entry.id)).size === 3 &&
+    s106bRecord.decisions.find(entry => entry.id === 'exit-code').decision ===
+      '退出码用 3（覆盖：以 CLI 契约为准）' &&
+    s106bRecord.decisions.find(entry => entry.id === 'exit-code').by === S106_TO &&
+    s106bRecord.decisions.at(-1).id === 'exit-code',
+  `${s106bRecord.decisions.map(entry => `${entry.id}:${entry.decision}`).join(' / ')}`
+);
+const s106bStatus = await call('collab_status', { bid: S106_REC }, as106(S106_ME));
+expect(
+  'S106 覆盖后 status 只显示最新内容（旧答案不再出现），计数仍是 3',
+  s106bStatus.includes('决策 3 条:') &&
+    s106bStatus.includes('以 CLI 契约为准') &&
+    !s106bStatus.includes('退出码用 3（不是 2）'),
+  s106bStatus.split('\n').find(line => line.includes('- exit-code')) ?? '(没有该行)'
+);
+
+// --- S106c: 清洗与校验——控制字符剥成空格；五类非法输入可读拒绝且 0 写入。
+const s106cSanitized = await s106Write([{ id: 'one\nline', decision: '换行\t也要折叠' }]);
+const s106cEntry = bcRead(S106_REC).decisions.find(entry => entry.id === 'one line');
+expect(
+  'S106 控制字符剥成空格：id / decision 都是单行（不能借换行伪造第二行）',
+  s106cSanitized.includes('已写入决策') &&
+    Boolean(s106cEntry) &&
+    s106cEntry.decision === '换行 也要折叠',
+  JSON.stringify(s106cEntry)
+);
+const s106cBefore = s106File();
+const s106cEmpty = await expectFail(
+  'S106 items 为空 → 可读拒绝',
+  () => s106Write([]),
+  /decisions 的 items 不能为空/
+);
+const s106cTooMany = await expectFail(
+  'S106 items 11 条 → 可读拒绝（不静默截断）',
+  () => s106Write(Array.from({ length: 11 }, (_, index) => ({ id: `i${index}`, decision: `第 ${index + 1} 条` }))),
+  /items 最多 10 条/
+);
+const s106cLongId = await expectFail(
+  'S106 id 41 字 → 可读拒绝',
+  () => s106Write([{ id: 'x'.repeat(41), decision: '过长 id' }]),
+  /decisions\.items\[0\]\.id 最长 40 字/
+);
+const s106cLongText = await expectFail(
+  'S106 decision 201 字 → 可读拒绝',
+  () => s106Write([{ id: 'long', decision: '长'.repeat(201) }]),
+  /decisions\.items\[0\]\.decision 最长 200 字/
+);
+const s106cLongWhy = await expectFail(
+  'S106 rationale 401 字 → 可读拒绝',
+  () => s106Write([{ id: 'why', decision: '理由过长', rationale: '理'.repeat(401) }]),
+  /decisions\.items\[0\]\.rationale 最长 400 字/
+);
+expect(
+  'S106 五类非法输入都是可读拒绝：0 写入（记录逐字不变）',
+  Boolean(s106cEmpty && s106cTooMany && s106cLongId && s106cLongText && s106cLongWhy) &&
+    s106File() === s106cBefore,
+  `${s106File() === s106cBefore ? 'unchanged' : 'CHANGED'}`
+);
+
+// --- S106d: 第三方（既不是 from.sid 也不是 claim.by）→ 拒绝且 0 写入。
+const s106dBefore = s106File();
+const s106dThird = await expectFail(
+  'S106 第三方写 → 拒绝（比 blocked 更严：asked / origin 也不行）',
+  () => s106Write([{ id: 'third', decision: '第三方的决定' }], { who: S106_THIRD }),
+  /拒绝写入：当前会话 ses_s106third 既不是/
+);
+expect(
+  'S106 第三方拒绝后 0 写入（记录逐字不变）',
+  Boolean(s106dThird) && s106File() === s106dBefore,
+  `${s106File() === s106dBefore ? 'unchanged' : 'CHANGED'}`
+);
+
+// --- S106e: confirm:false → 预览不写。
+const s106eBefore = s106File();
+const s106ePreview = await s106Write([{ id: 'preview', decision: '预览不该写进去' }], { confirm: false });
+expect(
+  'S106 confirm:false 只预览（「未写入」），记录逐字不变',
+  s106ePreview.includes('未写入') &&
+    s106ePreview.includes('确认后在同样参数下传 confirm:true') &&
+    s106ePreview.includes('preview: 预览不该写进去') &&
+    s106File() === s106eBefore,
+  `${s106ePreview.split('\n')[0]} / ${s106File() === s106eBefore ? 'unchanged' : 'CHANGED'}`
+);
+
+// --- S106f: 注入（takeoverBody 真实叫醒链路）只带一行计数，不展开正文。
+const WS_Y = ws('y');
+const ISSUE_Y = issueFile(
+  WS_Y,
+  'fix-decisions-inject.md',
+  '# 决策注入（11-17-worker-store）\n\n`packages/state/src/machine/worker/store.ts`\n'
+);
+sessions[S106_L_CAND] = {
+  id: S106_L_CAND,
+  agent: 'build',
+  title: 'worker store state machine 修复（11-17-worker-store）',
+  time: { updated: now - 60_000, busy: 0 },
+  location: { directory: WS_Y }
+};
+contexts.set(S106_L_CAND, [toolMessage('packages/state/src/machine/worker/store.ts')]);
+const s106fBefore = prompts.length;
+const s106fBroadcast = await call(
+  'collab_broadcast',
+  { workspace: WS_Y, issuePath: ISSUE_Y, confirm: true },
+  as106(S106_ME)
+);
+const s106fBid = bidOf(s106fBroadcast);
+expect(
+  'S106 注入前置：广播问询到唯一候选（候选 idle → 无 prompt，只有注入）',
+  Boolean(s106fBid) && bcRead(s106fBid).asked?.sid === S106_L_CAND && prompts.length === s106fBefore,
+  `${s106fBid} asked=${bcRead(s106fBid).asked?.sid} / ${prompts.length - s106fBefore} prompts`
+);
+const S106_INJECT_TEXT = '决策正文不该出现在注入里';
+const s106fWrite = await s106Write(
+  [{ id: 'inject', decision: S106_INJECT_TEXT }],
+  { bid: s106fBid }
+);
+sessions[S106_L_CAND].time = { updated: now, busy: now - 45 * 60_000, idle: 0 };
+const s106fWakeBefore = prompts.length;
+await call('collab_broadcast', { workspace: WS_Y, issuePath: ISSUE_Y, confirm: true }, as106(S106_ME));
+const s106fWake = lastPrompt();
+out('S106f takeover (wake)', s106fWake);
+const s106fCountLines = s106fWake.split('\n').filter(line => line.includes('本单决策'));
+expect(
+  'S106 承接方注入只有一行计数（含 collab_status 指路，不展开正文）',
+  s106fWrite.includes('已写入决策') &&
+    prompts.length === s106fWakeBefore + 1 &&
+    s106fCountLines.length === 1 &&
+    s106fCountLines[0].includes('本单决策 1 条') &&
+    s106fCountLines[0].includes(`collab_status { bid:"${s106fBid}" }`) &&
+    !s106fWake.includes(S106_INJECT_TEXT),
+  `${s106fCountLines.join(' | ')} / ${prompts.length - s106fWakeBefore} prompt(s)`
+);
+
+// --- S106g: 无 decisions 的记录：三处输出都不多一个字（旧记录兼容）。
+const S106_PLAIN = 'b_dd06000000001062';
+writeFileSync(
+  bcFile(S106_PLAIN),
+  JSON.stringify(
+    {
+      bid: S106_PLAIN,
+      state: 'open',
+      title: 'S106 旧记录 fixture（无新增字段）',
+      from: { sid: S106_ME, directory: HARNESS_LOCATION },
+      updatedAt: 5
+    },
+    null,
+    2
+  )
+);
+const s106gStatus = await call('collab_status', { bid: S106_PLAIN }, as106(S106_ME));
+const s106gList = await call('collab_list', {}, as106(S106_ME));
+const s106gPlainLine = s106gList.split('\n').find(line => line.includes(S106_PLAIN)) ?? '';
+expect(
+  'S106 无 decisions：status 不出现「决策 N 条」行、collab_list 行尾没有 decisions=',
+  !s106gStatus.includes('  决策 ') && !s106gPlainLine.includes('decisions='),
+  `${s106gStatus.split('\n').find(line => line.includes('state=')) ?? '-'} / ${s106gPlainLine}`
+);
+
+// --- S106h: 上限 20——写满可继续覆盖；再多一条新增 → 可读拒绝、0 写入。
+const s106hStart = bcRead(S106_REC).decisions.length;
+const s106hNeeded = 20 - s106hStart;
+const s106hChunks = [];
+for (let index = 0; index < s106hNeeded; index += 10) {
+  s106hChunks.push(
+    await s106Write(
+      Array.from({ length: Math.min(10, s106hNeeded - index) }, (_, offset) => ({
+        id: `fill${index + offset}`,
+        decision: `填充决策 ${index + offset}`
+      }))
+    )
+  );
+}
+const s106hFull = bcRead(S106_REC);
+expect(
+  'S106 上限 20：从已有条数写满 20（分批 ≤10），一条也不淘汰',
+  s106hChunks.length > 0 &&
+    s106hChunks.every(text => text.includes('已写入决策')) &&
+    s106hFull.decisions.length === 20 &&
+    s106hFull.decisions.filter(entry => entry.id === 'exit-code').length === 1,
+  `${s106hStart} → ${s106hFull.decisions.length} 条 / ${s106hChunks.at(-1)?.split('\n')[0]}`
+);
+const s106hBefore = s106File();
+const s106hOver = await expectFail(
+  'S106 第 21 条（新 id）→ 可读拒绝，0 写入',
+  () => s106Write([{ id: 'overflow', decision: '第 21 条' }]),
+  /超过上限 20/
+);
+expect(
+  'S106 超限拒绝后记录逐字不变（不静默淘汰旧决策）',
+  Boolean(s106hOver) && s106File() === s106hBefore && bcRead(S106_REC).decisions.length === 20,
+  `${bcRead(S106_REC).decisions.length} 条 / ${s106File() === s106hBefore ? 'unchanged' : 'CHANGED'}`
+);
+const s106hReplace = await s106Write([{ id: 'fill0', decision: '填充决策 0（满额时覆盖）' }]);
+expect(
+  'S106 满 20 条时覆盖已有 id 仍然可以（覆盖不增加条数）',
+  s106hReplace.includes('覆盖 1') &&
+    bcRead(S106_REC).decisions.length === 20 &&
+    bcRead(S106_REC).decisions.find(entry => entry.id === 'fill0').decision === '填充决策 0（满额时覆盖）',
+  `${s106hReplace.split('\n')[0]} / ${bcRead(S106_REC).decisions.length} 条`
+);
+
+// --- S106i: 工具面声明（items 结构 + 界值）+ 注册一次。
+const s106Schema = tool('collab_decisions')?.input;
+expect(
+  'S106 collab_decisions 注册一次，items 是数组且声明 id/decision/rationale 与界值',
+  Boolean(s106Schema) &&
+    tools.filter(definition => definition.name === 'collab_decisions').length === 1 &&
+    s106Schema.properties.items.type === 'array' &&
+    s106Schema.properties.items.items.required.join(',') === 'id,decision' &&
+    /≤40 (?:chars|字)/.test(String(s106Schema.properties.items.items.properties.id.description)) &&
+    /≤200 (?:chars|字)/.test(String(s106Schema.properties.items.items.properties.decision.description)) &&
+    /≤400 (?:chars|字)/.test(String(s106Schema.properties.items.items.properties.rationale.description)),
+  `${JSON.stringify(Object.keys(s106Schema?.properties ?? {}))}`
+);
+
+// Cleanup: S106 fixtures / records / sessions.
+for (const bid of [S106_REC, S106_PLAIN, s106fBid].filter(Boolean)) rmSync(bcFile(bid), { force: true });
+contexts.delete(S106_L_CAND);
+delete sessions[S106_ME];
+delete sessions[S106_TO];
+delete sessions[S106_THIRD];
+delete sessions[S106_L_CAND];
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

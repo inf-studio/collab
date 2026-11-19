@@ -2,6 +2,7 @@ import type { ToolDefinition } from '../types.ts';
 import { acceptTool } from './accept.ts';
 import { archiveTool } from './archive.ts';
 import { broadcastTool } from './broadcast.ts';
+import { decisionsTool } from './decisions.ts';
 import { followupTool } from './followup.ts';
 import { grantTool } from './grant.ts';
 import { handoffTool } from './handoff.ts';
@@ -43,6 +44,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     sendTool(kit),
     replyTool(kit),
     followupTool(kit),
+    decisionsTool(kit),
     inboxTool(kit),
     waitTool(kit),
     statusTool(kit),

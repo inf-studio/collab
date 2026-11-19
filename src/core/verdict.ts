@@ -4,8 +4,10 @@ import { normalizeThreadID } from '../ids.ts';
 import type {
   BlockedSpec,
   BroadcastBlocked,
+  BroadcastDecision,
   BroadcastOrigin,
   BroadcastRecord,
+  DecisionSpec,
   JsonObject,
   SessionMessageLike
 } from '../types.ts';
@@ -342,7 +344,8 @@ export const BLOCKED_AGGREGATE_ITEMS = 3;
  */
 const BLOCKED_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g;
 
-function blockedText(value: unknown): string {
+/** Control characters → spaces, whitespace folded: always exactly one line. */
+function sanitizeInline(value: unknown): string {
   return String(value ?? '')
     .replace(BLOCKED_CONTROL_RE, ' ')
     .replace(/\s+/g, ' ')
@@ -359,7 +362,7 @@ const circled = (index: number): string => String.fromCodePoint(0x2460 + index);
 function blockedOne(value: unknown, field: string, limit: number): string {
   if (value === undefined || value === null) return '';
   if (typeof value !== 'string') throw invalid(`blocked.${field} 必须是字符串 —— 未发送任何内容`);
-  const text = blockedText(value);
+  const text = sanitizeInline(value);
   const chars = charCount(text);
   if (chars > limit) {
     throw invalid(
@@ -383,7 +386,7 @@ function blockedList(value: unknown, field: string, limit: number): string[] {
       if (typeof item !== 'string') {
         throw invalid(`blocked.${field}[${index}] 必须是字符串 —— 未发送任何内容`);
       }
-      const text = blockedText(item);
+      const text = sanitizeInline(item);
       const chars = charCount(text);
       if (chars > BLOCKED_ITEM_CHARS) {
         throw invalid(
@@ -421,7 +424,7 @@ export function normalizeBlocked(raw: unknown): BlockedSpec | undefined {
 function storedList(value: unknown, limit: number): string[] {
   if (!Array.isArray(value)) return [];
   return value
-    .map(item => (typeof item === 'string' ? truncate(blockedText(item), BLOCKED_ITEM_CHARS) : ''))
+    .map(item => (typeof item === 'string' ? truncate(sanitizeInline(item), BLOCKED_ITEM_CHARS) : ''))
     .filter(Boolean)
     .slice(0, limit);
 }
@@ -441,7 +444,7 @@ export function blockedHistoryOf(record: BroadcastRecord | undefined): Broadcast
     const need = storedList(value.need, BLOCKED_NEED_LIMIT);
     const excluded = storedList(value.excluded, BLOCKED_EXCLUDED_LIMIT);
     const minimalTest = String(value.minimalTest ?? '')
-      ? truncate(blockedText(value.minimalTest), BLOCKED_TEST_CHARS)
+      ? truncate(sanitizeInline(value.minimalTest), BLOCKED_TEST_CHARS)
       : '';
     if (!need.length && !excluded.length && !minimalTest) continue;
     out.push({
@@ -566,6 +569,187 @@ export function blockedInjectionLines(record: BroadcastRecord | undefined): stri
   ];
 }
 
+// ------------------------------------------- contract decisions (0.7.0)
+
+/**
+ * 0.7.0 (`11-19-collab-decisions`): the caps of a contract decision (design §1).
+ * Over a cap is a **readable refusal**, never a silent truncation or eviction —
+ * a dropped decision reads exactly like a decision that was never made.
+ */
+export const DECISION_KEEP = 20;
+export const DECISION_ITEMS_LIMIT = 10;
+export const DECISION_ID_CHARS = 40;
+export const DECISION_TEXT_CHARS = 200;
+export const DECISION_RATIONALE_CHARS = 400;
+/** How many decisions `collab_status` shows (newest first) and the count line. */
+export const DECISION_SHOW = 3;
+/** Display cut for a rationale in `collab_status` (stored value may be 400). */
+export const DECISION_RATIONALE_SHOW = 80;
+
+/**
+ * One capped single-line field of a decision. Same sanitation as `blocked`
+ * (control characters → spaces, whitespace folded): every rendered decision is
+ * line-oriented, so a caller's stray newline must never forge a second line.
+ */
+function decisionField(
+  value: unknown,
+  field: string,
+  limit: number,
+  { required = true }: { required?: boolean } = {}
+): string {
+  if (value === undefined || value === null) {
+    if (required) throw invalid(`decisions.${field} 必填 —— 未写入任何内容`);
+    return '';
+  }
+  if (typeof value !== 'string') throw invalid(`decisions.${field} 必须是字符串 —— 未写入任何内容`);
+  const text = sanitizeInline(value);
+  const chars = charCount(text);
+  if (required && !text) throw invalid(`decisions.${field} 不能为空 —— 未写入任何内容`);
+  if (chars > limit) {
+    throw invalid(
+      `decisions.${field} 最长 ${limit} 字（本次 ${chars} 字）—— 未写入任何内容（不静默截断）`
+    );
+  }
+  return text;
+}
+
+/**
+ * Validate the caller's `items` (design §2): 1–10 entries, `id` ≤40,
+ * `decision` ≤200, `rationale` ≤400. Anything unusable is a readable refusal
+ * **before** a single byte is written.
+ *
+ * Two entries with the same `id` in one call collapse to the later one — the
+ * same "按 id 覆盖" rule the record uses, so a call can never append two answers
+ * to one decision.
+ */
+export function normalizeDecisionItems(raw: unknown): DecisionSpec[] {
+  if (raw === undefined || raw === null) {
+    throw invalid(`decisions 需要 items（1–${DECISION_ITEMS_LIMIT} 条 { id, decision, rationale? }）—— 未写入任何内容`);
+  }
+  if (!Array.isArray(raw)) throw invalid('decisions 的 items 必须是数组 —— 未写入任何内容');
+  if (!raw.length) throw invalid(`decisions 的 items 不能为空（1–${DECISION_ITEMS_LIMIT} 条）—— 未写入任何内容`);
+  if (raw.length > DECISION_ITEMS_LIMIT) {
+    throw invalid(
+      `decisions 的 items 最多 ${DECISION_ITEMS_LIMIT} 条（本次 ${raw.length} 条）—— 未写入任何内容（不静默截断）`
+    );
+  }
+  const out = new Map<string, DecisionSpec>();
+  raw.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw invalid(`decisions.items[${index}] 必须是对象 { id, decision, rationale? } —— 未写入任何内容`);
+    }
+    const value = item as JsonObject;
+    const id = decisionField(value.id, `items[${index}].id`, DECISION_ID_CHARS);
+    const decision = decisionField(value.decision, `items[${index}].decision`, DECISION_TEXT_CHARS);
+    const rationale = decisionField(value.rationale, `items[${index}].rationale`, DECISION_RATIONALE_CHARS, {
+      required: false
+    });
+    out.set(id, { id, decision, ...(rationale ? { rationale } : {}) });
+  });
+  return [...out.values()];
+}
+
+/**
+ * The stored decisions of a record, oldest first, deduped by `id` (the later
+ * occurrence wins) and capped to the newest {@link DECISION_KEEP}. Read
+ * tolerantly and re-sanitised: a record can also be written by a version that
+ * did not validate the field, and a hand-edited one must never break
+ * `collab_status`. Records written before this field existed simply have none.
+ */
+export function decisionHistoryOf(record: BroadcastRecord | undefined): BroadcastDecision[] {
+  const raw = asObject(record).decisions;
+  if (!Array.isArray(raw)) return [];
+  const out: BroadcastDecision[] = [];
+  for (const entry of raw) {
+    const value = asObject(entry);
+    const id = truncate(sanitizeInline(value.id), DECISION_ID_CHARS);
+    const decision = truncate(sanitizeInline(value.decision), DECISION_TEXT_CHARS);
+    if (!id || !decision) continue;
+    const rationale = String(value.rationale ?? '')
+      ? truncate(sanitizeInline(value.rationale), DECISION_RATIONALE_CHARS)
+      : '';
+    const next: BroadcastDecision = {
+      id,
+      decision,
+      ...(rationale ? { rationale } : {}),
+      at: Number(value.at) || 0,
+      by: String(value.by ?? '')
+    };
+    const seen = out.findIndex(item => item.id === id);
+    if (seen >= 0) out.splice(seen, 1);
+    out.push(next);
+  }
+  return out.slice(-DECISION_KEEP);
+}
+
+/**
+ * Apply `items` on top of a record's decisions, **keyed by `id`** (design §1):
+ * a repeat overwrites in place and moves to the end (its `at`/`by` are this
+ * write's), a new id appends. Returns the full (uncapped) list so the caller can
+ * refuse a write that would pass {@link DECISION_KEEP} — this function never
+ * drops an old decision silently.
+ */
+export function mergeDecisions(
+  record: BroadcastRecord | undefined,
+  items: DecisionSpec[],
+  stamp: { at?: number; by?: string }
+): { decisions: BroadcastDecision[]; added: number; replaced: number } {
+  const at = Number(stamp.at) || Date.now();
+  const by = String(stamp.by ?? '');
+  const out = decisionHistoryOf(record);
+  let added = 0;
+  let replaced = 0;
+  for (const item of items) {
+    const index = out.findIndex(entry => entry.id === item.id);
+    if (index >= 0) {
+      out.splice(index, 1);
+      replaced += 1;
+    } else {
+      added += 1;
+    }
+    out.push({
+      id: item.id,
+      decision: item.decision,
+      ...(item.rationale ? { rationale: item.rationale } : {}),
+      at,
+      by
+    });
+  }
+  return { decisions: out, added, replaced };
+}
+
+/**
+ * Whether `who` may write a decision onto this record. **Stricter than
+ * {@link canWriteBlocked}** on purpose: only the requester (`from.sid`) and the
+ * claimant (`claim.by`). The asked candidate and the chain head may annotate a
+ * BLOCKED report (they are in the delivery path), but a *contract* decision must
+ * not be writable by a bystander — otherwise anyone who can name a `bid` could
+ * rewrite the contract through the record.
+ *
+ * Fail-**closed** when the record names no participant at all (unlike
+ * `canWriteBlocked`, which stays fail-open for hand-written records).
+ */
+export function canWriteDecisions(record: BroadcastRecord | undefined, who: string | undefined): boolean {
+  const sid = String(who ?? '').trim();
+  if (!sid) return false;
+  return [record?.from?.sid, record?.claim?.by]
+    .map(value => String(value ?? '').trim())
+    .filter(Boolean)
+    .includes(sid);
+}
+
+/**
+ * The **one line** a claimant sees in its takeover injection (design §3):
+ * a count, never the text — the full list is one read-only `collab_status` call
+ * away, so the injection stays small. A record without `decisions` renders
+ * nothing, so every pre-0.7.0 output is unchanged.
+ */
+export function decisionInjectionLines(record: BroadcastRecord | undefined): string[] {
+  const entries = decisionHistoryOf(record);
+  if (!entries.length) return [];
+  return [`本单决策 ${entries.length} 条（collab_status { bid:"${record?.bid ?? ''}" } 查看）`];
+}
+
 
 /**
  * R1: the takeover message body, shared by the three places that deliver it:
@@ -611,6 +795,10 @@ export function takeoverBody({
     // (there is nothing to act on yet, this is context). A record without
     // `blocked` renders nothing here, so old output is unchanged.
     ...blockedInjectionLines(record),
+    // 0.7.0 (`11-19-collab-decisions`, R3): the contract decisions of this
+    // hand-off — **one count line only** (the text is one `collab_status` away).
+    // A record without `decisions` renders nothing here.
+    ...decisionInjectionLines(record),
     // R1-2: full requester sid (no `collab_inbox` lookup needed to say no).
     `发起方：${requester || '(记录里没有发起方 sid，回执用 collab_inbox 查)'}`,
     '按顺序完成（三步都不要省略）：',

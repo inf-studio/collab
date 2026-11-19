@@ -310,6 +310,40 @@ export interface BroadcastBlocked {
 /** The caller-supplied half of a `blocked` (no stamp — the writer adds it). */
 export type BlockedSpec = Pick<BroadcastBlocked, 'need' | 'excluded' | 'minimalTest'>;
 
+/**
+ * 0.7.0 (`11-19-collab-decisions`): one **contract-level decision** recorded
+ * against a hand-off — the thing that keeps getting corrected in prose across
+ * 3–4 threads ("退出码 2 → 3", "`room:order` 是纯事件型", "断言只看末帧").
+ *
+ * A decision is **display only**: it never touches `state` / `claim` /
+ * `receipt` / `replies`, never delivers anything, and never widens a guard.
+ * It is written by `collab_decisions` (requester or claimant only), read by
+ * `collab_status` / `collab_list` and announced as **one count line** in the
+ * claimant's takeover injection.
+ *
+ * `id` is the key: writing the same `id` again **overwrites** it (last write
+ * wins) instead of appending — so "the exit code is 3, not 2" cannot end up in
+ * the record twice with two different answers. At most 20 decisions per record;
+ * going over is a readable refusal, never a silent eviction.
+ */
+export interface BroadcastDecision {
+  /** Stable key (`exit-code` / `D-064`), ≤40 chars. A repeat overwrites. */
+  id: string;
+  /** What was decided (≤200 chars, one line). */
+  decision: string;
+  /** Why (≤400 chars, one line) — optional. */
+  rationale?: string;
+  at: number;
+  by: string;
+}
+
+/** The caller-supplied half of one decision (no stamp — the writer adds it). */
+export interface DecisionSpec {
+  id: string;
+  decision: string;
+  rationale?: string;
+}
+
 /** One hand-off record (`~/.config/opencode/collab-broadcast/<bid>.json`). */
 export interface BroadcastRecord {
   bid: string;
@@ -347,6 +381,15 @@ export interface BroadcastRecord {
    * Read it through `blockedHistoryOf` (tolerant) rather than directly.
    */
   blocked?: BroadcastBlocked[];
+  /**
+   * 0.7.0 (`11-19-collab-decisions`): the contract-level decisions written by
+   * `collab_decisions` (`{ id, decision, rationale?, at, by }`), newest last,
+   * at most 20, keyed by `id` (a repeat overwrites in place). Absent on every
+   * record written before this field existed — a record without it renders
+   * byte for byte as it used to. Read it through `decisionHistoryOf` (tolerant)
+   * rather than directly.
+   */
+  decisions?: BroadcastDecision[];
   /**
    * R8: last time the requester looked at an `acked` claimant's answer and found
    * no verdict. Stamped so a reminder-less refresh does not re-read the

@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十一个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十二个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -24,7 +24,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_list` | `limit?`, `directory?` | 列会话（id/agent/state/`loc=`/`parent=`/title）+ 未闭环交接 | 只读 |
 | `collab_inbox` | `limit?` | 本会话收到的跨会话消息全文 | 只读 |
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
-| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false`；**消息 thread 降级**为 `kind=messages` + 出入站摘要（不再报错）；承接方报过结构化 BLOCKED 时多三行「需要对方 / 已排除 / 最小判别」 | 只读 |
+| `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false`；**消息 thread 降级**为 `kind=messages` + 出入站摘要（不再报错）；承接方报过结构化 BLOCKED 时多三行「需要对方 / 已排除 / 最小判别」；有契约决策时多一段 `决策 N 条` + 最近 3 条 | 只读 |
 | `collab_threads` | `target`, `includeClosed?` | **与一个 target 的全部 thread**：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 唯一「← 建议继续」；默认只列未闭环，≤20 条 | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
@@ -37,6 +37,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
 | `collab_followup` | `bid, issuePath?, confirm` | **闭环后追加**：只登记结构化指针（不投递、不改 state） | 写交接记录（本单领取人） |
+| `collab_decisions` | `bid`, `items`（1–10 条 `{id, decision, rationale?}`）, `confirm` | **契约决策记录**（0.7.0）：把「退出码 2→3 / `room:order` 纯事件型 / 断言只看末帧」写进记录 `decisions[]`；**只有本单发起方/承接方能写**；同一 `id` 再写 = 覆盖，每单 ≤20 条；不投递、不改 state/claim/receipt/replies | 写交接记录（本单两方） |
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 | `collab_archive` | `bid?` / `session?`, `restore?`, `confirm` | **归档 ≠ 删除**：把 spawn 会话藏起来（`PATCH {archived:true}`，消息全留），`restore:true` 恢复；交接终态 10 分钟后自动归档 | 写会话归档位 |
 
@@ -201,6 +202,25 @@ collab_send { target:"ses_发起方", text:"[handoff] BLOCKED b_… 缺后端推
 - 超条数 / 超长 / 三段全空 → **可读拒绝**（不静默截断，0 投递 0 写入）；控制字符（含换行）剥成空格。
 - **不传就逐字不变**；`state` / `claim` / `receipt` 一律不动，也不放宽任何投递许可。
 - 转发一个「卡住了」的活儿给下一跳时用 `collab_handoff { blocked }`：下一跳的注入里直接有「已排除什么、该做哪个实验」。
+
+### 一点八·再再补：契约决策（`collab_decisions`，0.7.0）
+
+一次交付里 3 条**契约级**偏差（退出码 2→3、`room:order` 是纯事件型、断言只看末帧）全靠口头纠正、散在 3–4 个 thread：
+后来人仍可能按旧契约写。把它们写进这一单的记录，谁接都能拉到：
+
+```text
+collab_decisions { bid:"b_…",
+  items:[ { id:"exit-code", decision:"退出码用 3（不是 2）", rationale:"D-064" },
+          { id:"room-order", decision:"room:order 是纯事件型，不参与状态断言" } ],
+  confirm:true }
+```
+
+- **只有本单发起方（`from.sid`）或承接方（`claim.by`）能写**（第三方 / `asked` / `origin` 一律拒绝、0 写入）；
+  读谁都能读：`collab_status { bid }`、承接方注入的一行计数、`collab_list` 行尾 `decisions=N`。
+- `items` 1–10 条/次；`id` ≤40、`decision` ≤200、`rationale` ≤400 字（控制字符剥成空格）；**同一 `id` 再写 = 覆盖**
+  （不追加：一个决定只留最新答案），每单上限 **20** 条——超出是**可读拒绝**，不静默淘汰。
+- **不投递、不改 `state` / `claim` / `receipt` / `replies`**；`confirm:false` 零写入预览。
+- 承接方注入只有一行 `本单决策 N 条（collab_status { bid:"…" } 查看）`——正文一次只读查询就能拿，不占注入预算。
 
 ## 一点九、加急（`collab_escalate`，0.6.0）
 

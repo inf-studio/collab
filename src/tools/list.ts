@@ -14,6 +14,7 @@ import { fmtTtl, locksFor } from '../core/locks.ts';
 import { mineFor } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
+import { decisionHistoryOf } from '../core/verdict.ts';
 import type { CollabContext, ToolDefinition } from '../types.ts';
 import { clamp, fmtTime, sessionState, shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
@@ -220,6 +221,10 @@ export function listTool(kit: ToolKit): ToolDefinition {
               : '';
           // R3 (0.1.6): delivery visibility — `admitted / seen / queue-age`.
           const delivery = deliveryVisible(record, now) ? `  ${deliveryLine(record, now)}` : '';
+          // 0.7.0 (`11-19-collab-decisions`): how many contract decisions the
+          // record carries — only when there is at least one, so every
+          // pre-0.7.0 line stays byte for byte the same.
+          const decisionCount = decisionHistoryOf(record).length;
           return (
             `- ${record.bid} ${record.state}${record.priority === 'urgent' ? ' [urgent]' : ''}` +
             `${record.archivedAt ? ' [archived]' : ''}` +
@@ -234,7 +239,7 @@ export function listTool(kit: ToolKit): ToolDefinition {
               record.origin?.sid && String(record.origin.sid) !== String(record.from?.sid ?? '')
                 ? ` via ${record.origin.sid}`
                 : ''
-            }`
+            }${decisionCount ? ` decisions=${decisionCount}` : ''}`
           );
         });
 

@@ -30,7 +30,14 @@ import { createLineage } from '../core/lineage.ts';
 import { fmtTtl } from '../core/locks.ts';
 import { listFor, mineFor } from '../core/owner-queue.ts';
 import { threadEntry } from '../core/thread-index.ts';
-import { BLOCKED_AGGREGATE_ITEMS, blockedHistoryOf, blockedLines } from '../core/verdict.ts';
+import {
+  BLOCKED_AGGREGATE_ITEMS,
+  DECISION_RATIONALE_SHOW,
+  DECISION_SHOW,
+  blockedHistoryOf,
+  blockedLines,
+  decisionHistoryOf
+} from '../core/verdict.ts';
 import type { BroadcastRecord, CollabContext, OwnerQueueItem, ThreadRecord, ToolDefinition } from '../types.ts';
 import { asObject, fmtTime, shortID, truncate } from '../util.ts';
 import { isValidThreadID, normalizeThreadID } from '../ids.ts';
@@ -201,6 +208,22 @@ function formatBlock({ record, items, addressee, canPush }: Pick, now: number): 
 
   lines.push(`  投递: ${deliveryText(record, now)}`);
 
+  // 0.7.0 (`11-19-collab-decisions`, R3): the contract decisions of this
+  // hand-off — the count plus the newest `DECISION_SHOW` (`id: decision`, the
+  // rationale cut to `DECISION_RATIONALE_SHOW`). A record without `decisions`
+  // prints nothing at all, so every pre-0.7.0 output is unchanged.
+  const decisions = decisionHistoryOf(record);
+  if (decisions.length) {
+    const shown = decisions.slice(-DECISION_SHOW);
+    lines.push(
+      `  决策 ${decisions.length} 条${decisions.length > shown.length ? `（最近 ${shown.length} 条）` : ''}:`
+    );
+    for (const entry of shown) {
+      const why = entry.rationale ? `（${truncate(entry.rationale, DECISION_RATIONALE_SHOW)}）` : '';
+      lines.push(`    - ${entry.id}: ${entry.decision}${why}`);
+    }
+  }
+
   // 0.7.0 (`11-19-collab-blocked`, R3): the claimant's structured BLOCKED — the
   // three lines design §3 names (需要对方 / 已排除 / 最小判别), newest report only
   // (each section ≤3 items + 「还有 N 条」) plus how many the record keeps. A record
@@ -346,7 +369,8 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       'Read-only, non-blocking status of a hand-off: state, claim (holder + what is left of the lease), priority, ' +
       'delivery (admitted / seen / ack-unavailable), the owner-queue items of its target with the queue position, ' +
       'the last reply summary, the receipt of a closed hand-off, the structured BLOCKED a claimant reported ' +
-      '(需要对方 / 已排除 / 最小判别, newest only) and one suggested next step. Input is exactly one ' +
+      '(需要对方 / 已排除 / 最小判别, newest only), the contract decisions recorded on the hand-off ' +
+      '(决策 N 条 + the newest 3, written with collab_decisions) and one suggested next step. Input is exactly one ' +
       'of `bid` / `threadID` / `session`; with none it lists the unresolved hand-offs this session started or ' +
       'claimed (at most 5, newest first). A thread created by collab_send / collab_reply (no hand-off record) is ' +
       'described as kind=messages — its counterpart, state and last in/out summaries — instead of being an error ' +
