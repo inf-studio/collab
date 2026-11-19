@@ -37,9 +37,14 @@ interface LockWaiter { sid: string; at: number; mode: LockMode; reason?: string 
 ## 5. 内容幂等（投递层）
 
 - 记录层的 `cid`/ack 幂等只解决「同一次投递重放」，**不解决同文重复发送**。
-- `collab_reply` / `collab_send`：同 `threadID` + 归一化正文（`\s+`→空格、trim）在 `dedupeWindowMs`
-  （默认 60s，`0` 关闭）内 → 不投递、不追加 `replies`，回执写明。
-- 不要按 `(target, text)` 全局去重（补材料/催办是合法重复），窗口要短、维度要含 thread。
+- `collab_reply` / `collab_send` 两级去重（`dedupeWindowMs` 默认 60s，`0` 关闭）：
+  - **thread 级**：同 `threadID` + 归一化正文 → 不投递、不追加 `replies`；
+  - **target 级**（0.7.0）：同 `target` + 同一正文、哪怕换了 thread → 也不投递，回执指路
+    「已在 thread `t_…` 发过同文」，`force:true` 可强制（回执标 `dedupeOverridden`）。
+  这两级解决的是「为防丢失把同一条摘要发到多个 thread」——按 thread 去重对此完全无效。
+- **查询在前、拒绝优先（refusal wins）**：查重先执行，但护栏拒绝仍然赢——命中且可投才抑制；
+  命中但本该拒绝（protected 目标 / 非法 kind）时返回原护栏错误、**0 次 prompt、不写索引**。
+- 进程内索引（60s 窗口），不落盘、不跨重启；`handoff` 共用同一 dispatch，但正常路径不会命中。
 
 ## 6. 相关测试
 

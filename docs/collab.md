@@ -262,8 +262,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
 | `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9；带 `origin` 的转发单行尾再加 ` via ses_…`，见 §11.16）；本会话持有 / 排队中的资源租约（§11.10）；本会话**提交给受保护会话的队列项**（条数 + ≤3 行明细 + `queueId`，见 §11.12）。`directory` 只看一个工作区（省略 = 旧行为） |
-| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16） |
-| `collab_reply` | `{ threadID, text, bid?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定） |
+| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, force?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16）。`force?`（0.7.0）：窗口内已有同文仍要投递时用，跳过两级判定、回执标注 `dedupeOverridden`（§11.9.4） |
+| `collab_reply` | `{ threadID, text, bid?, force?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定）；`force?` 同 `collab_send`（§11.9.4） |
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
@@ -332,9 +332,10 @@ opencode plugin add @inf-studio/collab@0.1.0
 60 分钟。`waiterHeartbeat`（默认 `true`）控制「会话自己的 `context` 钩子每轮刷新一次心跳」这一半；
 `false` 只关这一半，`collab_lock` 重复调用与其它写工具的轻量 touch 仍在（见 §11.10.6）。
 
-`dedupeWindowMs`（默认 **60000**，`0` 关闭）是**正文去重**窗口：同一 thread + 归一化后（空白折叠）完全一致的
-正文在窗口内重复提交时，`collab_send` / `collab_reply` 只投递第一次，第二次**不投递、不追加 thread 消息**，
-回执写明「60s 内已有同文，未重复投递」（§11.9.4）。
+`dedupeWindowMs`（默认 **60000**，`0` 关闭）是**正文去重**窗口：同一 **target**（或同一 thread）+ 归一化后
+（空白折叠）完全一致的正文在窗口内重复提交时，`collab_send` / `collab_reply` 只投递第一次，后续**不投递、
+不追加 thread 消息**，回执写明「60s 内已有同文，未重复投递」并给出它在哪个 thread 发过（§11.9.4）。
+确需再发一条同样的正文 → 传 `force:true`（回执标注 `dedupeOverridden`）。
 
 `awareness`（默认 **`"line"`**，`"off"` 关闭）是**自动感知**提示：`context` 注入末尾每会话每 10 分钟最多
 一行「本工作区候选 N · 其它工作区候选 M」，只读、不写记录、不投递（§11.15）。
@@ -650,21 +651,31 @@ delivery.cid 存在 && !seenAt && resends < 1
   （条件：`record.from.sid === 自己` 且存在未提示的 followUps）；不是「放开注入」，而是单独的
   一个函数产出、单独的返回分支，其它任何提醒都不进受保护线。
 
-#### 11.9.4 正文去重（0.6.0）
+#### 11.9.4 正文去重（0.6.0；0.7.0 增 target 维度）
 
 记录层一直只对 `cid` / ack 幂等：同一 thread 在 15 秒内用同文调两次 `collab_send`，两次都会真的投递
-（实测）。0.6.0 起加一层**内容幂等**，只作用于 `collab_send` / `collab_reply`：
+（实测）。0.6.0 起加一层**内容幂等**，只作用于 `collab_send` / `collab_reply`；0.7.0 把去重单位从
+thread 扩到 **target（会话）**：
 
 | 项 | 规则 |
 | --- | --- |
-| 键 | `threadID + 归一化正文`（`\s+` → 单个空格、`trim`）——空白/换行不同视为同一句 |
-| 窗口 | `dedupeWindowMs`，默认 **60000（60s）**；`0` 关闭（回滚开关） |
-| 判据来源 | ① 交接记录的最近 3 条 `replies`（限界回执落在这里）；② thread 自己的消息列表（持久，插件重载后仍有效，只看尾部 20 条）；③ 进程内 memo（没有 thread 消息时兜底，重载即清空） |
-| 命中 | **不投递、不追加 thread 消息**，返回写明「未重复投递 … 60s 内已有同文（去重窗口）」并给出读回方式 |
-| 不适用 | 预览（`confirm:false`）本来就零写入；`collab_escalate` 用自己 5min 窗口，不叠加 |
+| 键 | ① thread 级：`threadID + 归一化正文`；② **target 级（0.7.0）**：`target sid + 归一化正文`（`\s+` → 单个空格、`trim`）——空白/换行不同视为同一句 |
+| 窗口 | `dedupeWindowMs`，默认 **60000（60s）**；`0` 关闭（回滚开关，两级一起关） |
+| 判据来源 | ① 交接记录的最近 3 条 `replies`（限界回执落在这里）；② thread 自己的消息列表（持久，插件重载后仍有效，只看尾部 20 条）；③ 进程内 thread memo（没有 thread 消息时兜底，重载即清空）；④ **进程内 target memo**（`{at, threadID, bid?}`，重载即清空） |
+| 命中 | **不投递、不追加 thread 消息、不改记录**；thread 级命中的首行与结构与 0.6.0 一致（仅在末尾多一句 `force:true` 提示），target 级命中写明「已在 thread `t_…` 发过同文，未重复投递」并给出强制写法 |
+| 强制 | `force:true`（0.7.0）：**两级判定都跳过**，照常投递，回执标注 `dedupeOverridden`；带 `bid` 时在记录上写 `dedupeOverriddenAt`（**只读标记**，`state`/`claim`/`receipt` 一律不动） |
+| 不适用 | 预览（`confirm:false`）本来就零写入，因此**既不查也不消耗**窗口；`collab_escalate` 用自己 5min 窗口，不叠加 |
 
-去重只发生在**同一 thread**：不带 `threadID` 的 `collab_send` 每次都是新 thread，因此不会被当成重复
-（想「再说一遍」就换 thread 或改措辞）。跨机器不去重（进程内 memo 与本地 thread 存储各管各的）。
+target 维度的来历是实测：同一条 BLOCKED 摘要发到同一会话的 3 个 thread（`t_mwmzdzhu_bluz` /
+`t_mwmzyytb_b8g1` / `t_mwn15sjw_pr7a`）全部放行，对方三个 thread 各回一次「等你结论」，**没有一次落在它
+当时使用的 thread** —— thread 是消息的容器，会话才是收件人。
+
+顺序与护栏：去重查询发生在**投递之前**（命中就不投、不产生任何队列项），但**拒绝仍然优先**——目标本身或
+祖先在 `protect` 里、且不属于 §11.4 的限界回执时，照旧报护栏错误，不会因为「同一句以前发过」而把错改成
+一条投递历史提示（`fail-closed` 不因本功能放宽）。
+
+去重只发生在**同一 target 或同一 thread**：换个 target（另一个会话）或改一处措辞都可以照常发；跨机器不去重
+（进程内 memo 与本地 thread 存储各管各的）。想「再说一遍」不必换 thread：`force:true` 即可（会被标注）。
 
 ### 11.10 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`，0.2.0）
 

@@ -10,7 +10,7 @@ import {
 } from '../constants.ts';
 import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
-import { allBroadcasts, mergeDelivery, readBroadcast } from '../core/claim.ts';
+import { allBroadcasts, mergeDelivery, readBroadcast, writeBroadcast } from '../core/claim.ts';
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
@@ -202,12 +202,15 @@ export interface ToolKit {
   capabilityNote(agent: unknown, expected: unknown): string | undefined;
   resolveMode(requested: unknown, agent: unknown): DeliveryMode;
   /**
-   * R5 (0.6.0): the same thread + the same normalised body inside
-   * `dedupeWindowMs` is one message, not two. Returns the moment of the
-   * duplicate (and where it was found) or `undefined`. Read-only.
+   * R5 (0.6.0) + R1 (0.7.0, `11-19-collab-dedupe-target`): the same normalised
+   * body inside `dedupeWindowMs` is one message, not two — on the same thread
+   * **or** towards the same target session through another thread. Returns the
+   * moment of the duplicate (and where it was found) or `undefined`. Read-only.
    */
   findDuplicateSend(input: {
     threadID: string;
+    /** Target session id — enables the target-level half (0.7.0, R1). */
+    target?: string;
     text: string;
     record?: BroadcastRecord;
     now?: number;
@@ -223,6 +226,12 @@ export interface ToolKit {
     target: Target;
     /** R2: a bounded reply (`canReplyToProtected`) — the only guard bypass. */
     allowProtectedReply?: boolean;
+    /**
+     * 0.7.0 (R1, `11-19-collab-dedupe-target`): the caller knows it is repeating
+     * itself — skip **both** de-dup levels, deliver anyway, and mark the result
+     * (`dedupeOverridden`) + the record (`dedupeOverriddenAt`).
+     */
+    force?: boolean;
   }): Promise<ToolResult & { delivery?: DeliveryOutcome }>;
   waitForReply(threadID: string, timeoutMs: number, context: ToolContext | undefined): Promise<ToolResult>;
   /**
@@ -240,14 +249,20 @@ export interface ToolKit {
 }
 
 /**
- * R5 (0.6.0): where a duplicate was found and when it was admitted.
+ * R5 (0.6.0) / R1 (0.7.0): where a duplicate was found and when it was admitted.
  * `thread` = the thread's own message list (persistent, survives a reload);
  * `record` = the hand-off record's recent `replies`; `memo` = the in-process
- * fallback for a send that never made it into a thread message.
+ * fallback for a send that never made it into a thread message; `target` = the
+ * same body already reached this **session** through another thread (the hit
+ * carries that thread's id, which is what makes the receipt actionable).
  */
 export interface DuplicateSend {
   at: number;
-  source: 'thread' | 'record' | 'memo';
+  source: 'thread' | 'record' | 'memo' | 'target';
+  /** `source:"target"` only: the thread that carried the earlier copy. */
+  threadID?: string;
+  /** `source:"target"` only: the hand-off that copy carried, when known. */
+  bid?: string;
 }
 
 /**
@@ -289,6 +304,46 @@ function rememberSend(threadID: string, text: string, at: number): void {
     const oldest = sendMemo.keys().next();
     if (oldest.done) break;
     sendMemo.delete(oldest.value);
+  }
+}
+
+/**
+ * R1 (0.7.0, `11-19-collab-dedupe-target`): the **target** dimension.
+ *
+ * The thread-level index above cannot see the failure it was added for: one
+ * BLOCKED summary sent to three threads of the same target passed every check
+ * three times (each thread is a different key), so the counterpart answered
+ * three times — none of them on the thread it was actually using. A send is a
+ * message to a *session*, so the session is the real de-dup unit:
+ *
+ *   key   = `targetSid + '\n' + normalised body`
+ *   value = where/when it actually went (`at`, `threadID`, `bid?`)
+ *
+ * Process-local on purpose: the delivery itself happens in this process, the
+ * 60s window is meaningless across a reload, and a file would add a disk
+ * dependency to a hot path. Bounded by the same cap as the thread memo.
+ */
+const targetSendMemo = new Map<string, { at: number; threadID: string; bid?: string }>();
+
+function targetSendKey(targetSid: string, text: string): string {
+  return `${targetSid}\n${normalizeSendBody(text)}`;
+}
+
+function rememberTargetSend(
+  targetSid: string,
+  threadID: string,
+  text: string,
+  at: number,
+  bid?: string
+): void {
+  const key = targetSendKey(targetSid, text);
+  // Re-insert so the eviction order stays "oldest *written* first".
+  targetSendMemo.delete(key);
+  targetSendMemo.set(key, { at, threadID, ...(bid ? { bid } : {}) });
+  while (targetSendMemo.size > DEDUPE_MEMO_LIMIT) {
+    const oldest = targetSendMemo.keys().next();
+    if (oldest.done) break;
+    targetSendMemo.delete(oldest.value);
   }
 }
 
@@ -373,7 +428,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
   }
 
   /**
-   * R5 (0.6.0): content-level idempotency for `collab_send` / `collab_reply`.
+   * R5 (0.6.0) / R1 (0.7.0): content-level idempotency for `collab_send` / `collab_reply`.
    *
    * The record layer only ever deduped `cid` / ack traffic, so the **same text**
    * sent twice into the same thread 15 s apart was delivered twice (observed).
@@ -385,16 +440,23 @@ export function createToolKit(deps: ToolDeps): ToolKit {
    *     reload; `dispatch` appends every admitted body there);
    *   ③ a process-local memo, for a send that never became a thread message.
    *
+   * ④ (0.7.0, R1) the **target** memo: the same normalised body already went to
+   *   this session on *another* thread. Checked last, so a same-thread repeat
+   *   keeps the 0.6.0 receipt word for word; a target hit reports the thread
+   *   that actually carried the earlier copy.
+   *
    * Nothing is ever delivered *or* appended when this hits: the caller gets the
    * readback ("未重复投递") instead of a silent second copy.
    */
   async function findDuplicateSend({
     threadID,
+    target,
     text,
     record,
     now = Date.now()
   }: {
     threadID: string;
+    target?: string;
     text: string;
     record?: BroadcastRecord;
     now?: number;
@@ -403,7 +465,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     if (!windowMs) return undefined; // `dedupeWindowMs:0` = off (rollback switch)
     const thread = String(threadID ?? '');
     const norm = normalizeSendBody(text);
-    if (!thread || !norm) return undefined;
+    if (!norm) return undefined;
     const fresh = (at: number): boolean => Number.isFinite(at) && at > 0 && now - at <= windowMs && now >= at;
 
     for (const reply of (record?.replies ?? []).slice(-DEDUPE_REPLY_LOOKBACK)) {
@@ -411,16 +473,33 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       if (fresh(at) && normalizeSendBody(reply?.text) === norm) return { at, source: 'record' };
     }
 
-    const stored = await threads.read(thread);
-    // The tail only: an old message in a long-lived thread is history, not a repeat.
-    for (const message of [...(stored?.msgs ?? [])].reverse().slice(0, 20)) {
-      const at = Number(message?.ts) || 0;
-      if (!fresh(at)) continue;
-      if (normalizeSendBody(message?.text) === norm) return { at, source: 'thread' };
+    if (thread) {
+      const stored = await threads.read(thread);
+      // The tail only: an old message in a long-lived thread is history, not a repeat.
+      for (const message of [...(stored?.msgs ?? [])].reverse().slice(0, 20)) {
+        const at = Number(message?.ts) || 0;
+        if (!fresh(at)) continue;
+        if (normalizeSendBody(message?.text) === norm) return { at, source: 'thread' };
+      }
+
+      const memoAt = sendMemo.get(sendKey(thread, text));
+      if (memoAt && fresh(memoAt)) return { at: memoAt, source: 'memo' };
     }
 
-    const memoAt = sendMemo.get(sendKey(thread, text));
-    if (memoAt && fresh(memoAt)) return { at: memoAt, source: 'memo' };
+    // ④ target dimension: the same words already reached this session — whichever
+    // thread carried them, they are not a new message.
+    const to = String(target ?? '').trim();
+    if (to) {
+      const hit = targetSendMemo.get(targetSendKey(to, text));
+      if (hit && fresh(hit.at)) {
+        return {
+          at: hit.at,
+          source: 'target',
+          threadID: hit.threadID,
+          ...(hit.bid ? { bid: hit.bid } : {})
+        };
+      }
+    }
     return undefined;
   }
 
@@ -434,7 +513,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     forced,
     notes,
     target,
-    allowProtectedReply = false
+    allowProtectedReply = false,
+    force = false
   }: {
     context: ToolContext | undefined;
     input: JsonObject | undefined;
@@ -445,12 +525,46 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     notes: string[];
     target: Target;
     allowProtectedReply?: boolean;
+    force?: boolean;
   }): Promise<ToolResult & { delivery?: DeliveryOutcome }> {
     const config = readConfig();
     const body = String(input?.text ?? '').trim();
     if (!body) throw invalid('text 不能为空');
 
     const { sessionID, alias, info } = target;
+    const from = senderLabel(context?.sessionID);
+    const cid = newCorrelationID();
+    const text = envelope({ from, kind, threadID, body });
+    const targetLine =
+      `${sessionID}${alias ? ` (alias=${alias})` : ''}  agent=${info?.agent ?? '?'}  ` +
+      `state=${sessionState(info)}  title="${truncate(info?.title ?? '(untitled)', 60)}"`;
+    const confirmed = input?.confirm === true;
+    const dedupeWindowMs = Math.max(0, Number(config.dedupeWindowMs) || 0);
+    const bid = String(input?.bid ?? '').trim();
+    // R3 (0.7.0): `force:true` means "I know it is a repeat, send it" — both de-dup
+    // levels are skipped and the overridden write is *marked*, never silent.
+    const dedupeForced = confirmed && force && dedupeWindowMs > 0;
+
+    // R5 (0.6.0) + R1 (0.7.0, `11-19-collab-dedupe-target`): content idempotency,
+    // for a confirmed call only — a preview writes nothing (including the index),
+    // so it must not report or consume somebody else's window.
+    //
+    // Looked up **before** the protect guard so a body that already reached this
+    // target is answered with the read-back instead of being judged as a brand-new
+    // push (nothing is delivered either way, so no boundary moves). The refusal
+    // below still wins: a target that may not be written to never learns
+    // "already sent" — that would replace a fail-closed error with a delivery
+    // history hint, i.e. a widening by accident.
+    let duplicate: DuplicateSend | undefined;
+    if (confirmed && dedupeWindowMs > 0 && !force) {
+      duplicate = await findDuplicateSend({
+        threadID: threadID ?? '',
+        target: sessionID,
+        text: body,
+        ...(bid ? { record: readBroadcast(bid) } : {})
+      });
+    }
+
     // Lineage guard: the target itself *or* any ancestor in the protect list.
     // Fail-closed, replies included — see the note in `docs/collab.md` §11.4.
     // R2: the single exception is a *bounded* reply — this bid's own requester,
@@ -511,12 +625,38 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       throw invalid('拒绝投递：target 就是当前会话本身（会导致自我排队）。未发送任何内容。');
     }
 
-    const from = senderLabel(context?.sessionID);
-    const cid = newCorrelationID();
-    const text = envelope({ from, kind, threadID, body });
-    const targetLine =
-      `${sessionID}${alias ? ` (alias=${alias})` : ''}  agent=${info?.agent ?? '?'}  ` +
-      `state=${sessionState(info)}  title="${truncate(info?.title ?? '(untitled)', 60)}"`;
+    // The read-only hit from above, now that no refusal applies: not delivered,
+    // not appended — the caller gets the read-back (and the way to force it).
+    if (duplicate) {
+      if (duplicate.source === 'target') {
+        const earlierThread = String(duplicate.threadID ?? '');
+        return {
+          content: [
+            `未重复投递: 目标 ${sessionID} 在 ${dedupeWindowLabel(dedupeWindowMs)} 内已有同文（target 维度去重），` +
+              `已在 thread ${earlierThread || '(未知)'} 发过同文；本次未投递、也未追加回复。`,
+            `目标: ${targetLine}`,
+            `kind=${kind}  本次 thread=${threadID ?? '-'}  命中来源=target  上次=${earlierThread || '(未知)'} @ ${fmtTime(duplicate.at)}`,
+            '只有正文归一化后完全一致才算重复（空白差异会被折叠）。确实要再发一次：force:true（强制投递，' +
+              '回执标注 dedupeOverridden）/ 改一处措辞 / 把 collab.json 的 dedupeWindowMs 设为 0 关闭去重。',
+            earlierThread
+              ? `读回已有消息: collab_wait { threadID:"${earlierThread}" } 或 collab_inbox`
+              : '读回已有消息: collab_inbox'
+          ].join('\n')
+        };
+      }
+      return {
+        content: [
+          `未重复投递: thread ${threadID} 在 ${dedupeWindowLabel(dedupeWindowMs)} 内已有同文（去重窗口），` +
+            `本次未投递、也未追加回复。`,
+          `目标: ${targetLine}`,
+          `kind=${kind}  命中来源=${duplicate.source}  上次=${fmtTime(duplicate.at)}`,
+          '只有正文归一化后完全一致才算重复（空白差异会被折叠）。确实要再发一次：force:true（强制投递，' +
+            '回执标注 dedupeOverridden）/ 改一处措辞 / 换 threadID / 把 collab.json 的 dedupeWindowMs 设为 0。',
+          `读回已有消息: collab_wait { threadID:"${threadID}" } 或 collab_inbox`
+        ].join('\n')
+      };
+    }
+
     const modeLine = forced || (guard && allowProtectedReply) ? 'queue(forced)' : mode;
     const delivery = guard && allowProtectedReply ? 'queue' : mode;
     const tailNotes = [...(notes ?? [])];
@@ -527,7 +667,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       );
     }
 
-    if (input?.confirm !== true) {
+    if (!confirmed) {
       return {
         content: [
           '未投递（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。',
@@ -539,33 +679,6 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           text
         ].join('\n')
       };
-    }
-
-    // R5 (0.6.0): the same thread + the same normalised body inside the dedupe
-    // window is one message. Checked *after* the preview branch (a preview writes
-    // nothing, including the memo) and *before* the delivery: no prompt, no
-    // thread append, no record write.
-    const dedupeWindowMs = Math.max(0, Number(config.dedupeWindowMs) || 0);
-    if (dedupeWindowMs > 0) {
-      const bid = String(input?.bid ?? '').trim();
-      const duplicate = await findDuplicateSend({
-        threadID: threadID ?? '',
-        text: body,
-        ...(bid ? { record: readBroadcast(bid) } : {})
-      });
-      if (duplicate) {
-        return {
-          content: [
-            `未重复投递: thread ${threadID} 在 ${dedupeWindowLabel(dedupeWindowMs)} 内已有同文（去重窗口），` +
-              `本次未投递、也未追加回复。`,
-            `目标: ${targetLine}`,
-            `kind=${kind}  命中来源=${duplicate.source}  上次=${fmtTime(duplicate.at)}`,
-            '只有正文归一化后完全一致才算重复（空白差异会被折叠）。确实要再发一次：改一处措辞 / 换 threadID，' +
-              '或把 collab.json 的 dedupeWindowMs 设为 0 关闭去重。',
-            `读回已有消息: collab_wait { threadID:"${threadID}" } 或 collab_inbox`
-          ].join('\n')
-        };
-      }
     }
 
     // R2 (0.6.0): any writing collab call refreshes this session's waiter
@@ -607,6 +720,23 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     // R5 (0.6.0): remember this body for the in-process half of the check. A
     // thread message is the persistent half and needs no memo.
     if (threadID) rememberSend(threadID, body, admittedAt);
+    // R1 (0.7.0, `11-19-collab-dedupe-target`): the target half — whichever
+    // thread carried it, this body just reached this session.
+    rememberTargetSend(sessionID, threadID ?? '', body, admittedAt, bid || undefined);
+
+    if (dedupeForced) {
+      // R3: a forced repeat is delivered *and* marked — never a silent override.
+      // The record annotation is display-only: `state` / `claim` / `receipt` stay
+      // exactly as they are (read-merge-write, no field dropped).
+      tailNotes.push(
+        'dedupeOverridden: 本次按 force:true 发送（thread 与 target 两级去重判定都跳过；窗口内若确有同文，已按你的要求重复投递）。'
+      );
+      const record = bid ? readBroadcast(bid) : undefined;
+      if (record) {
+        writeBroadcast({ ...record, dedupeOverriddenAt: admittedAt });
+        tailNotes.push(`record ${bid} 已标注 dedupeOverriddenAt（只读标记，不改 state/claim/receipt）。`);
+      }
+    }
 
     return {
       content: [

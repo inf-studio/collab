@@ -102,7 +102,8 @@ TUI 走宿主给它的 `ctx.client`。
 `free` + `waiters=…` **不是被占用**：那只表示「没人持有、只是有人在排队」。排队者的 `at` 是**心跳**
 （默认 10 分钟，`waiterTtlMs`）：心跳过期者在下一次 `collab_lock` 被回收，`collab_locks` 只显示
 `sid#pos:mode(age)` 与 `[stale]`（读命令从不写文件）。`collab_send` / `collab_reply` 另外有正文去重：
-同 thread + 归一化后同文在 `dedupeWindowMs`（默认 60s，`0` 关闭）内只投递一次。
+同一 **target**（或同一 thread）+ 归一化后同文在 `dedupeWindowMs`（默认 60s，`0` 关闭）内只投递一次——
+同一条结论发到同一会话的 3 个 thread 也算重复（回执写「已在 thread … 发过同文」）；确需再发传 `force:true`。
 
 - **只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
   两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。0.5.1 的命令与计数条、
@@ -238,7 +239,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `archiveGraceMs` | `600000`           | 终态后的防抖窗口（1 分钟–1 小时），夹取                                                           |
 | `waiterTtlMs`    | `600000`           | 排队**心跳**存活窗口（1 分钟–1 小时）：超过未心跳的排队者在下一次 `collab_lock` 被回收；`collab_locks` 只标 `[stale]` 不写文件 |
 | `waiterHeartbeat`| `true`             | `false` 只关「会话 `context` 每轮刷新排队心跳」这一半；`collab_lock` / 写工具的 touch 仍在 |
-| `dedupeWindowMs` | `60000`            | 正文去重窗口：同 thread + 归一化后同文在窗口内只投递一次；**`0` 关闭**（回滚开关） |
+| `dedupeWindowMs` | `60000`            | 正文去重窗口：同一 **target**（或同一 thread）+ 归一化后同文在窗口内只投递一次（`force:true` 强制并标 `dedupeOverridden`）；**`0` 关闭**（回滚开关） |
 | `awareness`      | `"line"`           | **自动感知**提示：`context` 里每 10 分钟最多一行「本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）」；`"off"` = 0 行。只读、不写记录、不投递 |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
@@ -274,7 +275,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 pnpm --filter=@inf-studio/collab build       # vp pack → dist/，再 GUI / TUI 两个 vite 构建
 pnpm install
 pnpm typecheck
-pnpm test          # build + 735 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
+pnpm test          # build + 805 项 harness + 12 项只读默认 + 20 项看板派生 + 50 项快照/产物 + 49 项 TUI 渲染 + 47 项 GUI 入口 + 17 项 GUI 面板渲染
 ```
 
 - `test/handoff-harness.mjs`：确定性回归（假宿主、真文件系统上的临时目录），
@@ -304,6 +305,9 @@ pnpm test          # build + 735 项 harness + 12 项只读默认 + 20 项看板
   归档一次并写 `archivedAt`；六类拒绝（非 spawn / 非终态 / 防抖未满 / busy / protected / 有引用）加未读队列、
   抛错、幂等各一条；`restore:true` 还原并清 `archivedAt`；宿主无 `session.update` 时走 HTTP `PATCH`；
   `archiveSpawned:false` 只关自动路径；`collab_list` 的 `[archived]`。
+  0.7.0 追加 S101：跨 thread 正文去重（同一 target 的 3 个 thread 同文只投 1 次、回执写明「已在 thread … 发过」）、
+  `force:true` 三投三中且标 `dedupeOverridden`（带 `bid` 时记录标 `dedupeOverriddenAt` 且状态字段不变）、
+  窗口边界（59s 拦 / 61s 放行，`Date.now` 前跳）、不同 target / 预览 / `dedupeWindowMs:0` 各一条。
 - `test/readonly-default.mjs`：R8 只读默认（默认拒绝 grant/promote、消息仍可用、
   `allowWrite:true` 正向对照、内置护栏不可被配置移除）。
 - `test/snapshot-shape.mjs`：侧栏只读快照（注入 reader，不碰真实 `~/.config`）——

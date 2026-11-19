@@ -55,6 +55,10 @@
     发给 A 的消息到了，`state` 仍停在 `acked`）。**两处刻意拆开**：`acceptOrigin` 只参与 **kind 改写**，
     `allowProtectedReply` 仍只看 `from.sid` → `origin` 指向 `[protected*]` 时照旧拒投；第三方目标仍是
     普通 `request`，不闭环（S100 用真实投递回放同时断言正反两面）。
+- **跨 thread 正文去重（target 维度）+ `force:true`（R1–R5，`11-19-collab-dedupe-target`）**：
+  `collab_send` / `collab_reply` 的 60s 同文幂等不再只看 thread——同一 **target 会话**收到同一句（换 thread
+  也算）只投一次，回执写明「已在 thread `t_…` 发过同文」；确需重发用新增的 `force:true`（回执标
+  `dedupeOverridden`，带 `bid` 时记录标 `dedupeOverriddenAt`）。详见下方 Fixed。
 
 ### Changed
 
@@ -90,6 +94,19 @@
 - **文档成本口径（复核 P3a）**：文档原写「会话列表页每 10 分钟最多一份」，实际是每窗口 **2 页**
   （本工作区页 + 全局页）；`docs/collab.md` / `skills/collab/SKILL.md` 已改成与实现一致的表述，并补
   「`AWARENESS_LIST_LIMIT=200` 下 M 是下界」。
+- **跨 thread 去重（R1–R5，`11-19-collab-dedupe-target`）**：0.6.0 的 60s 同文幂等只按 **thread**
+  算，实测一条 BLOCKED 摘要发到同一会话的 3 个 thread（`t_mwmzdzhu_bluz` / `t_mwmzyytb_b8g1` /
+  `t_mwn15sjw_pr7a`）全部放行，对方三个 thread 各回一次「等你结论」，**没有一次落在它当时使用的 thread**。
+  现在多一层**进程内 target 索引**（`targetSid + '\n' + 归一化正文` → `{at, threadID, bid?}`，
+  上限同 `DEDUPE_MEMO_LIMIT`）：命中即**不投递、不追加 thread 消息、不改记录**，回执写明
+  「已在 thread `t_…` 发过同文，未重复投递」。
+  - **`force?: boolean`**（`collab_send` / `collab_reply` 入参）：两级判定都跳过、照常投递，回执标注
+    `dedupeOverridden`；带 `bid` 时在记录写 `dedupeOverriddenAt`（只读标记，`state`/`claim`/`receipt` 一律不动）。
+  - **保留的行为**：同 thread 同文仍是 0.6.0 的文案与语义（除非 `force`）；不同 target / 不同正文照常；
+    `dedupeWindowMs:0` 两级一起关；预览（`confirm:false`）零写入、也不查不消耗窗口。
+  - **顺序**：去重查询在投递之前（命中即不投、不产生队列项），但 `protect` 拒绝仍**优先**——受保护目标
+    不会因为「同一句以前发过」把 fail-closed 错误换成一条投递历史提示（S81 的全部拒投断言不变）。
+  - 为什么用进程内 Map：投递本身就在服务端进程内完成，60s 窗口跨重启无意义，也不新增磁盘依赖。
 
 ### Tests
 
@@ -129,6 +146,14 @@
   「C 发给 A 即闭环」两条失败（788→786）；④ 把目标判定放宽成「任意 target」→ 第三方断言失败
   （`state=blocked` 被第三方提前闭环）、C 的正向闭环也失败，且既有 S69/S81 的受保护拒投同时变红（788→781），
   说明「改写」必须与「受保护放行」严格拆开。
+- **跨 thread 去重（S101，`test/handoff-harness.mjs`，17 条）**：同一 target 的 3 个 thread 同文（<60s）只投 1 次、
+  两条回执都写「已在 thread `t_s101_a` 发过同文」且未生成 thread 记录；`force:true` 三投三中且每条含
+  `dedupeOverridden`；命中时 `state/claim/receipt/updatedAt` 与 prompt / thread 全部不变；`force` + `bid` 写入
+  `dedupeOverriddenAt` 且三个状态字段不变；窗口边界用 `Date.now` 前跳验证（59s 仍拦、61s 放行，不真等）；
+  不同 target 同文都投；预览不查不消耗窗口；同 thread 仍是 0.6.0 文案；`collab_reply` 跨 thread 同文被拦、
+  `force` 放行；`dedupeWindowMs:0` 两投；两个工具描述都写明 target 维度与 `force:true`。交接链 **788 → 805 项**。
+- 两组变异验证（原始输出见 `research/impl-notes.md`）：① target 索引改用当前 `threadID` 作键 → 跨 thread
+  用例 8 条全红（805→797）；② 去掉 `!force` 分支 → force 三条断言失败（805→802）。
 
 ### Docs
 
@@ -140,6 +165,9 @@
 - **对接人 `origin`**：`docs/collab.md` 新增 §11.16（字段与入参 / 一层继承 / 三处渲染 / **三行人工模板**
   「提案 / bid / 对接人 sid+location」/ 验收与回滚）+ §11.2 五个工具行的 `origin?`；`README.md` 工具表 +
   `context` hook 段落；`skills/collab/SKILL.md` 新增「一点十二、对接人 `origin`」。版本号不变。
+- **跨 thread 去重**：`docs/collab.md` §11.9.4 重写（target 维度 / 四个判据来源 / `force:true` /
+  与 `protect` 的先后 / 回滚开关）+ §11.2 `collab_send` / `collab_reply` 的 `force?` + §11.4 配置说明；
+  `README.md` 正文与配置表；`skills/collab/SKILL.md` 工具表 + 去重小节。版本号不变（仍 0.6.0，0.7.0 统一发）。
 
 ## [0.6.0] - 2026-11-19
 

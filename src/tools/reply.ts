@@ -21,8 +21,10 @@ export function replyTool(kit: ToolKit): ToolDefinition {
       "thread's counterpart (resolved from storage, so no target is needed). Only a participant of the thread " +
       "may reply. Always delivered with mode=queue, so it never interrupts the requester's running turn. " +
       'A protected counterpart is only reachable as the bounded receipt of the bid it broadcast and the caller ' +
-      'claimed. Content de-duplication applies too: the same thread + the same body within `dedupeWindowMs` ' +
-      '(default 60s, 0 disables) is one message, so a retyped reply is not delivered twice. ' +
+      'claimed. Content de-duplication applies too: the same body within `dedupeWindowMs` ' +
+      '(default 60s, 0 disables) is one message — on the same thread **or** already sent to the same ' +
+      'counterpart through another thread — so a retyped reply is not delivered twice; `force:true` delivers ' +
+      'anyway (marked `dedupeOverridden`). ' +
       'Requires confirm:true; otherwise it only previews.',
     input: jsonInput({
       properties: {
@@ -37,6 +39,12 @@ export function replyTool(kit: ToolKit): ToolDefinition {
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false/omitted only returns the preview.'
+        },
+        force: {
+          type: 'boolean',
+          description:
+            'Deliver even though the same body already reached the counterpart (another thread) or this thread ' +
+            'within `dedupeWindowMs`. Skips both de-dup levels and marks the result `dedupeOverridden`.'
         }
       },
       required: ['threadID', 'text', 'confirm']
@@ -87,7 +95,18 @@ export function replyTool(kit: ToolKit): ToolDefinition {
           text: input?.text
         })
       );
-      return dispatch({ context, input, kind: 'reply', threadID, mode, forced, notes, target, allowProtectedReply });
+      return dispatch({
+        context,
+        input,
+        kind: 'reply',
+        threadID,
+        mode,
+        forced,
+        notes,
+        target,
+        allowProtectedReply,
+        force: input?.force === true
+      });
     }
   };
 }

@@ -27,8 +27,8 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
-| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0） | 发消息 |
-| `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
+| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`） | 发消息 |
+| `collab_reply` | `threadID, text, force?, confirm` | 回执糖，target 由 thread 解析；`force?` 同上 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, origin?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承） | 发消息 |
 | `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
 | `collab_request_owner` | `target?, text?, issuePath?, id?, revoke?, confirm` | **受保护目标请求队列**：只写队列文件（非保护 → 受保护），0 投递 | 写本地队列（旁路） |
@@ -78,9 +78,11 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 - `seen=-` **不等于**「没送到」：目标 busy 时它只是还没开下一轮；busy 目标**永不重发**。
 - 只会补投 **1 次**（admission 失败，或 2h 无 `seen` 且目标当时 idle），同 `cid` 幂等。
 - `unacked=yes` = 预算用满 + 窗口已过仍无 ack → 人工补投；受保护发起方恒为 `seen=n/a`（`ackUnavailable`）。
-- **正文去重（0.6.0）**：同 thread + 归一化后（空白折叠）完全一致的正文在 `dedupeWindowMs`（默认 60s）内
-  只投递一次；重复时返回「未重复投递…60s 内已有同文」，**不投递、不追加 thread 消息**。真要再发就改措辞 /
-  换 threadID，或把 `dedupeWindowMs` 设为 0 关闭。预览（`confirm:false`）不受影响。
+- **正文去重（0.6.0；0.7.0 增 target 维度）**：同一 **target 会话**（或同一 thread）里，归一化后（空白折叠）
+  完全一致的正文在 `dedupeWindowMs`（默认 60s）内只投递一次——同一条结论发到同一会话的 3 个 thread 也只投 1 次；
+  重复时返回「未重复投递…已在 thread `t_…` 发过同文」，**不投递、不追加 thread 消息、不改记录**。
+  真要再发：传 `force:true`（照常投递并标注 `dedupeOverridden`，带 `bid` 时记录标 `dedupeOverriddenAt`，
+  `state`/`claim`/`receipt` 不变）或把 `dedupeWindowMs` 设为 0 关闭。预览（`confirm:false`）不受影响。
 
 **闭环后追加（pull，不是 push）**：
 

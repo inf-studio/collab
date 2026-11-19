@@ -31,9 +31,10 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       'protected target itself broadcast and the caller claimed — is queued through as the hand-off receipt. ' +
       'A legacy receipt written the ≤0.1.1 way (no `kind`, body `[handoff] DONE|BLOCKED <bid> …`) is ' +
       'recognised by that body and delivered as kind=reply. ' +
-      'Content de-duplication: the same thread + the same body (whitespace folded) within ' +
-      '`dedupeWindowMs` (default 60s, 0 disables) is one message — the repeat is not delivered and the ' +
-      'result says so.',
+      'Content de-duplication: the same body (whitespace folded) within `dedupeWindowMs` ' +
+      '(default 60s, 0 disables) is one message — on the same thread **or** already sent to the same target ' +
+      'session through another thread. The repeat is not delivered and the result says so; pass `force:true` ' +
+      'to deliver anyway (marked `dedupeOverridden`).',
     input: jsonInput({
       properties: {
         target: { type: 'string', description: 'Session id (`ses_…`) or an alias from collab.json.' },
@@ -74,6 +75,13 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually deliver. false/omitted only returns the preview.'
+        },
+        force: {
+          type: 'boolean',
+          description:
+            'Deliver even though the same body already reached this target (another thread) or this thread ' +
+            'within `dedupeWindowMs`. Skips both de-dup levels, marks the result `dedupeOverridden` and (with a ' +
+            '`bid`) stamps `dedupeOverriddenAt` on the record. Use it for a deliberate repeat only.'
         }
       },
       required: ['target', 'text', 'confirm']
@@ -166,6 +174,7 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             forced,
             notes,
             target: resolved,
+            force: input?.force === true,
             // R2: only a bounded receipt (this bid's requester + its claimant,
             // kind=reply) gets through the protect guard.
             allowProtectedReply: Boolean(
@@ -248,7 +257,8 @@ export function sendTool(kit: ToolKit): ToolDefinition {
         forced,
         notes,
         target,
-        allowProtectedReply: Boolean(boundedReply)
+        allowProtectedReply: Boolean(boundedReply),
+        force: input?.force === true
       });
     }
   };

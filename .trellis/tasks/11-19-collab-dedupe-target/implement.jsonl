@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "可读拒绝/幂等回执"}
+{"file": ".trellis/spec/backend/concurrency-locks.md", "reason": "幂等窗口与不误杀原则"}
+{"file": ".trellis/spec/guides/cross-workspace-collab-guide.md", "reason": "回执与去重协议"}

@@ -330,6 +330,13 @@ export interface BroadcastRecord {
   receiptMode?: 'push' | 'pull';
   receipt?: { from?: string; by?: string; at?: number; note?: string; auto?: boolean; source?: 'kind' | 'body' };
   /**
+   * 0.7.0 (R3, `11-19-collab-dedupe-target`): last time this record's message was
+   * re-sent with `force:true` while the de-dup window still held a copy. A
+   * **display-only** annotation — `state` / `claim` / `receipt` are never touched
+   * by a forced repeat, and nothing is decided from this field.
+   */
+  dedupeOverriddenAt?: number;
+  /**
    * R1/R2 (0.1.6): delivery + ack of the takeover message. Absent on records
    * written by ≤0.1.5 — those are treated as "already admitted, no ack
    * capability" and are never resent.

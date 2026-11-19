@@ -10241,6 +10241,304 @@ expect(
 );
 if (s100HandoffBid) rmSync(bcFile(s100HandoffBid), { force: true });
 
+// ================== S101 (0.7.0: 跨 thread 去重 target 维度, `11-19-collab-dedupe-target`)
+// R1–R5: the de-dup unit is the **session**, not the thread. The observed failure
+// was one BLOCKED summary sent to three threads of the same target: every thread
+// is a different key, so all three passed and the counterpart answered three
+// times — none of them on the thread it was actually using. Also covered here:
+// `force:true` (delivered + marked `dedupeOverridden`), the window boundary, a
+// different target, the preview path, `dedupeWindowMs:0`, and the invariant that
+// a hit writes nothing (no prompt, no thread message, no record change).
+const S101_TO = 'ses_bbb'; // the counterpart all three threads talk to
+const S101_OTHER = 'ses_ccc'; // a *different* target with the same words
+const S101_T1 = 't_s101_a';
+const S101_T2 = 't_s101_b';
+const S101_T3 = 't_s101_c';
+const S101_TEXT = 'S101 BLOCKED worker store 需要你确认口径'; // never reused by another check
+const s101Send = (input, sid = 'ses_aaa') => call('collab_send', input, as(sid));
+
+// --- S101a: same target, three threads, same body (<60s) → exactly one delivery.
+const s101aBefore = prompts.length;
+const s101a1 = await s101Send({ target: S101_TO, kind: 'note', threadID: S101_T1, text: S101_TEXT, confirm: true });
+const s101a2 = await s101Send({ target: S101_TO, kind: 'note', threadID: S101_T2, text: S101_TEXT, confirm: true });
+const s101a3 = await s101Send({ target: S101_TO, kind: 'note', threadID: S101_T3, text: S101_TEXT, confirm: true });
+out('S101a three threads, one body', `${s101a1.split('\n')[0]}\n${s101a2.split('\n')[0]}\n${s101a3.split('\n')[0]}`);
+expect(
+  'S101 same target + same body on 3 threads (<60s) is delivered exactly once',
+  prompts.length === s101aBefore + 1 && s101a1.startsWith('已投递'),
+  `${prompts.length - s101aBefore} deliveries / ${s101a1.split('\n')[0]}`
+);
+expect(
+  'S101 … and both repeats say where the earlier copy went (已在 thread … 发过同文)',
+  s101a2.includes('已在 thread t_s101_a 发过同文') && s101a3.includes('已在 thread t_s101_a 发过同文'),
+  `${s101a2.split('\n')[0]} | ${s101a3.split('\n')[0]}`
+);
+expect(
+  'S101 … the repeat receipt offers the override (force:true) and marks it target-level',
+  s101a2.includes('force:true') && s101a3.includes('dedupeOverridden') && s101a3.includes('命中来源=target'),
+  s101a3.split('\n').slice(0, 3).join(' | ')
+);
+expect(
+  'S101 … and the suppressed sends created no thread record (nothing was appended)',
+  !store.get(`collab/threads/${S101_T2}`) && !store.get(`collab/threads/${S101_T3}`),
+  `${store.has(`collab/threads/${S101_T2}`)} / ${store.has(`collab/threads/${S101_T3}`)}`
+);
+
+// --- S101b: `force:true` → all three really go out, each receipt marked.
+const S101_FORCE_TEXT = 'S101 BLOCKED force 也要投（自有正文）';
+const s101bBefore = prompts.length;
+const s101b1 = await s101Send({
+  target: S101_TO,
+  kind: 'note',
+  threadID: 't_s101_f1',
+  text: S101_FORCE_TEXT,
+  confirm: true
+});
+const s101b2 = await s101Send({
+  target: S101_TO,
+  kind: 'note',
+  threadID: 't_s101_f2',
+  text: S101_FORCE_TEXT,
+  force: true,
+  confirm: true
+});
+const s101b3 = await s101Send({
+  target: S101_TO,
+  kind: 'note',
+  threadID: 't_s101_f3',
+  text: S101_FORCE_TEXT,
+  force: true,
+  confirm: true
+});
+out('S101b force', `${s101b1.split('\n')[0]}\n${s101b2.split('\n')[0]}\n${s101b3.split('\n')[0]}`);
+expect(
+  'S101 force:true delivers every repeat (3 deliveries, none suppressed)',
+  prompts.length === s101bBefore + 3 &&
+    s101b2.startsWith('已投递') &&
+    s101b3.startsWith('已投递'),
+  `${prompts.length - s101bBefore} deliveries / ${s101b3.split('\n')[0]}`
+);
+expect(
+  'S101 … every forced receipt carries dedupeOverridden (never a silent override)',
+  s101b2.includes('dedupeOverridden') && s101b3.includes('dedupeOverridden'),
+  s101b2.split('\n').find(line => line.includes('dedupeOverridden')) ?? '(缺失)'
+);
+
+// --- S101c: a hit writes nothing — prompt, thread message and record all untouched.
+const S101_REC = 'b_dd01000000001011';
+mkdirSync(broadcastDir, { recursive: true });
+const s101Record = {
+  bid: S101_REC,
+  state: 'acked',
+  title: 'S101 dedupe fixture',
+  from: { sid: 'ses_aaa', directory: HARNESS_LOCATION },
+  claim: { by: 'ses_bbb', kind: 'accept', at: 1, token: 'k_s101' },
+  receipt: { from: 'ses_bbb', at: 2, note: '初始回执，保持不动' },
+  replies: [{ from: 'ses_bbb', at: 2, text: 'S101 与本次正文无关的旧回复' }],
+  updatedAt: 3
+};
+writeFileSync(bcFile(S101_REC), JSON.stringify(s101Record, null, 2));
+const s101RecSnapshot = JSON.stringify({
+  state: bcRead(S101_REC).state,
+  claim: bcRead(S101_REC).claim,
+  receipt: bcRead(S101_REC).receipt,
+  updatedAt: bcRead(S101_REC).updatedAt
+});
+const S101_REC_TEXT = 'S101 BLOCKED 带 bid 的同文';
+const s101cBefore = prompts.length;
+await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_r1', text: S101_REC_TEXT, bid: S101_REC, confirm: true });
+const s101cHit = await s101Send({
+  target: S101_TO,
+  kind: 'note',
+  threadID: 't_s101_r2',
+  text: S101_REC_TEXT,
+  bid: S101_REC,
+  confirm: true
+});
+const s101RecAfterHit = JSON.stringify({
+  state: bcRead(S101_REC).state,
+  claim: bcRead(S101_REC).claim,
+  receipt: bcRead(S101_REC).receipt,
+  updatedAt: bcRead(S101_REC).updatedAt
+});
+expect(
+  'S101 a target-level hit writes nothing at all: no prompt, no thread, no record change',
+  prompts.length === s101cBefore + 1 &&
+    s101cHit.includes('未重复投递') &&
+    s101RecAfterHit === s101RecSnapshot &&
+    !store.get('collab/threads/t_s101_r2'),
+  `${prompts.length - s101cBefore} delivery / record ${s101RecAfterHit === s101RecSnapshot ? 'unchanged' : 'CHANGED'}`
+);
+
+// --- S101d: force with a bid stamps `dedupeOverriddenAt` and never moves state.
+const s101cForce = await s101Send({
+  target: S101_TO,
+  kind: 'note',
+  threadID: 't_s101_r3',
+  text: S101_REC_TEXT,
+  bid: S101_REC,
+  force: true,
+  confirm: true
+});
+const s101RecAfterForce = bcRead(S101_REC);
+expect(
+  'S101 force + bid stamps dedupeOverriddenAt on the record (display-only marker)',
+  s101cForce.startsWith('已投递') &&
+    s101cForce.includes('dedupeOverridden') &&
+    Number(s101RecAfterForce.dedupeOverriddenAt) > 0,
+  `dedupeOverriddenAt=${s101RecAfterForce.dedupeOverriddenAt} / ${s101cForce.split('\n')[0]}`
+);
+expect(
+  'S101 … while state / claim / receipt stay exactly as they were',
+  s101RecAfterForce.state === s101Record.state &&
+    JSON.stringify(s101RecAfterForce.claim) === JSON.stringify(s101Record.claim) &&
+    JSON.stringify(s101RecAfterForce.receipt) === JSON.stringify(s101Record.receipt),
+  JSON.stringify({ state: s101RecAfterForce.state, claim: s101RecAfterForce.claim })
+);
+
+// --- S101e: the window boundary (a 61s jump, no real waiting: `Date.now` is the
+// only clock the plugin reads). 59s → still a duplicate, 61s → deliverable again.
+const S101_REAL_NOW = Date.now;
+let s101Offset = 0;
+Date.now = () => S101_REAL_NOW() + s101Offset;
+const S101_WINDOW_TEXT = 'S101 BLOCKED 窗口边界';
+let s101At59 = '';
+let s101At61 = '';
+try {
+  const s101WinBefore = prompts.length;
+  await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_w0', text: S101_WINDOW_TEXT, confirm: true });
+  s101Offset += 59_000;
+  s101At59 = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_w1', text: S101_WINDOW_TEXT, confirm: true });
+  const s101After59 = prompts.length;
+  s101Offset += 2_000; // 61s after the first copy
+  s101At61 = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_w2', text: S101_WINDOW_TEXT, confirm: true });
+  out('S101e window', `59s: ${s101At59.split('\n')[0]}\n61s: ${s101At61.split('\n')[0]}`);
+  expect(
+    'S101 59s later the same body is still suppressed (inside the window)',
+    s101At59.includes('未重复投递') && s101After59 === s101WinBefore + 1,
+    `${s101After59 - s101WinBefore} deliveries / ${s101At59.split('\n')[0]}`
+  );
+  expect(
+    'S101 61s later the same body is deliverable again (outside the window)',
+    s101At61.startsWith('已投递') && prompts.length === s101WinBefore + 2,
+    `${prompts.length - s101WinBefore} deliveries / ${s101At61.split('\n')[0]}`
+  );
+} finally {
+  Date.now = S101_REAL_NOW;
+}
+
+// --- S101f: a different target is a different message (no cross-target bleed).
+const S101_TARGET_TEXT = 'S101 同一句发给两个不同会话';
+const s101fBefore = prompts.length;
+const s101f1 = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_d1', text: S101_TARGET_TEXT, confirm: true });
+const s101f2 = await s101Send({ target: S101_OTHER, kind: 'note', threadID: 't_s101_d2', text: S101_TARGET_TEXT, confirm: true });
+expect(
+  'S101 the same body to a different target is delivered (target is part of the key)',
+  prompts.length === s101fBefore + 2 && s101f1.startsWith('已投递') && s101f2.startsWith('已投递'),
+  `${prompts.length - s101fBefore} deliveries / ${s101f2.split('\n')[0]}`
+);
+
+// --- S101g: a preview writes nothing, so it never consumes/reports a hit.
+const s101gPreview = await call(
+  'collab_send',
+  { target: S101_TO, kind: 'note', threadID: S101_T3, text: S101_TEXT, confirm: false },
+  as('ses_aaa')
+);
+expect(
+  'S101 confirm:false still previews a body the window would suppress (preview = 0 writes)',
+  s101gPreview.startsWith('未投递（confirm 不为 true，仅预览）') && s101gPreview.includes('将发送:'),
+  s101gPreview.split('\n')[0]
+);
+
+// --- S101h: thread-level behaviour is the 0.6.0 one (same thread, same body).
+const s101hFirst = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_h', text: 'S101 同 thread 同文', confirm: true });
+const s101hSecond = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_h', text: 'S101 同 thread 同文 ', confirm: true });
+expect(
+  'S101 the same thread keeps the 0.6.0 receipt ("thread … 内已有同文", not the target wording)',
+  s101hFirst.startsWith('已投递') &&
+    s101hSecond.includes('未重复投递') &&
+    s101hSecond.includes('thread t_s101_h') &&
+    !s101hSecond.includes('target 维度去重'),
+  s101hSecond.split('\n')[0]
+);
+
+// --- S101i: `dedupeWindowMs:0` turns the whole feature off (rollback switch).
+await writeConfig({ dedupeWindowMs: 0 });
+const S101_OFF_TEXT = 'S101 关闭去重后同文跨 thread';
+const s101iBefore = prompts.length;
+const s101i1 = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_off1', text: S101_OFF_TEXT, confirm: true });
+const s101i2 = await s101Send({ target: S101_TO, kind: 'note', threadID: 't_s101_off2', text: S101_OFF_TEXT, confirm: true });
+await writeConfig({});
+expect(
+  'S101 dedupeWindowMs:0 delivers both copies (target dimension included)',
+  prompts.length === s101iBefore + 2 && s101i1.startsWith('已投递') && s101i2.startsWith('已投递'),
+  `${prompts.length - s101iBefore} deliveries / ${s101i2.split('\n')[0]}`
+);
+
+// --- S101k: `collab_reply` uses the same target index (two threads, one sender).
+const S101_RE_T1 = 't_s101_re1';
+const S101_RE_T2 = 't_s101_re2';
+await s101Send({ target: S101_TO, kind: 'request', threadID: S101_RE_T1, text: 'S101 建 thread 1', confirm: true });
+await s101Send({ target: S101_TO, kind: 'request', threadID: S101_RE_T2, text: 'S101 建 thread 2', confirm: true });
+const S101_RE_TEXT = 'S101 [handoff] BLOCKED 两条 thread 同一句回执';
+const s101kBefore = prompts.length;
+const s101k1 = await call('collab_reply', { threadID: S101_RE_T1, text: S101_RE_TEXT, confirm: true }, as('ses_bbb'));
+const s101k2 = await call('collab_reply', { threadID: S101_RE_T2, text: S101_RE_TEXT, confirm: true }, as('ses_bbb'));
+const s101k3 = await call(
+  'collab_reply',
+  { threadID: S101_RE_T2, text: S101_RE_TEXT, force: true, confirm: true },
+  as('ses_bbb')
+);
+out('S101k reply across threads', `${s101k1.split('\n')[0]}\n${s101k2.split('\n')[0]}\n${s101k3.split('\n')[0]}`);
+expect(
+  'S101 collab_reply is target-deduped across threads, then force delivers it',
+  prompts.length === s101kBefore + 2 &&
+    s101k1.startsWith('已投递') &&
+    s101k2.includes('已在 thread t_s101_re1 发过同文') &&
+    s101k3.startsWith('已投递') &&
+    s101k3.includes('dedupeOverridden'),
+  `${prompts.length - s101kBefore} deliveries / ${s101k2.split('\n')[0]}`
+);
+
+// --- S101j: both tool descriptions state the target dimension + `force`.
+const s101SendDesc = String(tool('collab_send').description);
+const s101ReplyDesc = String(tool('collab_reply').description);
+expect(
+  'S101 collab_send / collab_reply descriptions name the target dimension and force:true',
+  /target session/.test(s101SendDesc) &&
+    /force:true/.test(s101SendDesc) &&
+    /counterpart/.test(s101ReplyDesc) &&
+    /force:true/.test(s101ReplyDesc),
+  `${s101SendDesc.slice(0, 120)} | ${s101ReplyDesc.slice(0, 120)}`
+);
+
+// Cleanup: leave no S101 threads / record behind for the closing summary.
+for (const thread of [
+  S101_T1,
+  S101_T2,
+  S101_T3,
+  't_s101_f1',
+  't_s101_f2',
+  't_s101_f3',
+  't_s101_r1',
+  't_s101_r2',
+  't_s101_r3',
+  't_s101_w0',
+  't_s101_w1',
+  't_s101_w2',
+  't_s101_d1',
+  't_s101_d2',
+  't_s101_h',
+  't_s101_off1',
+  't_s101_off2',
+  S101_RE_T1,
+  S101_RE_T2
+]) {
+  store.delete(`collab/threads/${thread}`);
+}
+rmSync(bcFile(S101_REC), { force: true });
+
+
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);
