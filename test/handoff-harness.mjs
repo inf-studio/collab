@@ -8462,6 +8462,299 @@ for (const bid of [S96.claimed, S96.done, S96.blocked, S96.expired, S96.queued, 
 rmSync(ownerQueueDir, { recursive: true, force: true });
 rmSync(bcFile(s92Bid), { force: true });
 
+// ================== S97 (0.6.0: `collab_escalate` — 加急，复用 delivery=steer)
+// R1–R5: one target (bid / threadID / session), a required `reason`, default
+// `steer` (a read-only agent target is forced back to `queue`), the **actual**
+// delivery the host reported, `[urgent]` annotations on the record only (state /
+// claim / receipt untouched), a protected target becoming one urgent owner-queue
+// item with `canPush:false`, and the 5-minute `bid+reason` idempotency window.
+const s97Now = Date.now();
+const S97 = {
+  steer: 'b_9700000000000001',
+  queue: 'b_9700000000000002',
+  ro: 'b_9700000000000003',
+  held: 'b_9700000000000004',
+  idem: 'b_9700000000000005',
+  closed: 'b_9700000000000006',
+  sess: 'b_9700000000000007'
+};
+const S97_REQ = 'ses_s97_req';
+const S97_BUSY = 'ses_s97_busy';
+const S97_RO = 'ses_s97_ro';
+const S97_OTHER = 'ses_s97_other';
+const S97_BARE = 'ses_s97_bare';
+const S97_PROTECTED = 'ses_e1eb91cebffeTv1467ubJLKebk';
+for (const sid of [S97_REQ, S97_BUSY, S97_RO, S97_OTHER, S97_BARE]) {
+  sessions[sid] = {
+    id: sid,
+    agent: sid === S97_RO ? 'explore' : 'build',
+    title: `S97 ${sid}`,
+    time: { updated: s97Now, busy: 0 },
+    location: { directory: WS_A }
+  };
+}
+const s97Seed = (bid, over = {}) => {
+  const record = {
+    bid,
+    scope: 'local',
+    workspace: WS_A,
+    title: `S97 ${bid.slice(-2)}`,
+    createdAt: s97Now - 3_600_000,
+    updatedAt: s97Now - 30_000,
+    from: { sid: S97_REQ, directory: WS_A },
+    state: 'claimed',
+    claim: { by: S97_BUSY, kind: 'handoff', at: s97Now - 30_000, leaseMs: 300_000 },
+    replies: [],
+    ...over
+  };
+  writeFileSync(bcFile(bid), JSON.stringify(record, null, 2));
+  return record;
+};
+const s97Receipt = { from: S97_OTHER, at: s97Now - 20_000, note: 'S97 原有回执（必须不变）' };
+s97Seed(S97.steer, { threadID: 't_s97_steer', receipt: s97Receipt });
+s97Seed(S97.queue, { threadID: 't_s97_queue' });
+s97Seed(S97.ro, { threadID: 't_s97_ro', claim: { by: S97_RO, kind: 'handoff', at: s97Now - 30_000, leaseMs: 300_000 } });
+s97Seed(S97.held, {
+  threadID: 't_s97_held',
+  claim: { by: S97_PROTECTED, kind: 'handoff', at: s97Now - 30_000, leaseMs: 300_000 }
+});
+s97Seed(S97.idem, { threadID: 't_s97_idem' });
+s97Seed(S97.closed, {
+  threadID: 't_s97_closed',
+  state: 'done',
+  receipt: { from: S97_BUSY, at: s97Now - 10_000, note: '已完成' }
+});
+s97Seed(S97.sess, { threadID: 't_s97_sess', claim: { by: S97_OTHER, kind: 'handoff', at: s97Now - 30_000, leaseMs: 300_000 } });
+
+// --- S97a: default mode is **steer**; the receipt prints the host's delivery.
+const s97BeforeA = prompts.length;
+const s97A = await call(
+  'collab_escalate',
+  { bid: S97.steer, reason: '冻结：store.ts 先别动，等 schema 线确认', confirm: true },
+  as(S97_REQ)
+);
+out('S97 steer', s97A);
+const s97PromptA = prompts[prompts.length - 1];
+const s97RecA = bcRead(S97.steer);
+expect(
+  'S97 default steer: one prompt with delivery=steer, [URGENT] body, receipt shows delivery + message id',
+  prompts.length === s97BeforeA + 1 &&
+    s97PromptA.sessionID === S97_BUSY &&
+    s97PromptA.delivery === 'steer' &&
+    String(s97PromptA.text).startsWith('[URGENT] ') &&
+    s97A.includes('delivery=steer') &&
+    /message=msg_/.test(s97A),
+  `${s97PromptA?.delivery} / ${s97A.split('\n').find(line => line.includes('delivery='))}`
+);
+expect(
+  'S97 the record gains priority / urgentAt / urgentReason / urgentBy and keeps state / claim / receipt',
+  s97RecA.priority === 'urgent' &&
+    typeof s97RecA.urgentAt === 'number' &&
+    s97RecA.urgentReason === '冻结：store.ts 先别动，等 schema 线确认' &&
+    s97RecA.urgentBy === S97_REQ &&
+    s97RecA.state === 'claimed' &&
+    s97RecA.claim.by === S97_BUSY &&
+    JSON.stringify(s97RecA.receipt) === JSON.stringify(s97Receipt),
+  `${s97RecA.priority} / ${s97RecA.state} / ${JSON.stringify(s97RecA.receipt)}`
+);
+
+// --- S97b: the host reports `queue` (idle target) — the receipt must say so.
+const s97HostPrompt = ctx.session.prompt;
+ctx.session.prompt = async input => {
+  prompts.push(input);
+  return { id: 'msg_s97_idle', delivery: 'queue' };
+};
+let s97B = '';
+try {
+  s97B = await call('collab_escalate', { bid: S97.queue, reason: '空闲目标：排队即可', confirm: true }, as(S97_REQ));
+} finally {
+  ctx.session.prompt = s97HostPrompt;
+}
+out('S97 host degraded to queue', s97B);
+expect(
+  'S97 the host actually reported queue: the prompt asked for steer but the receipt says delivery=queue',
+  prompts[prompts.length - 1]?.delivery === 'steer' &&
+    s97B.includes('delivery=queue') &&
+    s97B.includes('宿主实际采用 queue'),
+  s97B.split('\n').find(line => line.includes('delivery='))
+);
+
+// --- S97c: a read-only agent target is forced back to queue.
+const s97C = await call('collab_escalate', { bid: S97.ro, reason: 'explore 目标不能 steer', confirm: true }, as(S97_REQ));
+out('S97 read-only target', s97C);
+expect(
+  'S97 read-only agent: delivery === queue, the receipt marks forced',
+  prompts[prompts.length - 1]?.sessionID === S97_RO &&
+    prompts[prompts.length - 1]?.delivery === 'queue' &&
+    s97C.includes('queue(forced)') &&
+    s97C.includes('forced'),
+  s97C.split('\n').find(line => line.includes('mode='))
+);
+
+// --- S97d: a protected target is never pushed to — urgent owner-queue item only.
+const s97BeforeD = prompts.length;
+const s97D = await call('collab_escalate', { bid: S97.held, reason: 'schema 线：先别合 thisPR', confirm: true }, as(S97_REQ));
+out('S97 protected target', s97D);
+const s97HeldFiles = (() => {
+  try {
+    return readdirSync(join(ownerQueueDir, S97_PROTECTED)).filter(name => name.endsWith('.json'));
+  } catch {
+    return []; // no queue directory = nothing was enqueued (the mutation case)
+  }
+})();
+const s97HeldItem = s97HeldFiles.length
+  ? JSON.parse(readFileSync(join(ownerQueueDir, S97_PROTECTED, s97HeldFiles[0]), 'utf8'))
+  : {};
+expect(
+  'S97 protected: 0 prompts, one urgent queue item, canPush:false + the queue position',
+  prompts.length === s97BeforeD &&
+    s97HeldFiles.length === 1 &&
+    s97HeldItem.priority === 'urgent' &&
+    s97HeldItem.bid === S97.held &&
+    String(s97HeldItem.summary).startsWith('[URGENT] ') &&
+    s97D.includes('canPush=false') &&
+    /第 1\/\d+ 位（未读）/.test(s97D),
+  `${s97HeldFiles.length} item(s) / ${s97HeldItem.priority} / ${s97D.split('\n').find(line => line.includes('canPush'))}`
+);
+expect(
+  'S97 the protected hand-off record is marked urgent too (state / claim untouched)',
+  bcRead(S97.held).priority === 'urgent' &&
+    bcRead(S97.held).urgentBy === S97_REQ &&
+    bcRead(S97.held).state === 'claimed' &&
+    bcRead(S97.held).claim.by === S97_PROTECTED,
+  `${bcRead(S97.held).priority} / ${bcRead(S97.held).state}`
+);
+
+// --- S97e: idempotency — the same bid + reason inside 5 minutes delivers once.
+const s97BeforeE = prompts.length;
+const s97E1 = await call('collab_escalate', { bid: S97.idem, reason: '同一句话重复一次', confirm: true }, as(S97_REQ));
+const s97AfterFirst = prompts.length;
+const s97UrgentAtFirst = bcRead(S97.idem).urgentAt;
+await settle(5);
+const s97E2 = await call('collab_escalate', { bid: S97.idem, reason: '同一句话重复一次', confirm: true }, as(S97_REQ));
+out('S97 idempotent repeat', s97E2);
+expect(
+  'S97 idempotent: the second call inside 5 minutes delivers nothing and only refreshes urgentAt',
+  s97AfterFirst === s97BeforeE + 1 &&
+    prompts.length === s97AfterFirst &&
+    s97E2.includes('已加急过') &&
+    bcRead(S97.idem).urgentAt >= s97UrgentAtFirst &&
+    bcRead(S97.idem).urgentReason === '同一句话重复一次',
+  `${s97AfterFirst - s97BeforeE} prompt(s) / ${s97E1.split('\n')[0]}`
+);
+const s97E3 = await call('collab_escalate', { bid: S97.idem, reason: '换一处措辞', confirm: true }, as(S97_REQ));
+expect(
+  'S97 a different reason is a new escalation (delivered again)',
+  prompts.length === s97AfterFirst + 1 && bcRead(S97.idem).urgentReason === '换一处措辞',
+  `${prompts.length - s97AfterFirst} prompt(s)`
+);
+
+// --- S97f: `session` target — marks the newest hand-off addressed to it.
+const s97F = await call('collab_escalate', { session: 'ses_s97_other', reason: '直接点名会话', confirm: true }, as(S97_REQ));
+out('S97 session target', s97F);
+expect(
+  'S97 session target: delivers to that session and marks the hand-off addressed to it',
+  prompts[prompts.length - 1]?.sessionID === S97_OTHER &&
+    prompts[prompts.length - 1]?.delivery === 'steer' &&
+    bcRead(S97.sess).priority === 'urgent' &&
+    s97F.includes(S97.sess),
+  s97F.split('\n')[0]
+);
+const s97F2 = await call(
+  'collab_escalate',
+  { session: 'ses_s97_bare', reason: '这个会话没有任何交接单', confirm: true },
+  as(S97_REQ)
+);
+expect(
+  'S97 a session with no open hand-off is still delivered to (no record to mark)',
+  prompts[prompts.length - 1]?.sessionID === S97_BARE &&
+    prompts[prompts.length - 1]?.delivery === 'steer' &&
+    s97F2.includes('没有关联的未闭环交接'),
+  s97F2.split('\n')[0]
+);
+
+// --- S97g: preview is a zero-write, zero-prompt dry run.
+const s97PreviewBid = 'b_9700000000000008';
+s97Seed(s97PreviewBid, { threadID: 't_s97_preview' });
+const s97PreviewBefore = statSync(bcFile(s97PreviewBid)).mtimeMs;
+const s97BeforeG = prompts.length;
+const s97G = await call(
+  'collab_escalate',
+  { bid: s97PreviewBid, reason: '仅预览', confirm: false },
+  as(S97_REQ)
+);
+const s97PreviewAfter = statSync(bcFile(s97PreviewBid)).mtimeMs;
+expect(
+  'S97 confirm:false previews (未加急) and writes nothing / prompts nobody',
+  prompts.length === s97BeforeG &&
+    s97G.includes('未加急') &&
+    s97G.includes('[URGENT] 仅预览') &&
+    s97PreviewBefore === s97PreviewAfter &&
+    !bcRead(s97PreviewBid).priority,
+  `${s97PreviewBefore} → ${s97PreviewAfter}`
+);
+
+// --- S97h: display + status read the marker back.
+const s97List = await call('collab_list', {}, as(S97_REQ));
+const s97Status = await call('collab_status', { bid: S97.steer });
+expect(
+  'S97 collab_list marks the hand-off [urgent] and its queue item',
+  s97List.includes(`${S97.steer} claimed [urgent]`) && s97List.includes('· [urgent]'),
+  s97List.split('\n').find(line => line.includes('· [urgent]')) ?? s97List.split('\n').find(line => line.includes(S97.steer))
+);
+expect(
+  'S97 collab_status reads priority=urgent',
+  s97Status.includes('priority=urgent'),
+  s97Status.split('\n')[0]
+);
+
+// --- S97i: validation is readable and writes nothing.
+await expectFail(
+  'S97 no target is refused (必须给 bid / threadID / session)',
+  () => call('collab_escalate', { reason: 'x', confirm: true }),
+  /必须给 bid \/ threadID \/ session/
+);
+await expectFail(
+  'S97 bid + threadID at once is refused (三选一)',
+  () => call('collab_escalate', { bid: S97.steer, threadID: 't_s97_steer', reason: 'x', confirm: true }),
+  /三选一/
+);
+await expectFail(
+  'S97 an empty reason is refused',
+  () => call('collab_escalate', { bid: S97.steer, reason: '   ', confirm: true }),
+  /reason 不能为空/
+);
+await expectFail(
+  'S97 a closed hand-off is refused (无需加急)',
+  () => call('collab_escalate', { bid: S97.closed, reason: '太晚了', confirm: true }),
+  /已闭环/
+);
+await expectFail(
+  'S97 a malformed bid is a readable error',
+  () => call('collab_escalate', { bid: 'nope', reason: 'x', confirm: true }),
+  /bid 格式不合法/
+);
+
+// --- S97j: registered exactly once; the description states the contract.
+expect(
+  'S97 collab_escalate is registered exactly once',
+  tools.filter(definition => definition.name === 'collab_escalate').length === 1,
+  `${tools.filter(definition => definition.name === 'collab_escalate').length} registration(s)`
+);
+const s97Desc = String(tool('collab_escalate').description);
+expect(
+  'S97 the description states steer / urgent / protected queue / 5-minute idempotency',
+  /steer/.test(s97Desc) &&
+    /urgent/.test(s97Desc) &&
+    /protect/.test(s97Desc) &&
+    /5 minutes/.test(s97Desc),
+  s97Desc.slice(0, 160)
+);
+
+// Cleanup: no S97 records / queue items left for the closing summary.
+for (const bid of [...Object.values(S97), s97PreviewBid]) rmSync(bcFile(bid), { force: true });
+rmSync(ownerQueueDir, { recursive: true, force: true });
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);
 if (failed.length) {

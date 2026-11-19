@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 十八个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态各一组）
+### 11.2 十九个工具（协作链路六个 + 权限/上报/追加/租约/归档/状态/加急各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -268,6 +268,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
 | `collab_wait` | `{ threadID?, target?, timeoutMs? }` | 传 `threadID` 等该线程「**最后一次 request 之后**」的 `kind:"reply"`（仅参与者可等；格式非法/thread 不存在立即报错）；不传则等 `target` 空闲。默认 120000，上限 1800000 |
 | `collab_status` | `{ bid?, threadID?, session? }` | **只读、非阻塞**地看「这一单现在到哪一步」（0.6.0）：`state` / `priority` / 承接（`claim.by` + `kind` + 剩余租约）/ 投递（`admitted` / `seen` / `ack=n/a`）/ 该目标 `[owner-queue]` 队列项与**队列位置** / 最近一次 reply 摘要 / `receipt.note` / **下一步**一行。`bid` / `threadID` / `session` 三选一（`session` 也接受别名：列出它作为 `from.sid` 或 `claim.by` 的全部未闭环 + 最近一条已闭环）；都不传 = 本会话相关的未闭环（≤5 条，按 `updatedAt` 倒序）。受保护目标照常可查，并明确 `canPush:false` + 只能走队列。**零写入**：不刷新状态（过期租约只描述不改写）、不释放锁、不投递。见 §11.14 |
+| `collab_escalate` | `{ bid?, threadID?, session?, reason, mode?, confirm }` | **加急（0.6.0）**：让被加急的一单**现在就进对方当前轮**——复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递。`bid` / `threadID` / `session` 三选一；`reason` 必填（≤200，剥控制字符）。`mode` 默认 **`steer`**（显式 `"queue"` 才排队），只读 agent（`explore`/`plan`）目标**强制 `queue`**（回执标 `forced`）；回执打印**宿主实际采用**的 `delivery`（空闲目标会降级为 `queue`）与 `messageID`。记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state` / `claim` / `receipt`。受保护目标（含血缘）**0 条 prompt** → 写一条 `priority:"urgent"` 的 owner-queue 项，回执 `canPush:false` + 队列位置。同 `bid + reason` 5 分钟内只刷新 `urgentAt`、不重复投递。`confirm:false` 零写入预览。见 §11.14.1 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话） |
 | `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
 | `collab_handoff` | `{ target?, text, expected?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投 |
@@ -1154,6 +1155,34 @@ b_14528d828f9df27b  state=claimed  priority=urgent  承接=ses_e105…d85（hand
   测试用「写方法一旦调用即抛」的严格宿主 + 广播 / 队列目录（文件名 + 大小 + mtime）与 `ctx.storage`
   调用前后一致来证明（S96）。
 - **非目标**：不做历史归档查询（用 `collab_list` / 归档过滤）、不做自动催办（用 `collab_escalate`）。
+
+#### 11.14.1 加急（`collab_escalate`，0.6.0）
+
+「冻结 / 停手 / 先别合」这类话不能等下一轮。`collab_escalate` 把一单加急，**复用宿主的
+`delivery:steer`**（桌面端 UI 的「引导」按钮就是它）——不新增 RPC、不直连 API、不加投递机制：
+
+```text
+collab_escalate { bid:"b_14528d828f9df27b", reason:"冻结：store.ts 先别动", confirm:true }   # 默认 steer
+collab_escalate { threadID:"t_m3k9_abcd", reason:"…", mode:"queue", confirm:true }             # 显式排队
+collab_escalate { session:"ses_e105…d85", reason:"…", confirm:true }                            # 直接点名会话
+```
+
+- **目标三选一**，`reason` 必填（≤200 字，控制字符剥成空格）；`confirm:false` 只预览（零写入、零 prompt）。
+- **默认 `steer`**：并入目标当前轮；显式 `mode:"queue"` 才排队。只读 agent（`explore` / `plan`）目标
+  **强制 `queue`**（沿用 `resolveMode`），回执写 `queue(forced)`。
+- **回执是真实的**：`delivery=` 取宿主返回的 `result.delivery ?? mode`。目标空闲时 `steer` 会降级为
+  `queue`，回执如实打印 `delivery=queue` + 一行「宿主实际采用 queue（目标空闲 / 被降级）」。
+- **记录只追加四个字段**：`priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`（read-merge-write）。
+  `state` / `claim` / `receipt` **不变**；`urgent` 也不会被自动撤销——单闭环后展示层自然不再标 `[urgent]`。
+- **受保护目标（含血缘）**：0 条 `session.prompt`，改写一条 `priority:"urgent"` 的 owner-queue 项
+  （`collab_request_owner` 同一个队列 / 上限 / 回收），回执 `canPush=false` + `第 K/N 位（未读）`；
+  对端下次运行在自己的 `context` 注入里看到 `- [owner-queue] [urgent] …`。
+- **幂等（防手抖，不是定时器）**：同 `bid` + 同 `reason` 在 **5 分钟**内重复调用只刷新 `urgentAt`，
+  **不重复投递**（受保护目标也不重复写队列项）。换一处措辞 = 新加急；定时重复催办由人决定。
+- **展示**：`collab_list` 未闭环交接行尾 `[urgent]`，我提交的队列项标 `· [urgent]`；
+  `collab_status` 读 `priority=urgent`；`collab.state.snapshot` 的 `handoffs[]` / `queue[]` 增**可选**
+  `priority:"urgent"`（TUI / GUI 只在已有行尾加标记，不改布局）。
+- **边界**：不因加急放宽任何护栏——不 push 受保护线、不改 permissions、不改 `state`；已闭环的单拒绝加急。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

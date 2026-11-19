@@ -6,8 +6,8 @@
 ## [0.6.0] - 2026-11-19
 
 > 一件事：**把「排队」从不可回收的状态变成有生命周期的状态，并把三个面（GUI 会话头 / TUI 侧栏 /
-> TUI 面板）的数字口径统一成四个**。外加一层正文去重，以及一个**只读、非阻塞**的状态查询
-> （`collab_status`，17 → 18 个工具）。不新增依赖、
+> TUI 面板）的数字口径统一成四个**。外加一层正文去重，一个**只读、非阻塞**的状态查询，以及一个
+> **复用 `delivery:steer`** 的加急入口（`collab_status` + `collab_escalate`，17 → 19 个工具）。不新增依赖、
 > 不改任何既有快照字段语义（只追加可选字段）、读命令保持零写入。
 
 ### Added
@@ -29,6 +29,24 @@
     `claimed` 且租约已过 → 只显示「租约已过期 —— 下一次 refresh 才会释放并顺延」，**不改写**（顺延仍属写路径）。
     控制台注入/等待/投递一概不触发（非阻塞）。
   - 文档：`docs/collab.md` §11.2 工具表 + 新增 §11.14；`README.md` 工具表；`skills/collab`（速查表 + 一点八 + 排障）。
+- **`collab_escalate`（新文件 `src/tools/escalate.ts`）**：加急一单，让它**现在就进对方当前轮**。
+  输入 `{ bid?, threadID?, session?, reason, mode?, confirm }`：目标三选一（`bid` 先校验格式，`threadID`
+  取该 thread 最新的未闭环单，`session` 直指会话并标记「最新一条由它承接 / 被问询」的单）；`reason` 必填
+  （≤200 字，控制字符剥成空格）；`confirm:false` 是零写入预览。
+  - **复用宿主的 `delivery:steer`**（桌面端「引导」按钮同一机制），`mode` 默认 `steer`；显式 `"queue"`
+    才排队。只读 agent（`explore` / `plan`）目标由 `resolveMode` **强制 `queue`**，回执写 `queue(forced)`。
+    回执里的 `delivery=` 取宿主返回的 `result.delivery ?? mode` —— 目标空闲时 `steer` 会降级，回执如实写
+    `delivery=queue` + 一行「宿主实际采用 queue」。
+  - **记录只追加四个字段** `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`
+    （prompt 之后 read-merge-write）；`state` / `claim` / `receipt` 原样保留。
+  - **受保护目标（含血缘）**：`protectedAncestor` 命中 → **0 条 `session.prompt`**，改写一条
+    `priority:"urgent"` 的 owner-queue 项（同一队列 / 上限 / 回收），回执 `canPush:false` + `第 K/N 位（未读）`；
+    队列注入行标 `- [owner-queue] [urgent] …`。
+  - **幂等（R5）**：同 `bid` + 同 `reason` 在 5 分钟内只刷新 `urgentAt`，不重复投递（受保护目标也不重复写
+    队列项）；换措辞 = 新加急。
+  - 展示：`collab_list` 未闭环行尾 `[urgent]`、我提交的队列项标 `· [urgent]`；`collab_status` 读
+    `priority=urgent`；`collab.state.snapshot` 的 `handoffs[]` / `queue[]` 增可选 `priority`（TUI / GUI 只在
+    已有行尾加标记，不改布局）。文档：`docs/collab.md` §11.2 + §11.14.1；`README.md`；`skills/collab`（一点九）。
 
 ### Fixed
 
@@ -80,6 +98,14 @@
   变异（已还原）：`readBroadcast` 之后加 `persistRefresh(record, refreshBroadcast(record))` →
   「过期租约只描述」与「零写」两条断言同时失败。
 - `test/readonly-default.mjs`：注册表 17 → 18（`collab_status` 在 `collab_wait` 之后）。
+- `test/handoff-harness.mjs`：新增 **S97**（20 条，`collab_escalate`）——默认 `steer`（断言传给
+  `session.prompt` 的 `delivery`）、记录四个 urgent 字段且 `state`/`claim`/`receipt` 不变、宿主返回 `queue`
+  时回执如实 `queue`、只读 agent `queue(forced)`、受保护目标 0 次 prompt + urgent 队列项 + `canPush:false` +
+  队列位置、幂等（同 bid+reason 第二次 0 次 prompt）/ 换措辞再投、`session` 目标（有 / 无交接单）、
+  `confirm:false` 零写入预览（mtime 不变）、`collab_list` `[urgent]` + `collab_status` `priority=urgent`、
+  五条可读错误、注册一次 + 描述。`test/readonly-default.mjs`：注册表 18 → 19。
+  变异（各还原）：去掉 `resolveMode` 的只读降级 → 只读断言失败；把 protected 分支改成直接 prompt →
+  「0 次 prompt / 队列项」断言失败。
 - `test/handoff-harness.mjs`：新增 **S95**（19 条）——free + 3 过期 waiter → 直接授予并清空；
   free + 1 活 waiter → 不插队；`collab_locks` 的 age / `[stale]` / mtime 不变；三条心跳来源（各自独立 sid）
   + 30s 节流；读命令不是心跳；同文 1 次 / 异文 2 次 / `dedupeWindowMs:0` 2 次（含 `collab_reply`）。

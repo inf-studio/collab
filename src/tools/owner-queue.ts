@@ -20,7 +20,9 @@ import type { ToolKit } from './shared.ts';
 export function queueItemLine(item: OwnerQueueItem): string {
   return (
     `- ${item.id} → ${shortID(item.target)}  ${fmtTime(item.at).slice(0, 5)}  ` +
-    `"${truncate(item.summary, OWNER_QUEUE_LIST_CHARS)}"${item.seenAt ? ' · 已读' : ''}`
+    `"${truncate(item.summary, OWNER_QUEUE_LIST_CHARS)}"${item.priority === 'urgent' ? ' · [urgent]' : ''}${
+      item.seenAt ? ' · 已读' : ''
+    }`
   );
 }
 

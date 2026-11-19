@@ -141,6 +141,8 @@ export function normalizeQueueItem(raw: unknown, targetSid: string, fallbackID?:
     summary: sanitizeSummary(value.summary),
     issuePath: issueCheck?.ok ? issueCheck.issuePath : null,
     bid: value.bid ? String(value.bid) : null,
+    // 0.6.0 (`collab_escalate`): additive display marker, tolerated on read.
+    ...(value.priority === 'urgent' ? { priority: 'urgent' as const } : {}),
     revokedAt: Number(value.revokedAt) || null,
     seenAt: Number(value.seenAt) || null
   };
@@ -199,6 +201,11 @@ export interface EnqueueInput {
   text: unknown;
   issuePath?: unknown;
   bid?: unknown;
+  /**
+   * 0.6.0 (`collab_escalate`): mark the item urgent. Display only — the FIFO
+   * contract of this queue (oldest first) is unchanged.
+   */
+  priority?: 'urgent';
   /** Injectable clock (tests / deterministic rendering). */
   now?: number;
 }
@@ -240,7 +247,7 @@ export function pruneSeen(targetSid: string, now = Date.now()): number {
  * Throws `ValidationError` for caller-fixable input (empty summary, bad
  * `issuePath`, full queue) so the defect reporter never files them.
  */
-export function enqueue({ target, from, text, issuePath, bid, now = Date.now() }: EnqueueInput): OwnerQueueItem {
+export function enqueue({ target, from, text, issuePath, bid, priority, now = Date.now() }: EnqueueInput): OwnerQueueItem {
   const summary = sanitizeSummary(text);
   if (!summary) throw invalid('text 不能为空：队列项需要一句话说明请求（≤500 字，会去掉控制字符）');
   let cleanIssue: string | null = null;
@@ -273,6 +280,7 @@ export function enqueue({ target, from, text, issuePath, bid, now = Date.now() }
     summary,
     issuePath: cleanIssue,
     bid: bid ? String(bid) : null,
+    ...(priority === 'urgent' ? { priority: 'urgent' as const } : {}),
     revokedAt: null,
     seenAt: null
   };
@@ -316,7 +324,7 @@ function hhmm(at: number): string {
  */
 function hintLine(item: OwnerQueueItem): string {
   return (
-    `- [owner-queue] ${shortID(item.from)} @ ${hhmm(item.at)}：` +
+    `- [owner-queue]${item.priority === 'urgent' ? ' [urgent]' : ''} ${shortID(item.from)} @ ${hhmm(item.at)}：` +
     `${item.summary.slice(0, OWNER_QUEUE_HINT_CHARS)}（${item.issuePath ?? '-'}）`
   );
 }

@@ -314,6 +314,19 @@ export interface BroadcastRecord {
    */
   followUps?: BroadcastFollowUp[];
   /**
+   * 0.6.0 (`collab_escalate`): this hand-off was escalated as urgent. The four
+   * fields are **additive annotations** — `state` / `claim` / `receipt` are
+   * never touched by an escalation, and the mark is never auto-revoked (a
+   * closed record simply stops being rendered as `[urgent]`).
+   */
+  priority?: 'urgent';
+  /** Last time this hand-off was escalated (`collab_escalate` refreshes it on a repeat). */
+  urgentAt?: number;
+  /** Why it was escalated (≤200 chars, control characters stripped). */
+  urgentReason?: string;
+  /** Who escalated it (session id of the caller). */
+  urgentBy?: string;
+  /**
    * 0.5.0: when the spawned session of this record was archived
    * (`PATCH /api/session/{sid} { archived:true }`). Written **after** the host
    * accepted the write, so its presence is the idempotency marker: an archived
@@ -351,6 +364,11 @@ export interface OwnerQueueItem {
   issuePath?: string | null;
   /** A bid the sender already talked about, if any — display only. */
   bid?: string | null;
+  /**
+   * 0.6.0 (`collab_escalate`): an urgent item (a protected target could not be
+   * pushed to). Display only — ordering stays FIFO.
+   */
+  priority?: 'urgent';
   /** Kept for tolerant reads; `revoke` deletes the file. */
   revokedAt?: number | null;
   /** Written by the target's `context` hook **after** the block was pushed. */

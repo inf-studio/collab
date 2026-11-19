@@ -323,16 +323,22 @@ function handoffLines(handoffs: SnapshotHandoff[], width: number): Line[] {
   for (const handoff of handoffs) {
     const from = shortSid(handoff.from);
     const age = fmtAge(handoff.ageMs);
+    // 0.6.0 (`collab_escalate`): one marker at the end of the existing row — no
+    // column is added and nothing is re-laid-out.
+    const urgent = handoff.priority === 'urgent' ? ' [urgent]' : '';
     const text = narrow
-      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}`, width - 2)}`
-      : tableRow([
+      ? `${clip(handoff.bid, width)}\n  ${clip(`${handoff.state} · ${age} · ${from}${urgent}`, width - 2)}`
+      : `${tableRow([
           [handoff.bid, 16],
           [handoff.state, 9],
           [age, 8],
           [from, Math.max(6, width - 35)]
-        ]);
+        ])}${urgent}`;
     // `open` = nobody has taken it yet; that is the row worth noticing.
-    out.push({ text, tone: handoff.state === 'open' ? 'warning' : 'base' });
+    out.push({
+      text,
+      tone: handoff.priority === 'urgent' ? 'danger' : handoff.state === 'open' ? 'warning' : 'base'
+    });
   }
   return out;
 }
@@ -352,15 +358,16 @@ function queueLines(queue: SnapshotQueueItem[], width: number): Line[] {
     const target = shortSid(item.target);
     const age = fmtAge(item.ageMs);
     const status = item.seen ? 'seen' : 'pending';
+    const urgent = item.priority === 'urgent' ? ' [urgent]' : '';
     const text = narrow
-      ? `${clip(item.queueId, width)}\n  ${clip(`${target} · ${age} · ${status}`, width - 2)}`
-      : tableRow([
+      ? `${clip(item.queueId, width)}\n  ${clip(`${target} · ${age} · ${status}${urgent}`, width - 2)}`
+      : `${tableRow([
           [item.queueId, 18],
           [target, 20],
           [age, 8],
           [status, Math.max(6, width - 48)]
-        ]);
-    out.push({ text, tone: item.seen ? 'muted' : 'base' });
+        ])}${urgent}`;
+    out.push({ text, tone: item.priority === 'urgent' ? 'danger' : item.seen ? 'muted' : 'base' });
   }
   return out;
 }

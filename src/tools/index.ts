@@ -16,6 +16,7 @@ import { sendTool } from './send.ts';
 import type { ToolKit } from './shared.ts';
 import { statusTool } from './status.ts';
 import { waitTool } from './wait.ts';
+import { escalateTool } from './escalate.ts';
 
 export { createToolKit } from './shared.ts';
 export type { ToolDeps, ToolKit, Target, DeliveryMode } from './shared.ts';
@@ -43,6 +44,7 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     inboxTool(kit),
     waitTool(kit),
     statusTool(kit),
+    escalateTool(kit),
     grantTool(kit),
     promoteTool(kit),
     reportTool(kit),

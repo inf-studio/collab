@@ -383,6 +383,9 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
     <div class="collab-row" title={props.handoff.bid}>
       <span class="collab-mono">{props.handoff.bid}</span>
       <span class="collab-badge">{props.handoff.state}</span>
+      <Show when={props.handoff.priority === 'urgent'}>
+        <span class="collab-badge collab-tone-warning">urgent</span>
+      </Show>
       <span class="collab-muted">{fmtTtl(props.handoff.ageMs)}</span>
       <span class="collab-row-title collab-muted">{props.handoff.title}</span>
     </div>

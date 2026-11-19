@@ -114,7 +114,9 @@ function toHandoff(record: BroadcastRecord, now: number): SnapshotHandoff | unde
     ...(record.workspace ? { workspace: String(record.workspace) } : {}),
     title: truncate(record.title ?? record.slug ?? '(untitled)', 60),
     // 0.5.0: read-only marker for a hand-off whose spawned session was archived.
-    ...(Number(record.archivedAt) > 0 ? { archived: true } : {})
+    ...(Number(record.archivedAt) > 0 ? { archived: true } : {}),
+    // 0.6.0 (`collab_escalate`): read-only marker; the panel layout is unchanged.
+    ...(asObject(record).priority === 'urgent' ? { priority: 'urgent' as const } : {})
   };
 }
 
@@ -133,6 +135,7 @@ function toQueueItem(item: OwnerQueueItem, now: number): SnapshotQueueItem | und
     summary: truncate(item.summary ?? '', 80),
     ...(item.issuePath ? { issuePath: String(item.issuePath) } : {}),
     ...(item.bid ? { bid: String(item.bid) } : {}),
+    ...(asObject(item).priority === 'urgent' ? { priority: 'urgent' as const } : {}),
     seen: Boolean(item.seenAt)
   };
 }

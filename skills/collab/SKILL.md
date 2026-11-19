@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 十九个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -25,6 +25,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_inbox` | `limit?` | 本会话收到的跨会话消息全文 | 只读 |
 | `collab_wait` | `threadID?` / `target?`, `timeoutMs?` | 等某 thread 的回执，或等某会话空闲 | 只读 |
 | `collab_status` | `bid?` / `threadID?` / `session?` | **一单现在到哪一步**（state / 承接+剩余租约 / 投递 / 队列位置 / 最近回复 / 下一步）；非阻塞、零写入；protected 目标给 `canPush:false` | 只读 |
+| `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_send` | `target, text, kind?, threadID?, mode?, confirm` | 投递消息；`kind=request/reply/note` | 发消息 |
 | `collab_reply` | `threadID, text, confirm` | 回执糖，target 由 thread 解析 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, confirm` | **同工作区**交接：选人 + 开 thread | 发消息 |
@@ -155,6 +156,24 @@ collab_status { }                    # 本会话相关未闭环，≤5 条，按
   所以它可以安全地反复问，不会把 `claimed` 的租约提前推进。
 - 已闭环 → `下一步: 无需动作`；全量清单仍用 `collab_list`，阻塞等回执照旧用 `collab_wait`。
 
+## 一点九、加急（`collab_escalate`，0.6.0）
+
+「冻结 / 停手 / 先别合」要**现在就进对方当前轮**，不是等下一轮：
+
+```text
+collab_escalate { bid:"b_…", reason:"冻结：store.ts 先别动", confirm:true }   # 默认 steer
+collab_escalate { threadID:"t_…", reason:"…", mode:"queue", confirm:true }    # 显式排队
+collab_escalate { session:"ses_…", reason:"…", confirm:true }                 # 直接点名会话
+```
+
+- 复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递；`mode` 默认 `steer`。
+- 只读 agent（`explore`/`plan`）目标强制 `queue`（回执 `queue(forced)`）；目标空闲时宿主也可能降级——
+  回执里的 `delivery=` 是**实际**采用的方式，不是我们请求的。
+- 记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state`/`claim`/`receipt`。
+- 受保护目标（含血缘）**0 条 prompt** → 写一条 urgent owner-queue 项，回执 `canPush:false` + 队列位置。
+- 同 `bid + reason` **5 分钟**内重复调用只刷新 `urgentAt`、不重复投递；换措辞才是新加急。
+- 没闭环就想看结果：`collab_status { bid }`（admitted / seen / 队列位置）。
+
 ## 二、同工作区（local）
 
 ```text
@@ -215,7 +234,7 @@ collab_status { }                    # 本会话相关未闭环，≤5 条，按
 | 改了插件不生效 | 本地文件会热重载；**npm 包插件版本不会热重载到已运行会话** | 重启 OpenCode 或新开会话；用 `collab_report` 预览里的「版本」确认运行时版本 |
 | `collab_wait` 立刻报「没有 thread」 | thread 存储按 `location` 隔离 | 跨仓改用消息回执，不用 thread |
 | 交接卡在 `claimed` | 对端只分析、没调用工具 | 租约到期自动提取结论；或 `collab_promote` 后重发 |
-| 不知道一单到哪一步 / 要不要催 | 查状态与等待是两件事 | `collab_status { bid }` 看承接/投递/队列/下一步（非阻塞、零写入）；要阻塞等回执照旧 `collab_wait` |
+| 不知道一单到哪一步 / 要不要催 | 查状态、等待、加急是三件事 | 查：`collab_status { bid }`（非阻塞、零写入）；等：`collab_wait`；催：`collab_escalate { bid, reason, confirm:true }`（默认 steer，受保护目标自动转队列） |
 | `collab_broadcast` 报「就是当前工作区」 | 同仓广播（0.4.0 起拒绝） | 改用 `collab_handoff { text, confirm:true }` |
 | 受保护线收不到我的请求 | 投递对它一律拒绝（设计如此） | `collab_request_owner` 排队；对方下次运行时才会看到 |
 | 广播重复拉起会话 | 重复广播且 `bid` 不同（提案内容/mtime 变了） | 改提案后重新广播是预期行为；不要为同一内容反复广播 |

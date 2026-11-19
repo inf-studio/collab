@@ -186,7 +186,8 @@ export function listTool(kit: ToolKit): ToolDefinition {
           // R3 (0.1.6): delivery visibility — `admitted / seen / queue-age`.
           const delivery = deliveryVisible(record, now) ? `  ${deliveryLine(record, now)}` : '';
           return (
-            `- ${record.bid} ${record.state}${record.archivedAt ? ' [archived]' : ''}` +
+            `- ${record.bid} ${record.state}${record.priority === 'urgent' ? ' [urgent]' : ''}` +
+            `${record.archivedAt ? ' [archived]' : ''}` +
             `${lease ? ` lease=${lease}` : ''}${silent} scope=${record.scope} "$ ${truncate(record.title ?? '(untitled)', 50)}"` +
             ` 提案=${record.issuePath ?? '-'} 承接=${record.claim?.by ?? '-'} attempts=${record.attempts}${
               record.asked?.sid ? ` 问询=${record.asked.sid}` : ''

@@ -78,6 +78,11 @@ export interface SnapshotHandoff {
    * the panel keeps the row, only the marker is added).
    */
   archived?: boolean;
+  /**
+   * 0.6.0 (`collab_escalate`): the hand-off was escalated as urgent. Display
+   * only — the panel keeps its layout and adds one marker.
+   */
+  priority?: 'urgent';
 }
 
 /**
@@ -99,6 +104,8 @@ export interface SnapshotQueueItem {
   bid?: string;
   /** The target's `context` hook already showed it (`seenAt`). */
   seen: boolean;
+  /** 0.6.0 (`collab_escalate`): an urgent item (display marker only). */
+  priority?: 'urgent';
 }
 
 /** The whole read-only picture. */
