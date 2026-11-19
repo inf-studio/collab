@@ -79,6 +79,9 @@ function toSession(info: SessionInfoLike, workspace: string | undefined): Snapsh
 
 function toLock(record: LockRecord, now: number): SnapshotLock | undefined {
   // The shared read view: the sidebar must never invent a holder or a TTL.
+  // 0.6.0 (R3): `stateOf` also derives the waiter heartbeat ages here — the
+  // staleness window is the built-in default (`LOCK_WAITER_TTL_MS`); the view is
+  // read-only either way, an old heartbeat is only *shown*, never reaped.
   const state = stateOf(record, now);
   if (state.free && state.waiters.length === 0) return undefined; // nothing to show
   return {
@@ -89,6 +92,8 @@ function toLock(record: LockRecord, now: number): SnapshotLock | undefined {
     waiters: state.waiters.length,
     waiting: state.waiters.map(waiter => waiter.sid),
     expiresInMs: state.free ? 0 : Math.max(0, state.expiresIn),
+    ...(state.waiterAgeMs ? { waiterAgeMs: [...state.waiterAgeMs] } : {}),
+    ...(state.staleWaiters ? { staleWaiters: [...state.staleWaiters], stale: true } : {}),
     ...(state.reason ? { reason: state.reason } : {})
   };
 }

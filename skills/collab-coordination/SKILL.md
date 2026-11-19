@@ -32,6 +32,11 @@ collab_locks { }                             # 全部资源
 `collab_list` 末尾也会追加**本会话**的「持有 / 排队中（第 N 位）」。
 输出里 `free` 表示没人持有；`held` 时看 `holders=` 与 `剩余=`。
 
+排队段带**心跳年龄**：`waiters=ses_a#1:exclusive(12m),ses_b#2:exclusive(0s)[stale]`。
+`(12m)` = 距该排队者上次心跳的时长，`[stale]` = 已超过等待 TTL（默认 10 分钟）——**它不占位**：
+下一次 `collab_lock` 会把它回收，资源仍可能被直接授予。`free` 但有 waiter ≠ 被占用；
+`collab_locks` 是读命令（调用前后文件 mtime 不变，不回收、不叫醒）。
+
 **要一眼看全局**（谁持有、谁在排队、哪些交接没闭环）就打开 OpenCode Desktop 的侧栏
 `collab` 面板（0.3.0 起，只读；composer 上的 pill 显示本会话「锁 N · 等待 M」）——
 它读的是同一份 `stateOf()`，不会和 `collab_locks` 不一致；但**面板不能加锁/释放**，
@@ -59,6 +64,10 @@ collab_lock { resource:"test-window", wait:true, confirm:true }   # 进入 FIFO 
 - **不会有人主动叫醒你**（锁不投递消息、不打断会话）：持有者释放 / 租约到期后，
   下一次 `collab_locks` 会显示 `free`，再次 `collab_lock` 即按 FIFO 获得；
   队首会被优先，新人不能插队。
+- **排队心跳（0.6.0）**：`at` 是心跳，来源是「再次 `collab_lock`」/「本会话 `context` 每轮一次」/
+  「写类 `collab_*` 调用顺手 touch」，写入节流 ≥30s。心跳老于 `waiterTtlMs`（默认 10min）的排队者会在下一次
+  `collab_lock` 时被回收（history: `leave/stale`）——所以「排了队就去干活」不会把自己卡死，也不会长期挡住别人。
+  真需要长时间等：定期 `collab_lock { wait:true }` 或保持会话有请求，别把 `waiterTtlMs` 当成保留位。
 - 队列上限 **50**：满员时**拒绝新申请**并给出可读原因（已有排队者一个都不会被挤掉）；
   稍后重试，或先做无冲突部分。
 - 也可以让行：先做无冲突部分（静态检查、定向单测、读代码），并把「等窗口」写进任务记录。
@@ -89,6 +98,7 @@ collab_unlock { resource:"test-window", confirm:true }
 | 抢占需人工 | 工具不提供 force；不接受「强行抢过来」 |
 | 一次只持有一个独占资源 | 缩小持有面 |
 | 排队即等待，不轮询轰炸 | 回合制的 `collab_locks` 检查足够 |
+| 排队有心跳（默认 10min） | 过期排队者会被下一次 `collab_lock` 回收；`[stale]` 不代表资源被占用 |
 
 ## 场景样例
 

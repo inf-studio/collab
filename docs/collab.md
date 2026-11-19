@@ -308,6 +308,9 @@ opencode plugin add @inf-studio/collab@0.1.0
   "readonlyAgents": ["explore", "plan"],
   "archiveSpawned": true,
   "archiveGraceMs": 600000,
+  "waiterTtlMs": 600000,
+  "waiterHeartbeat": true,
+  "dedupeWindowMs": 60000,
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -315,6 +318,16 @@ opencode plugin add @inf-studio/collab@0.1.0
 `archiveSpawned`（默认 `true`）控制**自动归档** spawn 会话（§11.13）；`false` 只关自动路径，
 手动 `collab_archive` 仍然可用（回滚开关）。`archiveGraceMs` 是终态后的防抖窗口，默认
 **600000（10 分钟）**，夹在 `[60000, 3600000]`（1 分钟–1 小时）——写错成 `600` 或一周都会被夹回。
+
+`waiterTtlMs`（默认 **600000 = 10 分钟**，夹在 `[60000, 3600000]`）是**排队心跳**的存活窗口：排队者的
+`LockWaiter.at` 记录「最近一次心跳」，超过这个窗口没有心跳的排队者在下一次 `collab_lock`（写路径）里被
+回收——**读命令不回收**，只标 `[stale]`（§11.10.3 / §11.10.6）。没有「0 = 永不回收」：想要旧行为就设到上限
+60 分钟。`waiterHeartbeat`（默认 `true`）控制「会话自己的 `context` 钩子每轮刷新一次心跳」这一半；
+`false` 只关这一半，`collab_lock` 重复调用与其它写工具的轻量 touch 仍在（见 §11.10.6）。
+
+`dedupeWindowMs`（默认 **60000**，`0` 关闭）是**正文去重**窗口：同一 thread + 归一化后（空白折叠）完全一致的
+正文在窗口内重复提交时，`collab_send` / `collab_reply` 只投递第一次，第二次**不投递、不追加 thread 消息**，
+回执写明「60s 内已有同文，未重复投递」（§11.9.4）。
 
 `report.to`（别名或 `ses_…`）是**缺陷上报的主通道**：插件把上报当作 `note`（`queue`）投给该会话，
 空闲也会被唤醒；文件只作证据与兜底。`report.enabled:false` 关闭投递但仍落盘（回滚开关）。
@@ -626,6 +639,22 @@ delivery.cid 存在 && !seenAt && resends < 1
   （条件：`record.from.sid === 自己` 且存在未提示的 followUps）；不是「放开注入」，而是单独的
   一个函数产出、单独的返回分支，其它任何提醒都不进受保护线。
 
+#### 11.9.4 正文去重（0.6.0）
+
+记录层一直只对 `cid` / ack 幂等：同一 thread 在 15 秒内用同文调两次 `collab_send`，两次都会真的投递
+（实测）。0.6.0 起加一层**内容幂等**，只作用于 `collab_send` / `collab_reply`：
+
+| 项 | 规则 |
+| --- | --- |
+| 键 | `threadID + 归一化正文`（`\s+` → 单个空格、`trim`）——空白/换行不同视为同一句 |
+| 窗口 | `dedupeWindowMs`，默认 **60000（60s）**；`0` 关闭（回滚开关） |
+| 判据来源 | ① 交接记录的最近 3 条 `replies`（限界回执落在这里）；② thread 自己的消息列表（持久，插件重载后仍有效，只看尾部 20 条）；③ 进程内 memo（没有 thread 消息时兜底，重载即清空） |
+| 命中 | **不投递、不追加 thread 消息**，返回写明「未重复投递 … 60s 内已有同文（去重窗口）」并给出读回方式 |
+| 不适用 | 预览（`confirm:false`）本来就零写入；`collab_escalate` 用自己 5min 窗口，不叠加 |
+
+去重只发生在**同一 thread**：不带 `threadID` 的 `collab_send` 每次都是新 thread，因此不会被当成重复
+（想「再说一遍」就换 thread 或改措辞）。跨机器不去重（进程内 memo 与本地 thread 存储各管各的）。
+
 ### 11.10 资源租约（`collab_lock` / `collab_unlock` / `collab_locks`，0.2.0）
 
 **为什么需要**：同工作区的并行会话常抢**同一件东西**——pytest 窗口、同一个
@@ -658,6 +687,7 @@ free ──acquire──▶ held ──release──▶ free
 
 被占用时的申请：held ──request(wait:true)──▶ waiters[]（FIFO）
 waiters 不会被主动叫醒（避免打断）；按顺序在下次 collab_locks / collab_lock 时获知
+waiters[].at 是**心跳**（不是入队时间）：超过 waiterTtlMs 没心跳 → 下一次 acquire 回收
 ```
 
 #### 11.10.1 资源名规范化
@@ -684,11 +714,14 @@ waiters 不会被主动叫醒（避免打断）；按顺序在下次 collab_lock
 
 #### 11.10.3 排队（FIFO，不插队）
 
-- `wait:true` 且资源被占 → 入队并返回排位；重复 `wait` 只刷新 mode/reason，保留原 `at`（顺序不变）。
+- `wait:true` 且资源被占 → 入队并返回排位；重复 `wait` 只刷新 mode/reason 与**心跳**，保留队列位置（顺序不变）。
 - 持有者释放后资源变 `free`，**队列保留**；新人（没排过队）在 `wait:false` 时会被拒绝
   （「资源空闲，但有人在排队」），`wait:true` 则排到队尾。
 - 队首再次 `collab_lock` 即获得（出队）；不会有人主动叫醒你——这是刻意的：
   锁不得打断任何会话，也不得投递消息。
+- **`free` 但有 waiter ≠ 被占用**：`collab_locks` 里的 `free` + `waiters=…` 表示「没人持有，只是有人在
+  排队」，与 `held` 是两件事（见 §11.10.6 与「四个数」§11.11）。
+- 排队者不是租约：**它不持有任何东西**，也不会阻止持有者释放；队列只是「谁先到」的记录。
 
 #### 11.10.4 安全边界
 
@@ -723,7 +756,30 @@ collab_unlock { resource:"test-window", confirm:true }
 队首排位不变）。
 **损坏记录**：`expiresAt` 缺失或 ≤0 视为损坏，下次访问时回收并写 `history: { event:"expire", reason:"invalid" }`。
 
-### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2 / 0.5.3，experimental）
+#### 11.10.6 排队心跳、回收与 `[stale]`（0.6.0）
+
+**为什么**：`LockWaiter` 原来没有 TTL、也永不被唤醒，只有**本人**再次 acquire/release 时才出队。于是
+「排过一次队、然后再没回来」的会话会让一个**空闲**资源对所有人不可用（`资源空闲，但有人在排队`）——
+一晚实测误判 ≥3 次。
+
+| 规则 | 行为 |
+| --- | --- |
+| `at` = 心跳 | 不再是入队时间；每次心跳刷新为「现在」。旧记录（≤0.5.3）等同「很久没心跳」，会被回收 |
+| 心跳来源 ① | 同 sid 再次 `collab_lock`（含 `wait:true` 重排） |
+| 心跳来源 ② | 该会话的 `context` 钩子，**每轮一次**（`waiterHeartbeat:false` 关闭） |
+| 心跳来源 ③ | 该会话的 **`collab_lock` / `collab_send` / `collab_reply` / `collab_handoff` / `collab_broadcast`** 调用顺手 touch；`collab_accept` / `collab_request_owner` / `collab_followup` / `collab_grant` / `collab_promote` / `collab_report` / `collab_archive` **不**刷新（它们不代表「我还在等」） |
+| 节流 | 心跳写入 ≥30s 一次（`LOCK_WAITER_TOUCH_MS`）：长回合不会把同一个文件写成千上万次 |
+| 回收 | **只在 `acquire` 写路径**（`reapWaiters`）发生：`now - at > waiterTtlMs` 的排队者被删，写 `history: { event:"leave", reason:"stale" }`；回收后再做公平性判定 → 僵尸 waiter 不再挡路 |
+| 只读 | `collab_locks` / 侧栏快照**不回收、不写文件**，只显示年龄与 `[stale]` |
+
+`collab_locks` 的排队段现在带年龄：`waiters=ses_a#1:exclusive(12m),ses_b#2:exclusive(0s)[stale]`。
+`(12m)` 是距上次心跳的时长，`[stale]` 表示已超 `waiterTtlMs`（下一次 `collab_lock` 会回收它）；
+`free` 且存在 `[stale]` 排队者时，头部还会写「其中排队心跳过期 N 人」。**年龄大的排队者不占位**：
+它只是「还没被回收」，不是「资源被占用」。
+
+活的心跳（< TTL）仍按 FIFO 排队，不会被插队；只有 `waiterTtlMs` 设到上限 60min 才接近旧行为。
+
+### 11.11 状态视图：桌面侧栏 + TUI（0.3.0 / 0.4.2 / 0.5.1 / 0.5.2 / 0.5.3 / 0.6.0，experimental）
 
 > GUI 侧栏只在 **OpenCode Desktop** 的图形窗口里出现；**TUI 用 `/collab`（或 `collab_locks` /
 > `collab_list` 的文本视图）**。宿主 GUI API 标注 experimental，版本区间见 README「版本兼容」。
@@ -752,7 +808,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
   at: number,                              // 快照时间
   reachable: true,                         // server 真的回答了
   sessions: [{ sid, title, agent, busy, workspace, parent? }],
-  locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, reason? }],
+  locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, waiterAgeMs?, staleWaiters?, stale?, reason? }],
   handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title }],
   queue:    [{ queueId, target, ageMs, summary, issuePath?, bid?, seen }]   // 0.4.2：{ session } 限定
 }
@@ -760,6 +816,20 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 
 - `waiters` 是队列长度，`waiting` 是排队会话 id（FIFO 顺序）——只有长度无法判断「**我**是否在排队」，
   而 composer pill 需要这一点。
+- 0.6.0（R3）：`waiterAgeMs` 是每个排队者的**心跳年龄**（与 `waiting` 同序），`staleWaiters` / `stale`
+  标出超过等待 TTL 的那些。三个字段都是**可选**的：老 server 不返回、客户端不得假设存在；快照照旧
+  只读（年龄只用于显示，回收仍只发生在 `collab_lock`）。
+- **四个数**（0.6.0；GUI 会话头 / TUI 侧栏 / TUI 面板同一口径，实现见 `src/core/counts.ts`）：
+
+  | 数 | 含义 | 来源 |
+  | --- | --- | --- |
+  | 持有 | **有持有者**的资源数（`holders.length > 0`），排队者不算 | `countsOf().held` |
+  | 排队 | 所有资源的 FIFO 排队人数之和 | `countsOf().waiting` |
+  | 待受保护 | 本会话提交给受保护目标的 owner-queue 条数（面板旧称「队列」） | `countsOf().protected` |
+  | 宿主排队 | 宿主自己的 prompt 队列（`delivery:"queue"`） | `ctx.data.session.pending.list(sid)`（GUI：`server.data…`，首次 `pending.sync` 一次） |
+
+  旧会话头的 `锁 N` 是 `locks.length`（「值得显示的行数」）：`free` 但有一个僵尸排队者的资源会被算进去，
+  读起来像「N 个持有者」。现在「持有」只数持有人，「排队」单列；`free 但有 waiter` 也不再被当成被占用。
 - `queue` 是**调用方自己**提交给受保护会话的请求（`mineFor(session)`，与 `collab_list` 同一来源）；
   不传 `session` 就是空数组——绝不扫全表，也不会把别人的请求列出来。`revokedAt` 的条目不出现。
 - **不新造状态**：`locks` 由 `stateOf()` 渲染（过期的在视图里就是 `free`，不落盘、不回收）；
@@ -771,7 +841,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 位置 | 内容 |
 | --- | --- |
 | 命令 `collab.open`（0.5.1） | 命令面板与 **Settings → Shortcuts** 可见；默认键 `mod+shift+l`（与 TUI 的 `ctrl+shift+l` 同义），`/collab` 也可触发；`enabled` 跟随当前路由到的会话，仅在会话里可用；执行 = `ctx.layout.open("collab:main", session)`。**只有打开面板这一个动作** |
-| 会话头计数条（0.5.1，`session.header` 槽位） | `锁 N · 交接 M · 队列 K`（与面板**同一个 store / 同一次 2 s 轮询**），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。0.5.1 起这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空、`队列` 会是个结构性的假 0 |
+| 会话头计数条（0.5.1；0.6.0 起四个数） | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（与面板**同一个 store / 同一次 2 s 轮询**；口径见上文「四个数」），点一下开面板；无快照时**整条不渲染**（不显示 `0`），server 不可达时 `collab: n/a` 且仍可点（面板里有横幅与原因）。这次轮询带 `session: <路由会话>`，否则 `queue` 按契约恒为空；`宿主排队` 不经过 RPC，直接读宿主已同步的 `server.data.session.pending`（首次 `sync` 一次，失败静默 0） |
 | 标题栏 pill（0.5.2） | 常驻：无快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话** → `ctx.layout.open("collab:main", session)`；**没有会话** → `ctx.toast.show` 弹「Collab GUI 已加载」（`probe.description` 含插件版本 / `id` / 面板 key / app 版本、platform 与数据源 `server=`）。它同时是本插件在窗口里的**自证**：弹得出来 = GUI 加载了，弹不出来 = 这个窗口没加载。只读（`toast.show` + `layout.open`） |
 | 数据源（0.5.3） | 快照请求走**当前路由会话所属服务器**：`ctx.sessions.current()?.server?.client`，缺失（老宿主 / 无 `server`）时回退 `ctx.client`。远端会话 → 远端服务器的 `collab.state.snapshot`（`session` 参数仍是该远端会话 id）；本机会话 → 本机 sidecar。跨服务器/跨会话切换**立即**以新 client 重请求，上一台服务器的迟到回包**丢弃**（见 §11.11.5）；面板顶部在远端时显示 `@<server.id>`，本机不显示（避免噪音） |
 | 侧栏 `collab` 面板（`region:"side"`, `width:"narrow"`） | 按工作区分组：会话（title/agent/busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（bid/state/age）。租约本身是全局的，按「第一个是已列会话的持有者/排队者」归到对应工作区，否则落「全局」组 |
@@ -784,8 +854,8 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
 | 位置 | 内容 |
 | --- | --- |
 | `/collab`（`ctrl+shift+l`，也在命令面板里） | 打开 `session.panel` 里的 **`collab.status`** 面板；没有打开的会话时提示「先打开一个会话」 |
-| 面板 | 三块等宽表格：`资源租约`（resource / mode / holders / 剩余 TTL / waiters）、`未闭环交接`（bid / state / age / from）、`受保护目标队列`（queueId / target / age / status）。窄终端（<48 列）每个条目拆成两行 |
-| 侧栏摘要（0.5.1） | 一行 `▸ 锁 N · 交接 M · 队列 K`；**点击摘要行**就地展开（`▾`）最多 4 行明细（锁 → 交接 → 队列，超出的以 `+N` 结尾），**点击明细行**打开 `/collab` 面板，再点摘要行折叠。RPC 不可达时 `collab: n/a`（不假装 0），展开行读 `collab: n/a · 点击打开面板` |
+| 面板 | 首行时间戳 + **四个数**（`持有 · 排队 · 待受保护 · 宿主排队`）+ 一行图例（0.6.0）；三块等宽表格：`资源租约`（resource / mode / holders / 剩余 TTL / waiters）、`未闭环交接`（bid / state / age / from）、`受保护目标队列`（queueId / target / age / status）。窄终端（<48 列）每个条目拆成两行 |
+| 侧栏摘要（0.5.1；0.6.0 起四个数） | 一行 `▸ 锁 N · 排 M · 待 K · 宿 J`（紧凑写法的持有/排队/待受保护/宿主排队）；**点击摘要行**就地展开（`▾`）最多 4 行明细（锁 → 交接 → 队列，超出的以 `+N` 结尾），**点击明细行**打开 `/collab` 面板，再点摘要行折叠。RPC 不可达时 `collab: n/a`（不假装 0），展开行读 `collab: n/a · 点击打开面板` |
 | 刷新 | 面板打开时每 2 s 一次；**面板关闭或切到别的插件的面板就停**（定时器属于面板这次渲染）。侧栏只在挂载时 load 一次，**展开/折叠不新增轮询** |
 | 不可达 | 顶部「RPC 不可达：<原因>」；有上一份快照就继续显示并标注；一份都没有时退化为「宿主自己的会话列表 + 仅显示本地会话列表」，不白屏、不崩 |
 
@@ -861,7 +931,7 @@ TUI 的 `sidebar.content` 只是一行静态 `<text>`，没有点击/展开。0.
 | 面 | 补的东西 | 为什么在这个槽位 |
 | --- | --- | --- |
 | Desktop | `Command { id:"open", bind:"mod+shift+l", slash:{name:"collab"}, section:"navigation" }` | 宿主把命令发布成 `collab.open`，命令面板与 Settings → Shortcuts 都可见；`bind` 只是默认值，用户可改 |
-| Desktop | `Slot at "session.header"` → `锁 N · 交接 M · 队列 K` | 会话标题行本来就一直渲染，无需用户先打开任何面板；读的是面板**同一个** store |
+| Desktop | `Slot at "session.header"` → `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（0.6.0） | 会话标题行本来就一直渲染，无需用户先打开任何面板；读的是面板**同一个** store |
 | TUI | 摘要行 `onMouseDown` 展开/折叠 + 明细行 `onMouseDown` 开面板 | OpenTUI 的 renderable 支持鼠标事件，宿主负责把事件派发到命中的行 |
 
 两条降级路径（都不抛错）：
@@ -873,8 +943,9 @@ TUI 的 `sidebar.content` 只是一行静态 `<text>`，没有点击/展开。0.
    插件侧不做高度协商（那会越过槽位边界）。
 
 不变的部分：`Panel` 的 `list` / `autoOpen` 语义、`MenuItem.opened === 'open'` 的判定、`ComposerPill`
-的显示条件与 0.4.2 完全一致；快照契约（§11.11 开头）**没有新增字段**，也没有新增轮询——计数条与展开行
-都从已有 store / 已有快照派生。
+的显示条件与 0.4.2 完全一致；没有新增轮询——计数条与展开行都从已有 store / 已有快照派生。
+0.6.0 只给快照**追加了可选字段**（`waiterAgeMs` / `staleWaiters` / `stale`，见上文）与四个数的口径，
+既有字段语义不变；`宿主排队` 读宿主已同步的数据，仍不是第二条 RPC 流。
 
 
 #### 11.11.4 Desktop 排查（0.5.2 / 0.5.3）：插件行没有 GUI 开关 / 界面里没有 collab

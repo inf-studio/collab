@@ -7,9 +7,10 @@
  * from the terminal. Two surfaces, both contributions to the host's slot tree:
  *
  *   - `session.panel` → the `collab.status` panel (`/collab`, `ctrl+shift+l`);
- *   - `sidebar.content` → one summary line, `锁 N · 交接 M · 队列 K`, that
- *     0.5.1 made *clickable*: a click expands up to four detail rows, a click on
- *     a row opens the panel, a click on the summary line collapses it again.
+ *   - `sidebar.content` → one summary line — 0.6.0: the four numbers
+ *     `锁 N · 排 M · 待 K · 宿 J` (held / waiting / for-protected / host queue) —
+ *     that 0.5.1 made *clickable*: a click expands up to four detail rows, a
+ *     click on a row opens the panel, a click on the summary line collapses it.
  *
  * Deliberate choices:
  *   - **No state of its own**: every number comes from `collab.state.snapshot`
@@ -40,6 +41,7 @@ import { Plugin, usePlugin } from '@opencode/plugin/tui';
 import type { Context, PanelInput } from '@opencode/plugin/tui/context';
 import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from './rpc.ts';
+import { countsOf, pendingCountOf } from './core/counts.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
 const POLL_MS = 2000;
@@ -367,8 +369,18 @@ function queueLines(queue: SnapshotQueueItem[], width: number): Line[] {
  * The whole panel as lines. Reading `panel.name` here (and in the caller's memo)
  * keeps it reactive: switching to another plugin's panel empties the list, and
  * the effect that owns the poll is cleaned up in the same pass.
+ *
+ * 0.6.0 (R4): the second line is the four-number summary
+ * (`持有 · 排队 · 待受保护 · 宿主排队`) plus a one-line legend — the same
+ * vocabulary as the GUI header and the sidebar, so `锁 N` can no longer be read
+ * as "N holders" (it used to be `locks.length`, i.e. rows worth showing).
  */
-function panelLines(state: TuiState, panel: PanelInput, sessions: FallbackSession[]): Line[] {
+function panelLines(
+  state: TuiState,
+  panel: PanelInput,
+  sessions: FallbackSession[],
+  hostPending: number
+): Line[] {
   if (panel.name !== PANEL) return [];
   const width = Math.max(24, Number(panel.width) || FALLBACK_WIDTH);
   const data = state.data;
@@ -377,6 +389,14 @@ function panelLines(state: TuiState, panel: PanelInput, sessions: FallbackSessio
   const pending = (label: string) => `  ${data ? label : state.loading ? '加载中…' : '（不可达）'}`;
 
   push(`Collab · ${shortSid(panel.sessionID)} · ${fmtClock(state.at)}`);
+  if (data) {
+    const counts = countsOf(data);
+    push(
+      `持有 ${counts.held} · 排队 ${counts.waiting} · 待受保护 ${counts.protected} · 宿主排队 ${hostPending}`,
+      counts.held || counts.waiting ? 'base' : 'muted'
+    );
+    push('图例: 持有=真实持有者 · 排队=FIFO 等候 · 待受保护=我交给受保护会话的请求 · 宿主排队=宿主 prompt 队列', 'muted');
+  }
   if (state.error) {
     push(`RPC 不可达：${state.error}`, 'danger');
     push(data ? '（显示上一份快照）' : '（仅显示本地会话列表）', 'muted');
@@ -425,7 +445,14 @@ function StatusPanel(props: { panel: PanelInput }) {
     onCleanup(() => clearInterval(timer));
   });
 
-  const lines = createMemo(() => panelLines(store.state, props.panel, fallbackSessions(ctx)));
+  const lines = createMemo(() =>
+    panelLines(
+      store.state,
+      props.panel,
+      fallbackSessions(ctx),
+      pendingCountOf(ctx.data?.session?.pending, props.panel.sessionID)
+    )
+  );
 
   return (
     <box flexDirection="column">
@@ -477,10 +504,10 @@ function sidebarRows(data: Snapshot, me: string): SidebarRow[] {
 }
 
 /**
- * R5 (0.4.2) / R3 (0.5.1): the sidebar summary. Collapsed it is exactly the one
- * line it always was — `锁 N · 交接 M · 队列 K` with a `▸`/`▾` caret; a click on
- * that line expands up to `DETAIL_LIMIT` detail rows (plus `+N`), a click on a
- * detail row opens the full `/collab` panel.
+ * R5 (0.4.2) / R3 (0.5.1) / R4 (0.6.0): the sidebar summary. Collapsed it is one
+ * line — the four compact numbers `锁 N · 排 M · 待 K · 宿 J` — with a `▸`/`▾`
+ * caret; a click on that line expands up to `DETAIL_LIMIT` detail rows (plus
+ * `+N`), a click on a detail row opens the full `/collab` panel.
  *
  * Deliberate choices:
  *   - **No extra polling**: the mount effect is the same one load it always had;
@@ -513,7 +540,12 @@ function SidebarSummary(props: { sessionID: string }) {
   const line = () => {
     const data = store.state.data;
     if (!data) return store.state.loading ? 'collab: …' : 'collab: n/a';
-    return `锁 ${data.locks.length} · 交接 ${data.handoffs.length} · 队列 ${data.queue.length}`;
+    // 0.6.0 (R4): the four numbers, compact — 持有 / 排队 / 待受保护 / 宿主排队.
+    // `锁 N` used to be `data.locks.length` (rows worth showing, a queued waiter
+    // behind a free resource included), which read as "N holders".
+    const counts = countsOf(data);
+    const host = pendingCountOf(ctx.data?.session?.pending, props.sessionID);
+    return `锁 ${counts.held} · 排 ${counts.waiting} · 待 ${counts.protected} · 宿 ${host}`;
   };
 
   const details = (): SidebarRow[] => {

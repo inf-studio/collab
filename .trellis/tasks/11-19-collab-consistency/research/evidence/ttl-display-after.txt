@@ -1,0 +1,25 @@
+[collab] rpc skipped: host has no ctx.rpc
+[collab] setup ok: version=0.5.3 directory=/tmp/probe-ttl-Rf5cVt tools=17 aliases=0 protect=2 autoDeliver=true maxInject=3 readonly=explore,plan allowWrite=true
+[collab] archiveSpawned=true archiveGraceMs=600000
+[collab] waiterTtlMs=3600000 waiterHeartbeat=true dedupeWindowMs=60000
+[collab] reportDir=/tmp/probe-ttl-Rf5cVt/rp report.to=(unset: 只落盘，不投递) pendingReports=0
+--- preview (config ttl 60m, waiter 20m old):
+未加锁（confirm 不为 true，仅预览）。确认后在同样参数下传 confirm:true。
+资源: named:ttl-60m  kind=named
+当前: exclusive 持有者=ses_h 剩余=1h00m（ttl=1h00m）
+  holders=ses_h  waiters=ses_w20#1:exclusive(20m)  ttl=1h00m
+将要申请: mode=exclusive  ttl=15m（默认）  wait=true
+记录: /tmp/probe-ttl-Rf5cVt/locks/c717baf41b889a74__ttl-60m.json
+资源被占用 → 未传 wait:true 时只会返回「持有者 + 剩余 TTL」；传 wait:true 则进入排队。
+--- confirm result:
+已进入排队: named:ttl-60m  排第 2 位
+资源: named:ttl-60m  kind=named
+当前: exclusive 持有者=ses_h 剩余=1h00m（ttl=1h00m）
+  holders=ses_h  waiters=ses_w20#1:exclusive(20m),ses_new#2:exclusive(0s)  ttl=1h00m
+不会有人主动叫醒你：当前持有者释放或租约到期后，再次 collab_lock 即按 FIFO 获得（前面的人先得）。
+查看: collab_locks { resource:"named:ttl-60m" }
+--- collab_locks:
+资源租约 1 个（持有=1 排队=2 free=0）:
+- named:ttl-60m  held  mode=exclusive  holders=ses_h  剩余=1h00m  ttl=1h00m  waiters=ses_w20#1:exclusive(20m),ses_new#2:exclusive(0s)  ← 我排第 2
+读命令：不改状态、不回收、不叫醒排队者；过期租约 / 过期排队心跳在下一次 collab_lock 时回收。
+释放: collab_unlock { resource:"<资源名>", confirm:true }

@@ -27,7 +27,10 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       'One exception: a bounded receipt — kind=reply naming (in `bid` or the body) a hand-off that the ' +
       'protected target itself broadcast and the caller claimed — is queued through as the hand-off receipt. ' +
       'A legacy receipt written the ≤0.1.1 way (no `kind`, body `[handoff] DONE|BLOCKED <bid> …`) is ' +
-      'recognised by that body and delivered as kind=reply.',
+      'recognised by that body and delivered as kind=reply. ' +
+      'Content de-duplication: the same thread + the same body (whitespace folded) within ' +
+      '`dedupeWindowMs` (default 60s, 0 disables) is one message — the repeat is not delivered and the ' +
+      'result says so.',
     input: jsonInput({
       properties: {
         target: { type: 'string', description: 'Session id (`ses_…`) or an alias from collab.json.' },

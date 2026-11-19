@@ -3,6 +3,65 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-11-19
+
+> 一件事：**把「排队」从不可回收的状态变成有生命周期的状态，并把三个面（GUI 会话头 / TUI 侧栏 /
+> TUI 面板）的数字口径统一成四个**。外加一层正文去重。仍然**不新增工具**（17 个不变）、不新增依赖、
+> 不改任何既有快照字段语义（只追加可选字段）、读命令保持零写入。
+
+### Fixed
+
+- **R1 僵尸 waiter 死锁（`src/core/locks.ts`）**：`LockWaiter` 原来没有 TTL、也永不被唤醒，只有**本人**
+  再次 acquire/release 才出队。于是「排过一次队再没回来」的会话让一个 **free** 资源对所有人不可用
+  （`未获得资源租约: …（资源空闲，但有人在排队）`，实测一晚误判 ≥3 次）。现在：
+  `LockWaiter.at` 语义升级为**心跳**；新增 `reapWaiters(record, now, ttl)`，在 `acquire()` 做公平性判定
+  **之前**回收心跳过期者（写 `history: { event:"leave", reason:"stale" }`），恢复后没有排队者就直接授予。
+  `waiterTtlMs` 默认 **600000（10min）**，夹在 `[60000, 3600000]`（`src/constants.ts` + `src/config.ts`）。
+- **R2 心跳来源（三条 + 节流）**：`touchWaiters(sid, now)` 带 **30s** 写入节流（内存 + 持久 `at` 双判据，
+  重载后不会刷盘）；调用点是 ① 同 sid 再次 `collab_lock`；② 该会话的 `context` 钩子（每轮一次，
+  `waiterHeartbeat:false` 可关，`src/index.ts`）；③ 写类 `collab_*` 调用（`dispatch` / `deliverAsk`，
+  `src/tools/shared.ts`）。读命令（`collab_locks` / `collab_list` / 快照）**不 touch**。
+- **R3 只读可见性**：`stateOf()` 追加派生字段 `waiterAgeMs[]` / `staleWaiters[]` / `stale`；
+  `collab_locks` 打印 `sid#pos:mode(age)`，超 TTL 标 `[stale]`，`free` 时有过期排队者还会在头部写明
+  「排队心跳过期 N 人」。读命令**不回收、不写文件**（测试断言调用前后 mtime 不变）。
+- **R4 四数口径（新 `src/core/counts.ts`）**：`持有 · 排队 · 待受保护 · 宿主排队`
+  （`countsOf()` + `pendingCountOf()`）。`持有` = `holders.length > 0` 的资源数——旧的 `锁 N` 是
+  `locks.length`（值得显示的行数），`free` 但有一个僵尸排队者的资源会被算进去，读起来像「N 个持有者」。
+  - GUI 会话头：`持有 {{held}} · 排队 {{waiting}} · 待受保护 {{protected}} · 宿主排队 {{host}}`；
+    宿主排队读 `ctx.sessions.current()?.server?.data.session.pending`（首次 `sync` 一次，失败静默 0，
+    不新增 RPC / 轮询）。
+  - TUI 侧栏：`锁 N · 排 M · 待 K · 宿 J`；TUI 面板首行加四个数 + 一行图例。
+- **R5 正文去重（`src/tools/shared.ts`）**：记录层一直只对 `cid`/ack 幂等，同一 thread 15s 内同文两次
+  都会真投递。现在 `collab_send` / `collab_reply` 按 `threadID + 归一化正文`（`\s+`→空格、trim）检查：
+  ① 记录最近 3 条 `replies`；② thread 自身消息（持久，尾部 20 条）；③ 进程内 memo。命中则**不投递、
+  不追加 thread 消息**，回执写明「未重复投递 … 60s 内已有同文（去重窗口）」。`dedupeWindowMs` 默认
+  **60000**，**`0` 关闭**（回滚开关）。
+- **快照（`src/core/snapshot.ts` / `src/rpc.ts`）**：`SnapshotLock` 追加**可选** `waiterAgeMs` /
+  `staleWaiters` / `stale`（schema 里均不在 `required`），老 server 的回包仍然有效。
+- **启动日志**：`waiterTtlMs / waiterHeartbeat / dedupeWindowMs` 与既有 `archiveSpawned` 一并打印。
+
+### Changed
+
+- `collab_lock` 工具描述补充「排队心跳 / 回收」；`collab_locks` 描述补充「年龄 / `[stale]` / 只读」；
+  `collab_send` / `collab_reply` 描述补充去重窗口与 `0` 开关。
+- 文档：`docs/collab.md` §11.4（三个新配置）、§11.9.4（正文去重）、§11.10.3 + 新增 §11.10.6（心跳/回收/
+  `[stale]`）、§11.11（四个数与契约的可选字段）、§11.11.3；`README.md` 配置表 + 视图章节；
+  `skills/collab`（计数口径 + 去重）、`skills/collab-coordination`（心跳 / `[stale]` / 死锁表）。
+
+### Tests
+
+- `test/handoff-harness.mjs`：新增 **S95**（19 条）——free + 3 过期 waiter → 直接授予并清空；
+  free + 1 活 waiter → 不插队；`collab_locks` 的 age / `[stale]` / mtime 不变；三条心跳来源（各自独立 sid）
+  + 30s 节流；读命令不是心跳；同文 1 次 / 异文 2 次 / `dedupeWindowMs:0` 2 次（含 `collab_reply`）。
+  既有 S87 的排队显示断言改为带年龄（契约变更，非回归）。
+- `test/snapshot-shape.mjs`：`waiterAgeMs` / `staleWaiters` / `stale` 的可选字段 + `countsOf` /
+  `pendingCountOf` 单测（含空快照、无 API、抛错宿主）。
+- `test/tui-render.mjs`（29 → 32 条）：四数侧栏与面板（构造 1 持有 + 3 排队 + 2 待受保护 + 1 宿主排队）
+  + 图例；`test/gui-panel.mjs`（5 → 7 条）：会话头四数 + `pending.sync` 只调一次；
+  `test/gui-entry.mjs`：`header.counts` 改为四个占位符。
+- 变异验证（各还原）：删 `reapWaiters` → 4 条失败；删去重 → 4 条失败；`held = locks.length` →
+  GUI / TUI / `countsOf` 三处失败。
+
 ## [0.5.3] - 2026-11-19
 
 > 一件事：**GUI 的数据源从「本机 sidecar」改成「当前会话所属服务器」**。桌面端 2.3.x 的 GUI 宿主只跟踪

@@ -5,7 +5,8 @@ import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
 import { allBroadcasts } from './core/claim.ts';
 import { archiveSession, shouldArchive } from './core/archive.ts';
-import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason } from './core/locks.ts';
+import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason, touchWaiters } from './core/locks.ts';
+import { countsOf, pendingCountOf } from './core/counts.ts';
 import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { CollabState } from './rpc.ts';
@@ -140,7 +141,27 @@ const plugin: Plugin.Plugin = {
     })();
 
     // 3) Injection hook (unread inbox + open hand-offs, once per session).
-    const hookRegistration = await ctx.session.hook('context', createContextHook(kit.deps));
+    //
+    // 0.6.0 (R2): the same hook is the session's **waiter heartbeat** — one
+    // refresh per model request, so a queued session that is working through a
+    // long turn is never mistaken for a zombie waiter and reaped. `waiterTtlMs`
+    // (default 10min) is far longer than a heartbeat interval; the write itself
+    // is throttled to `LOCK_WAITER_TOUCH_MS` (30s) inside `touchWaiters`, and a
+    // session that is not queued costs one directory scan and zero writes.
+    // `waiterHeartbeat:false` turns this half off (the tool-call half stays).
+    const contextHook = createContextHook(kit.deps);
+    const hookRegistration = await ctx.session.hook('context', async event => {
+      const config = readConfig();
+      if (config.waiterHeartbeat !== false && event?.sessionID) {
+        try {
+          await touchWaiters(event.sessionID);
+        } catch (error) {
+          // A heartbeat is bookkeeping: it must never fail a model request.
+          log('waiter heartbeat failed:', (error as Error)?.message ?? error);
+        }
+      }
+      return contextHook(event);
+    });
 
     // 4) Read-only RPC for the desktop sidebar (C2, 0.3.0). Optional: an older
     // host without `ctx.rpc` keeps the tools and loses only the panel. The
@@ -178,6 +199,12 @@ const plugin: Plugin.Plugin = {
     log(
       `archiveSpawned=${initial.archiveSpawned} archiveGraceMs=${initial.archiveGraceMs}` +
         `${initial.archiveSpawned ? '' : ' (自动归档已关闭，手动 collab_archive 仍可用)'}`
+    );
+    // 0.6.0: the two consistency knobs, so an operator sees the effective values
+    // (and whether the heartbeat half is off) without reading the config file.
+    log(
+      `waiterTtlMs=${initial.waiterTtlMs} waiterHeartbeat=${initial.waiterHeartbeat} ` +
+        `dedupeWindowMs=${initial.dedupeWindowMs}${initial.dedupeWindowMs ? '' : ' (正文去重已关闭)'}`
     );
     // R8④: the report entry point is visible without reading any docs — one
     // line in the plugin's own setup log (stderr), next to the other diagnostics.
@@ -236,6 +263,9 @@ export const __internals = {
   // with injected readers (no host, no `~/.config` directory).
   CollabState,
   buildSnapshot,
+  // The four-number vocabulary (0.6.0, R4) — pure, shared by GUI / TUI / tests.
+  countsOf,
+  pendingCountOf,
   // Spawned-session archive (0.5.0) — the eight-rule gate and the one writer,
   // unit-testable with an injected gate (no host).
   shouldArchive,

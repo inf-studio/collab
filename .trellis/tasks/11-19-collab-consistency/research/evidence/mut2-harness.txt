@@ -1,0 +1,6 @@
+# mutation run: mut2-harness.log (only failures + summary kept)
+  ✗ S95 the same thread + the same body (whitespace folded) within 60s is delivered once — 2 deliveries / 已投递 → ses_bbb  agent=explore  state=busy  title="B"
+  ✗ S95 … and the duplicate is not appended to the thread either — 1 → 2
+  ✗ S95 a different body on the same thread is still delivered — 3 deliveries / 已投递 → ses_bbb  agent=explore  state=busy  title="B"
+  ✗ S95 collab_reply is de-duplicated the same way (one delivery) — 2 deliveries / 已投递 → ses_aaa  agent=build  state=busy  title="A"
+=== 653/657 checks passed

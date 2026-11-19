@@ -1,0 +1,4 @@
+# mutation run: mut3-tui.log (only failures + summary kept)
+  ✗ R4 the TUI sidebar reads 锁 1 · 排 3 · 待 2 · 宿 1 (held ≠ rows; the stale waiter holds nothing) — ▸ 锁 2 · 排 3 · 待 2 · 宿 1
+  ✗ R4 the TUI panel prints the same four numbers in the long form — Collab · ses_probe · 16:00:00 | 持有 2 · 排队 3 · 待受保护 2 · 宿主排队 1 | 图例: 持有=真实持有者 · 排队=FIFO 等候 · 待受保护=我交给受保护会话的请求 · 宿主排队=宿主 prompt 队列
+=== 30/32 checks passed

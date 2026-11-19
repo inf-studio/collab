@@ -324,9 +324,10 @@ for (const locale of ['en', 'zh']) {
   expect(`R1/R2 ${locale} defines every entry-point key`, missing.length === 0, missing.join(', ') || keys.join(', '));
 }
 expect(
-  'R2 header.counts carries three placeholders and interpolates them',
-  zh.context.t('header.counts', { locks: 2, handoffs: 1, queue: 0 }) === '锁 2 · 交接 1 · 队列 0',
-  zh.context.t('header.counts', { locks: 2, handoffs: 1, queue: 0 })
+  'R2 header.counts carries the four placeholders (0.6.0: 持有/排队/待受保护/宿主排队) and interpolates them',
+  zh.context.t('header.counts', { held: 1, waiting: 3, protected: 2, host: 1 }) ===
+    '持有 1 · 排队 3 · 待受保护 2 · 宿主排队 1',
+  zh.context.t('header.counts', { held: 1, waiting: 3, protected: 2, host: 1 })
 );
 expect(
   'R2 an unreachable server reads collab: n/a (not 0 · 0 · 0)',

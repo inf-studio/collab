@@ -1,0 +1,6 @@
+# mutation run: mut1-harness.log (only failures + summary kept)
+  ✗ S95 free + 3 expired waiters → the new applicant is granted directly — 未获得资源租约: named:stale-queue（资源空闲，但有人在排队）
+  ✗ S95 … and all three heartbeat-less waiters are gone (history: leave/stale) — []
+  ✗ S95 collab_locks shows the live waiter age and does not mark it stale — - named:live-queue  free  mode=exclusive  holders=-  剩余=-  ttl=-  waiters=ses_s95w#1:exclusive(0s)  ← 我排第 1
+  ✗ S95 … says how many waiters are stale in the header — 资源租约 17 个（持有=2 排队=56 free=15，其中排队心跳过期 4 人）:
+=== 653/657 checks passed

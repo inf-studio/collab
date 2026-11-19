@@ -59,21 +59,35 @@ TUI 走宿主给它的 `ctx.client`。
 
 | 客户端 | 入口 | 说明 |
 | --- | --- | --- |
-| **Desktop**（图形窗口） | ① 命令面板里的 **`collab.open`**「打开协作面板」（默认键 `mod+shift+l`，`/collab`）；② 会话头部**常驻计数条** `锁 N · 交接 M · 队列 K`（点一下开面板）；③ 标题栏 **`collab` pill**（常驻；有会话点开面板，无会话弹「已加载」toast）；④ 侧栏 `collab` 标签 / 侧栏 **+** 菜单 | `./gui-experimental` 的 GUI 部件。`options.autoOpen:false` 可关掉侧栏标签自启（命令、计数条、pill 与 **+** 菜单仍在） |
-| **TUI**（终端） | `/collab`（快捷键 `ctrl+shift+l`，也在命令面板里）；侧栏摘要行**点击**展开 | `./tui` 部件。打开 `session.panel` 里的 `collab.status` 面板；侧栏一行 `锁 N · 交接 M · 队列 K`，点 `▸`/`▾` 行展开最多 4 行明细，点明细行开面板 |
+| **Desktop**（图形窗口） | ① 命令面板里的 **`collab.open`**「打开协作面板」（默认键 `mod+shift+l`，`/collab`）；② 会话头部**常驻计数条** `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（点一下开面板；口径见下）；③ 标题栏 **`collab` pill**（常驻；有会话点开面板，无会话弹「已加载」toast）；④ 侧栏 `collab` 标签 / 侧栏 **+** 菜单 | `./gui-experimental` 的 GUI 部件。`options.autoOpen:false` 可关掉侧栏标签自启（命令、计数条、pill 与 **+** 菜单仍在） |
+| **TUI**（终端） | `/collab`（快捷键 `ctrl+shift+l`，也在命令面板里）；侧栏摘要行**点击**展开 | `./tui` 部件。打开 `session.panel` 里的 `collab.status` 面板；侧栏一行 `锁 N · 排 M · 待 K · 宿 J`，点 `▸`/`▾` 行展开最多 4 行明细，点明细行开面板 |
 | Web / 其它客户端 | 没有视图 | 用 `collab_locks` / `collab_list` 的文本视图 |
 
 | 位置 | 内容 |
 | --- | --- |
 | GUI 侧栏 `collab` 面板 | 按工作区分组：会话（title / agent / busy）、持有租约（模式 + 剩余 TTL）、FIFO 排队、未闭环交接（`bid` / state / age） |
 | GUI composer pill | 当前会话「锁 N · 等待 M」；`success` = 只持有，`warning` = 排第 1 位，`danger` = 排在别人后面 |
-| GUI 会话头计数条 | `锁 N · 交接 M · 队列 K`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点 |
+| GUI 会话头计数条 | `持有 N · 排队 M · 待受保护 K · 宿主排队 J`（muted，不撑高标题行），点一下开面板；**没有快照时不占位**（不显示 `0 · 0 · 0`），server 不可达时 `collab: n/a` 且仍可点。四个数的口径见下方「四个数」 |
 | GUI 标题栏 pill（0.5.2） | 常驻一行：没有快照时就是 `collab`（**不显示 `0`**），有快照时 `collab N`（N = 租约 + 未闭环交接 + 本会话队列）。**有路由会话**→ 点开面板；**没有会话**→ 弹「Collab GUI 已加载」toast（带插件版本、面板 key、app 版本、platform 与数据源 `server=`）——这是「窗口到底加载了 GUI 没有」的自证 |
 | GUI 数据源（0.5.3） | **跟随会话所属服务器**：请求走 `ctx.sessions.current()?.server?.client`（远端会话 → 远端 server；没有 `server` 字段 → 回退 `ctx.client`）。跨服务器切换立即用新 server 的 client 重请求，上一台服务器的迟到回包**丢弃**；面板顶部在远端时显示 `@<server.id>`（本机不显示） |
-| TUI `collab.status` 面板 | 三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
-| TUI 侧栏摘要 | 一行 `锁 N · 交接 M · 队列 K`（`▸` 折叠 / `▾` 展开）；RPC 不可达时 `collab: n/a`。展开最多 4 行明细（锁 → 交接 → 队列）+ `+N`，明细行点击开面板 |
+| TUI `collab.status` 面板 | 首行四个数 + 一行图例（0.6.0），再是三块等宽表格：资源租约（resource / mode / holders / 剩余 TTL / waiters）、未闭环交接（bid / state / age / from）、受保护目标队列（queueId / target / age / status）。窄终端每项拆两行 |
+| TUI 侧栏摘要 | 一行 `锁 N · 排 M · 待 K · 宿 J`（持有 / 排队 / 待受保护 / 宿主排队；`▸` 折叠 / `▾` 展开）；RPC 不可达时 `collab: n/a`。展开最多 4 行明细（锁 → 交接 → 队列）+ `+N`，明细行点击开面板 |
 | 刷新 | GUI：有会话挂载时每 2 s 一次（面板、pill、计数条共用**同一个**轮询与 store）。TUI：面板打开时每 2 s 一次，**关闭即停**；侧栏展开/折叠只渲染已有快照，**不新增轮询** |
 | 不可达 | GUI / TUI 都显示「不可达：<原因>」并保留上一份快照；TUI 一份快照都没有时退化为「宿主会话列表 + 仅显示本地会话」——不白屏也不崩 |
+
+**四个数**（0.6.0，GUI 会话头 / TUI 侧栏 / TUI 面板同一口径，`src/core/counts.ts`）：
+
+| 数 | 含义 |
+| --- | --- |
+| 持有 | **有持有者**的资源数（`holders.length > 0`）；排队者不算，`free` 但有排队者的记录也不进这个数 |
+| 排队 | 所有资源的 FIFO 排队人数之和（可能全是 `[stale]` 心跳过期者——它们不占位，下一次 `collab_lock` 回收） |
+| 待受保护 | 本会话提交给受保护目标的请求条数（owner-queue；面板旧称「队列」） |
+| 宿主排队 | 宿主自己的 prompt 队列（`delivery:"queue"`），来自宿主已同步数据，不是第二条 RPC |
+
+`free` + `waiters=…` **不是被占用**：那只表示「没人持有、只是有人在排队」。排队者的 `at` 是**心跳**
+（默认 10 分钟，`waiterTtlMs`）：心跳过期者在下一次 `collab_lock` 被回收，`collab_locks` 只显示
+`sid#pos:mode(age)` 与 `[stale]`（读命令从不写文件）。`collab_send` / `collab_reply` 另外有正文去重：
+同 thread + 归一化后同文在 `dedupeWindowMs`（默认 60s，`0` 关闭）内只投递一次。
 
 - **只读**：两个面板都没有加锁/释放按钮。取锁、排队、释放仍然只有 `collab_lock` / `collab_unlock`
   两个工具（以及 skill 里的规程）——状态面板点错不该改变别的会话能做什么。0.5.1 的命令与计数条、
@@ -190,6 +204,9 @@ opencode plugin remove @inf-studio/collab     # 包安装
   "readonlyAgents": ["explore", "plan"],
   "archiveSpawned": true,
   "archiveGraceMs": 600000,
+  "waiterTtlMs": 600000,
+  "waiterHeartbeat": true,
+  "dedupeWindowMs": 60000,
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -203,6 +220,9 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `maxInject`      | `3`                | 每次请求最多注入几条未读（1–10）                                                                   |
 | `archiveSpawned` | `true`             | 交接终态后自动归档 spawn 会话（**不是删除**，可 `collab_archive {restore:true}`）；`false` 只关自动路径 |
 | `archiveGraceMs` | `600000`           | 终态后的防抖窗口（1 分钟–1 小时），夹取                                                           |
+| `waiterTtlMs`    | `600000`           | 排队**心跳**存活窗口（1 分钟–1 小时）：超过未心跳的排队者在下一次 `collab_lock` 被回收；`collab_locks` 只标 `[stale]` 不写文件 |
+| `waiterHeartbeat`| `true`             | `false` 只关「会话 `context` 每轮刷新排队心跳」这一半；`collab_lock` / 写工具的 touch 仍在 |
+| `dedupeWindowMs` | `60000`            | 正文去重窗口：同 thread + 归一化后同文在窗口内只投递一次；**`0` 关闭**（回滚开关） |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |

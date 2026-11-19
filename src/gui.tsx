@@ -54,6 +54,7 @@ import {
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotSession } from './rpc.ts';
+import { countsOf, pendingCountOf } from './core/counts.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
 const POLL_MS = 2000;
@@ -463,9 +464,45 @@ function PanelView(props: { session: { id: string } }) {
 /* ---------------------------------------------------------------- header counts */
 
 /**
+ * 0.6.0 (R4): 宿主排队 — the app's own pending prompt queue for this session
+ * (`delivery:"queue"`). It is **not** part of `collab.state.snapshot` (it belongs
+ * to the host, not to this plugin) and it is not a second poll: it is read from
+ * the server data the window has already synced (`MountedSession.server.data`),
+ * so the header can print all four numbers from one store.
+ *
+ * `pending.sync` is asked for once per session (fire-and-forget, failures
+ * silent) so the number reflects the host rather than whichever screen last
+ * touched it. A host without the API — or a session that carries no `server`
+ * (an older window, the test host) — simply reports `0`.
+ */
+const pendingSynced = new Set<string>();
+
+function hostPending(session: MountedSession | undefined): number {
+  const pending = session?.server?.data?.session?.pending;
+  if (!session || !pending) return 0;
+  const key = session.key ?? session.id;
+  if (!pendingSynced.has(key)) {
+    pendingSynced.add(key);
+    try {
+      // Never awaited and never surfaced: a status line must not fail a render.
+      void Promise.resolve(pending.sync(session.id)).catch(() => {});
+    } catch {
+      /* host without sync(): keep the synced snapshot */
+    }
+  }
+  return pendingCountOf(pending, session.id);
+}
+
+/**
  * R2 (0.5.1): the always-visible entry point. One muted line in the session
- * header carries the same three numbers as the panel, read from the same
+ * header carries the same numbers as the panel, read from the same
  * `sharedStore` — no second RPC stream, no second timer.
+ *
+ * 0.6.0 (R4): the line is `持有 N · 排队 M · 待受保护 K · 宿主排队 J`, computed by
+ * `countsOf` + `hostPending` — one vocabulary with the TUI sidebar. It used to
+ * read `锁 N` from `data.locks.length`, which counts *rows worth showing*
+ * (including a free resource that only has a queued waiter) and read like
+ * "N holders". `held` is now literally `holders.length > 0`.
  *
  * It renders **nothing** while there is no snapshot and no error: a `0 · 0 · 0`
  * row would claim "no collaboration activity" when the real answer is "not
@@ -480,10 +517,12 @@ function HeaderCounts(props: { session: MountedSession }) {
     if (store.state.error) return ctx.t('header.unreachable');
     const data = store.state.data;
     if (!data) return undefined;
+    const counts = countsOf(data);
     return ctx.t('header.counts', {
-      locks: String(data.locks.length),
-      handoffs: String(data.handoffs.length),
-      queue: String(data.queue?.length ?? 0)
+      held: String(counts.held),
+      waiting: String(counts.waiting),
+      protected: String(counts.protected),
+      host: String(hostPending(ctx.sessions.current()))
     });
   };
 
@@ -531,7 +570,7 @@ export default Plugin.define({
       'command.open': 'Open collab panel',
       'command.description': 'Read-only: leases, open hand-offs, and the owner queue',
       'command.group': 'Collab',
-      'header.counts': '{{locks}} locks · {{handoffs}} hand-offs · {{queue}} queue',
+      'header.counts': '{{held}} held · {{waiting}} waiting · {{protected}} for protected · {{host}} host queue',
       'header.title': 'Collab status — open the panel',
       'header.unreachable': 'collab: n/a',
       'titlebar.title': 'Collab status — open the panel',
@@ -564,7 +603,7 @@ export default Plugin.define({
       'command.open': '打开协作面板',
       'command.description': '只读：资源租约 / 未闭环交接 / 受保护目标队列',
       'command.group': 'Collab',
-      'header.counts': '锁 {{locks}} · 交接 {{handoffs}} · 队列 {{queue}}',
+      'header.counts': '持有 {{held}} · 排队 {{waiting}} · 待受保护 {{protected}} · 宿主排队 {{host}}',
       'header.title': '协作状态 — 打开面板',
       'header.unreachable': 'collab: n/a',
       'titlebar.title': '协作状态 — 打开面板',

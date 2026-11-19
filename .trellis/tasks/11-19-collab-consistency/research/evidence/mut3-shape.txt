@@ -1,0 +1,3 @@
+# mutation run: mut3-shape.log (only failures + summary kept)
+  ✗ R4 countsOf: held = holders>0, waiting = sum of queues, protected = owner-queue length — {"snapshot":{"held":3,"waiting":3,"protected":0},"mine":{"held":3,"waiting":3,"protected":2}}
+=== 41/42 checks passed

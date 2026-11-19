@@ -381,9 +381,12 @@ export interface LockHistoryEntry {
   at: number;
   event: LockEvent;
   /**
-   * Why the lease ended without a release: `invalid` = the record was corrupt
-   * (`holders` non-empty, `expiresAt` ≤ 0 / not a number) and had to be reaped
-   * instead of holding the resource forever (review R-7).
+   * Why the lease / queue entry ended without a matching release:
+   *   `invalid` = the record was corrupt (`holders` non-empty, `expiresAt` ≤ 0 /
+   *   not a number) and had to be reaped instead of holding the resource
+   *   forever (review R-7);
+   *   `stale` = a **waiter** whose heartbeat was older than `waiterTtlMs`; it is
+   *   dropped by the next `acquire` (0.6.0, R1 — never by a read command).
    */
   reason?: string;
 }
@@ -429,6 +432,16 @@ export interface LockState {
   /** `<= 0` when free; capped remaining milliseconds otherwise. */
   expiresIn: number;
   waiters: Array<LockWaiter & { position: number }>;
+  /**
+   * 0.6.0 (R3): `now − waiter.at` for each entry of `waiters`, same order — the
+   * read-only view `collab_locks` prints as `sid#pos(age)`. Derived in `stateOf`,
+   * never written to disk.
+   */
+  waiterAgeMs?: number[];
+  /** 0.6.0 (R3): the sids whose heartbeat is older than the waiter TTL. */
+  staleWaiters?: string[];
+  /** 0.6.0 (R3): at least one waiter's heartbeat is older than the waiter TTL. */
+  stale?: boolean;
   /** The caller's own lease / queue position, when it is involved. */
   mine?: { held: boolean; waiting: boolean; position: number };
 }
@@ -510,6 +523,18 @@ export interface CollabConfig {
   archiveSpawned: boolean;
   /** Debounce after the terminal state before archiving (1min–1h). */
   archiveGraceMs: number;
+  /**
+   * 0.6.0 (R1): a waiter whose heartbeat is older than this is reaped on the
+   * next `acquire` (clamped to [1min, 1h], default 10min).
+   */
+  waiterTtlMs: number;
+  /** 0.6.0 (R2): refresh queued waiters from the `context` hook (default `true`). */
+  waiterHeartbeat: boolean;
+  /**
+   * 0.6.0 (R5): the same thread + the same normalised body inside this window is
+   * one message (default 60000; `0` disables the check).
+   */
+  dedupeWindowMs: number;
   report?: ReportConfig;
 }
 

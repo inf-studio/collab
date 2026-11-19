@@ -50,7 +50,11 @@ import {
   LOCK_REASON_LIMIT,
   LOCK_TTL_DEFAULT_MS,
   LOCK_TTL_MAX_MS,
-  LOCK_TTL_MIN_MS
+  LOCK_TTL_MIN_MS,
+  LOCK_WAITER_TOUCH_MS,
+  LOCK_WAITER_TTL_MAX_MS,
+  LOCK_WAITER_TTL_MIN_MS,
+  LOCK_WAITER_TTL_MS
 } from '../constants.ts';
 import { errCode, log } from '../log.ts';
 import type {
@@ -299,6 +303,21 @@ export function normalizeTtl(value: unknown): number {
   return clamp(n, LOCK_TTL_MIN_MS, LOCK_TTL_MAX_MS);
 }
 
+/**
+ * `waiterTtlMs` from a caller / config: default 10min, clamped to [1min, 1h].
+ *
+ * A non-positive / non-numeric value falls back to the default: unlike the
+ * lease TTL there is deliberately **no** "0 = never reap" — an immortal waiter
+ * is the deadlock this knob exists to remove (an operator who really wants the
+ * old behaviour sets the ceiling, 60min).
+ */
+export function normalizeWaiterTtl(value: unknown): number {
+  // A misspelled config (`"10m"`, `"60000"`) is a mistake, not "1 minute":
+  // only a real finite positive number is treated as milliseconds.
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return LOCK_WAITER_TTL_MS;
+  return clamp(value, LOCK_WAITER_TTL_MIN_MS, LOCK_WAITER_TTL_MAX_MS);
+}
+
 export function readLock(resource: string): LockRecord | undefined {
   const raw = readJsonFile(lockFile(resource));
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
@@ -445,13 +464,131 @@ export function isFree(record: LockRecord | undefined, now = Date.now()): boolea
   return reap(record, now).holders.length === 0;
 }
 
-/** The read-only view `collab_locks` / `collab_list` render (design §3). */
-export function stateOf(record: LockRecord | undefined, now = Date.now(), sid?: string): LockState {
+/**
+ * R1 (0.6.0): drop waiters whose **heartbeat** is older than `ttl`.
+ *
+ * A waiter used to be immortal: it had no TTL, nobody ever woke it, and it only
+ * left the queue when *that same session* applied or released again. One session
+ * that queued once and vanished therefore made a **free** resource unusable for
+ * everyone else («未获得资源租约: …（资源空闲，但有人在排队）» — observed ≥3× in
+ * one night). `LockWaiter.at` is now the last heartbeat, and the next `acquire`
+ * writes the reaped queue back.
+ *
+ * Write path only (`acquire`): a read command (`collab_locks`, the sidebar
+ * snapshot) must never change what it displays — it still *shows* the age and
+ * the `[stale]` marker instead.
+ *
+ * A record written by ≤0.5.3 has `at` = the enqueue time, which is exactly
+ * "a very old heartbeat" — those are reaped too, which is the point.
+ */
+export function reapWaiters(record: LockRecord, now = Date.now(), ttl = LOCK_WAITER_TTL_MS): LockRecord {
+  if (!record.waiters.length) return record;
+  const window = normalizeWaiterTtl(ttl);
+  const alive = record.waiters.filter(waiter => now - (Number(waiter.at) || 0) <= window);
+  if (alive.length === record.waiters.length) return record;
+  const dropped = record.waiters.filter(waiter => !alive.includes(waiter));
+  const history: LockHistoryEntry[] = [
+    ...record.history,
+    ...dropped.map(waiter => ({ sid: waiter.sid, at: now, event: 'leave' as LockEvent, reason: 'stale' }))
+  ].slice(-LOCK_HISTORY_LIMIT);
+  return { ...record, waiters: alive, history };
+}
+
+/**
+ * The in-process half of the heartbeat throttle. Not correctness-critical (the
+ * persisted `at` is checked too), just the cheap path: without it every
+ * `context` hook of a long turn would scan the lock directory.
+ */
+const lastTouchAt = new Map<string, number>();
+
+/**
+ * R2 (0.6.0): refresh this session's waiter heartbeat (`at = now`).
+ *
+ * Called from three places: the session's own `collab_lock`, its `context` hook
+ * (once per request, `waiterHeartbeat:false` turns it off) and the writing
+ * `collab_*` tools (`dispatch` / `deliverAsk`).
+ *
+ * Throttled twice, both to `throttleMs` (default 30s): against the in-memory
+ * stamp, and against the **persisted** `at` — so a plugin reload, or a test that
+ * forges an old heartbeat, does not have to wait for a memory entry to age out.
+ *
+ * Only records that already contain this sid as a waiter are written; a session
+ * that is not queued costs one read of the lock directory and zero writes.
+ */
+export async function touchWaiters(
+  sid: string | undefined,
+  now = Date.now(),
+  options: { throttleMs?: number } = {}
+): Promise<number> {
+  try {
+    return await touchWaitersUnsafe(sid, now, options);
+  } catch (error) {
+    // Bookkeeping only: a heartbeat must never fail a tool call or a model request.
+    log('waiter heartbeat failed:', (error as Error)?.message ?? error);
+    return 0;
+  }
+}
+
+async function touchWaitersUnsafe(
+  sid: string | undefined,
+  now: number,
+  options: { throttleMs?: number }
+): Promise<number> {
+  const me = String(sid ?? '').trim();
+  if (!me) return 0;
+  const throttleMs = Math.max(0, Number(options.throttleMs ?? LOCK_WAITER_TOUCH_MS) || 0);
+  if (throttleMs > 0 && now - (lastTouchAt.get(me) ?? 0) < throttleMs) return 0;
+
+  const queued = allLocks().filter(record => record.waiters.some(waiter => waiter.sid === me));
+  if (!queued.length) return 0; // not waiting anywhere: nothing to refresh
+  const newest = Math.max(
+    ...queued.map(record =>
+      Math.max(
+        ...record.waiters.filter(waiter => waiter.sid === me).map(waiter => Number(waiter.at) || 0)
+      )
+    )
+  );
+  if (throttleMs > 0 && newest > 0 && newest <= now && now - newest < throttleMs) return 0;
+
+  let touched = 0;
+  for (const record of queued) {
+    await withGuard(record.resource, () => {
+      const current = readLock(record.resource);
+      if (!current || !current.waiters.some(waiter => waiter.sid === me)) return;
+      // Only the heartbeat moves: FIFO order, mode and reason stay untouched.
+      writeLock({
+        ...current,
+        waiters: current.waiters.map(waiter => (waiter.sid === me ? { ...waiter, at: now } : waiter))
+      });
+      touched += 1;
+    });
+  }
+  if (touched) lastTouchAt.set(me, now);
+  return touched;
+}
+
+/**
+ * The read-only view `collab_locks` / `collab_list` render (design §3).
+ *
+ * 0.6.0 (R3): aside from the queue itself it carries the derived, **never
+ * persisted** heartbeat data — `waiterAgeMs` (parallel to `waiters`) and
+ * `stale` when any heartbeat is older than `waiterTtlMs`. A read command must
+ * not reap: the age lets the human decide whether the queue is real.
+ */
+export function stateOf(
+  record: LockRecord | undefined,
+  now = Date.now(),
+  sid?: string,
+  options: { waiterTtlMs?: number } = {}
+): LockState {
   const live = record ? reap(record, now) : undefined;
   const holders = live?.holders ?? [];
   const waiters = (live?.waiters ?? []).map((waiter, index) => ({ ...waiter, position: index + 1 }));
   const minePosition = sid ? waiters.find(waiter => waiter.sid === sid)?.position ?? 0 : 0;
   const expiresIn = holders.length && live?.expiresAt ? Math.max(0, live.expiresAt - now) : 0;
+  const waiterAgeMs = waiters.map(waiter => Math.max(0, now - (Number(waiter.at) || 0)));
+  const waiterTtlMs = normalizeWaiterTtl(options.waiterTtlMs);
+  const staleWaiters = waiters.filter((_, index) => waiterAgeMs[index]! > waiterTtlMs).map(waiter => waiter.sid);
   return {
     resource: live?.resource ?? '',
     kind: live?.kind ?? 'named',
@@ -464,6 +601,8 @@ export function stateOf(record: LockRecord | undefined, now = Date.now(), sid?: 
     expiresAt: live?.expiresAt ?? 0,
     expiresIn,
     waiters,
+    ...(waiters.length ? { waiterAgeMs } : {}),
+    ...(staleWaiters.length ? { staleWaiters, stale: true } : {}),
     ...(sid
       ? { mine: { held: holders.includes(sid), waiting: minePosition > 0, position: minePosition } }
       : {})
@@ -478,6 +617,8 @@ export interface AcquireInput {
   kind?: LockKind;
   mode?: string;
   ttlMs?: unknown;
+  /** 0.6.0: how old a waiter heartbeat may be before this acquire reaps it. */
+  waiterTtlMs?: unknown;
   reason?: unknown;
   wait?: boolean;
   sid: string;
@@ -502,7 +643,8 @@ export type AcquireResult =
  * Decisions, in order:
  *   0. a live lease held by **this** sid is idempotent (`status:"held"`,
  *      `renewed:true` — no second count, no TTL extension);
- *   1. free (after reaping an expired lease):
+ *   1. free (after reaping an expired lease **and** the stale waiters of the
+ *      queue — 0.6.0: a heartbeat older than `waiterTtlMs` is not a request):
  *        - no waiters, or this sid is the head waiter → grant (dequeue);
  *        - someone else is queued ahead → queue this sid (FIFO is not skipped);
  *   2. held `shared` + requested `shared` → join the group;
@@ -513,6 +655,7 @@ export type AcquireResult =
 export async function acquire(input: AcquireInput): Promise<AcquireResult> {
   const mode: LockMode = input.mode === 'shared' ? 'shared' : 'exclusive';
   const ttlMs = normalizeTtl(input.ttlMs);
+  const waiterTtlMs = normalizeWaiterTtl(input.waiterTtlMs);
   const reason = sanitizeReason(input.reason);
   const wait = input.wait === true;
   const sid = input.sid;
@@ -530,11 +673,14 @@ export async function acquire(input: AcquireInput): Promise<AcquireResult> {
       waiters: [],
       history: []
     };
-    let record = reap(base, now);
+    // R1 (0.6.0): the queue is reaped **before** the fairness decision, so a
+    // heartbeat-less waiter can no longer block the resource. Only this write
+    // path reaps; `collab_locks` keeps showing it as `[stale]`.
+    let record = reapWaiters(reap(base, now), now, waiterTtlMs);
 
     // 0) idempotent re-application (R3): same sid, same resource → same lease.
     if (record.holders.includes(sid)) {
-      return { status: 'held', record, state: stateOf(record, now, sid), renewed: true } as AcquireResult;
+      return { status: 'held', record, state: stateOf(record, now, sid, { waiterTtlMs }), renewed: true } as AcquireResult;
     }
 
     const dequeue = (): void => {
@@ -552,13 +698,13 @@ export async function acquire(input: AcquireInput): Promise<AcquireResult> {
         return {
           status: 'busy',
           record,
-          state: stateOf(record, now, sid),
+          state: stateOf(record, now, sid, { waiterTtlMs }),
           holders: [],
           remainingMs: 0
         } as AcquireResult;
       }
       if (queueBlocked) {
-        return queueOrFull(record, { sid, at: now, mode, reason }, now);
+        return queueOrFull(record, { sid, at: now, mode, reason }, now, waiterTtlMs);
       }
       dequeue();
       record = {
@@ -574,7 +720,7 @@ export async function acquire(input: AcquireInput): Promise<AcquireResult> {
         history: [...record.history, { sid, at: now, event: 'acquire' as LockEvent }].slice(-LOCK_HISTORY_LIMIT)
       };
       const written = writeLock(record);
-      return { status: 'held', record: written, state: stateOf(written, now, sid), renewed: false } as AcquireResult;
+      return { status: 'held', record: written, state: stateOf(written, now, sid, { waiterTtlMs }), renewed: false } as AcquireResult;
     }
 
     // 2) shared group join.
@@ -593,18 +739,18 @@ export async function acquire(input: AcquireInput): Promise<AcquireResult> {
         history: [...record.history, { sid, at: now, event: 'acquire' as LockEvent }].slice(-LOCK_HISTORY_LIMIT)
       };
       const written = writeLock(record);
-      return { status: 'held', record: written, state: stateOf(written, now, sid), renewed: false } as AcquireResult;
+      return { status: 'held', record: written, state: stateOf(written, now, sid, { waiterTtlMs }), renewed: false } as AcquireResult;
     }
 
     // 3) conflict.
     if (wait) {
-      return queueOrFull(record, { sid, at: now, mode, reason }, now);
+      return queueOrFull(record, { sid, at: now, mode, reason }, now, waiterTtlMs);
     }
     record = writeLock(record);
     return {
       status: 'busy',
       record,
-      state: stateOf(record, now, sid),
+      state: stateOf(record, now, sid, { waiterTtlMs }),
       holders: record.holders,
       remainingMs: Math.max(0, record.expiresAt - now)
     } as AcquireResult;
@@ -615,14 +761,14 @@ export async function acquire(input: AcquireInput): Promise<AcquireResult> {
  * Enqueue or report a full queue. The record is written either way, so a reaped
  * expiry (and the untouched queue) is persisted for the next reader.
  */
-function queueOrFull(record: LockRecord, waiter: LockWaiter, now: number): AcquireResult {
+function queueOrFull(record: LockRecord, waiter: LockWaiter, now: number, waiterTtlMs: number): AcquireResult {
   const queued = enqueue(record, waiter);
   if (!queued) {
     const written = writeLock(record);
     return {
       status: 'queue-full',
       record: written,
-      state: stateOf(written, now, waiter.sid),
+      state: stateOf(written, now, waiter.sid, { waiterTtlMs }),
       limit: LOCK_QUEUE_LIMIT
     } as AcquireResult;
   }
@@ -630,7 +776,7 @@ function queueOrFull(record: LockRecord, waiter: LockWaiter, now: number): Acqui
   return {
     status: 'queued',
     record: written,
-    state: stateOf(written, now, waiter.sid),
+    state: stateOf(written, now, waiter.sid, { waiterTtlMs }),
     ahead: written.waiters.findIndex(entry => entry.sid === waiter.sid) + 1
   } as AcquireResult;
 }
@@ -671,24 +817,31 @@ export type ReleaseResult =
  * `force`: preemption is a human decision, and a `[protected*]` holder must
  * never be displaced by a tool call (R6).
  */
-export async function release(input: { resource: string; sid: string; now?: number }): Promise<ReleaseResult> {
+export async function release(input: {
+  resource: string;
+  sid: string;
+  /** 0.6.0: same display contract as `acquire` — keep `[stale]` consistent. */
+  waiterTtlMs?: unknown;
+  now?: number;
+}): Promise<ReleaseResult> {
+  const waiterTtlMs = normalizeWaiterTtl(input.waiterTtlMs);
   return withGuard(input.resource, () => {
     const now = input.now ?? Date.now();
     const current = readLock(input.resource);
     if (!current) {
-      return { ok: false, reason: 'free', state: stateOf(emptyLock(input.resource), now, input.sid) } as ReleaseResult;
+      return { ok: false, reason: 'free', state: stateOf(emptyLock(input.resource), now, input.sid, { waiterTtlMs }) } as ReleaseResult;
     }
     const record = reap(current, now);
     if (!record.holders.length) {
       if (record !== current) writeLock(record); // persist the expiry so others see it
-      return { ok: false, reason: 'free', record, state: stateOf(record, now, input.sid) } as ReleaseResult;
+      return { ok: false, reason: 'free', record, state: stateOf(record, now, input.sid, { waiterTtlMs }) } as ReleaseResult;
     }
     if (!record.holders.includes(input.sid)) {
       return {
         ok: false,
         reason: 'not-holder',
         record,
-        state: stateOf(record, now, input.sid)
+        state: stateOf(record, now, input.sid, { waiterTtlMs })
       } as ReleaseResult;
     }
     const remaining = record.holders.filter(sid => sid !== input.sid);
@@ -707,7 +860,7 @@ export async function release(input: { resource: string; sid: string; now?: numb
       next.holder = remaining[0];
     }
     const written = writeLock(next);
-    return { ok: true, record: written, state: stateOf(written, now, input.sid), remaining } as ReleaseResult;
+    return { ok: true, record: written, state: stateOf(written, now, input.sid, { waiterTtlMs }), remaining } as ReleaseResult;
   });
 }
 
@@ -740,7 +893,8 @@ export function describeState(state: LockState, protect: string[] = []): string 
   const mark = (sid: string): string => (protect.includes(sid) ? ' [protected]' : '');
   if (state.free) {
     const waiters = state.waiters.length
-      ? `，排队 ${state.waiters.length} 人（下一位 ${state.waiters[0]?.sid}）`
+      ? `，排队 ${state.waiters.length} 人（下一位 ${state.waiters[0]?.sid}）` +
+        (state.staleWaiters?.length ? `，其中 ${state.staleWaiters.length} 人已过期（下一次 collab_lock 回收）` : '')
       : '';
     return `free${waiters}`;
   }

@@ -242,13 +242,14 @@ function serverSession(id, serverID, client, { local = false, withServer = true 
   };
 }
 
-function harness(session) {
+function harness(session, { locale = 'en' } = {}) {
   const registered = [];
   const [current, setCurrent] = createSignal(session);
   const target = {
     id: 'collab',
     options: {},
-    t: (key, params = {}) => String((plugin.i18n.en ?? {})[key] ?? key).replace(/\{\{(\w+)\}\}/g, (_, n) => String(params[n] ?? `{{${n}}}`)),
+    t: (key, params = {}) =>
+      String((plugin.i18n[locale] ?? {})[key] ?? key).replace(/\{\{(\w+)\}\}/g, (_, n) => String(params[n] ?? `{{${n}}}`)),
     plural: (key, count) => `${count} ${key}`,
     add: (registry, item) => {
       const factory = typeof item === 'function' ? item : undefined;
@@ -351,6 +352,93 @@ function renderPanel(h, session) {
     JSON.stringify(text)
   );
   await sleep(400);
+  dispose();
+}
+
+/** Render one registered contribution's `render` through the plugin-context provider. */
+function renderContribution(h, registry, input) {
+  const item = h.registered.filter(entry => entry.registry === registry).at(-1).item;
+  return createRoot(() => {
+    const resolved = PluginContext.Provider({
+      value: h.context,
+      get children() {
+        return () => item.render(input);
+      }
+    });
+    return typeof resolved === 'function' ? resolved() : resolved;
+  });
+}
+
+// 5. R4 (0.6.0): the session-header counts print the four numbers, from one
+//    snapshot + the host's own prompt queue (sync asked once, failures silent).
+{
+  const FOUR = serverSession('ses_four', 'srv-four', fakeClient({ reply: snap(0) }));
+  const syncs = [];
+  FOUR.server.data = {
+    session: {
+      pending: {
+        list: sessionID => (sessionID === 'ses_four' ? [{ id: 'msg_q1' }] : []),
+        sync: async sessionID => {
+          syncs.push(sessionID);
+        },
+        invalidate: () => {}
+      }
+    }
+  };
+  const fourSnapshot = {
+    at: 1,
+    reachable: true,
+    sessions: [],
+    locks: [
+      {
+        resource: 'res-held',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: ['ses_a'],
+        waiters: 2,
+        waiting: ['ses_b', 'ses_c'],
+        expiresInMs: 60_000,
+        waiterAgeMs: [1_000, 2_000]
+      },
+      {
+        resource: 'res-free-with-waiter',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: [],
+        waiters: 1,
+        waiting: ['ses_d'],
+        expiresInMs: 0,
+        waiterAgeMs: [11 * 60_000],
+        staleWaiters: ['ses_d'],
+        stale: true
+      }
+    ],
+    handoffs: [],
+    queue: [
+      { queueId: 'q_1', target: 'ses_p', ageMs: 1, summary: 'a', seen: false },
+      { queueId: 'q_2', target: 'ses_p', ageMs: 2, summary: 'b', seen: false }
+    ]
+  };
+  // The store is fed by the poller; give it this snapshot through the same client.
+  FOUR.server.client = fakeClient({ reply: fourSnapshot });
+  // zh catalog: the assertion below is the exact string the PRD asks for.
+  const h = harness(FOUR, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const first = renderContribution(h, 'slot', { session: FOUR });
+  const firstText = first?.textContent ?? '';
+  expect(
+    'PN5 the session header prints 持有 1 · 排队 3 · 待受保护 2 · 宿主排队 1 (held ≠ rows)',
+    firstText.includes('持有 1 · 排队 3 · 待受保护 2 · 宿主排队 1'),
+    JSON.stringify(firstText)
+  );
+  const syncCount = syncs.length;
+  const second = renderContribution(h, 'slot', { session: FOUR });
+  expect(
+    'PN5 the header asks the host to sync its prompt queue once per session, not per render',
+    syncCount === 1 && (second?.textContent ?? '').includes('宿主排队 1'),
+    JSON.stringify({ syncs, second: second?.textContent })
+  );
   dispose();
 }
 

@@ -1,0 +1,3 @@
+# delta mutation: dmut1 (failures + summary)
+  ✗ S95 a waiter younger than the configured TTL is not shown as [stale] in the confirm receipt —   holders=ses_s95hold  waiters=ses_s95t20#1:exclusive(20m)[stale],ses_s95new#2:exclusive(0s)  ttl=1h00m
+=== 658/659 checks passed

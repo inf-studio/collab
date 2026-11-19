@@ -95,6 +95,21 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 
 轮询 key 要含 `server.id`；回包前后比对 key，丢弃迟到的旧服务器结果。
 
+## 2.6 四个数：持有 / 排队 / 待受保护 / 宿主排队
+
+会话头与侧栏**不要**只写一个「队列」。0.6.0 起统一四个数：
+
+| 数 | 来源 | 含义 |
+| --- | --- | --- |
+| 持有 | `locks.filter(l => l.holders.length > 0).length` | 真正被持有的资源 |
+| 排队 | `Σ locks[].waiters` | 在等锁的会话数（含 stale） |
+| 待受保护 | `snapshot.queue.length` | 我提交给 protected 会话的 owner-queue |
+| 宿主排队 | TUI `data.session.pending.list()` / GUI `server.data.session.pending.list()` | OpenCode 自己的 prompt 队列 |
+
+- **`free` 但有 waiter ≠ 被占用**：侧栏若只数 `locks.length`，一个只有僵尸 waiter 的资源会被算成「锁 1」。
+- 宿主 pending 在 GUI 走 `SessionRef.server.data`，首次读取可 `sync()` 一次，失败静默 0（不要因此报错或加轮询）。
+- TUI 侧栏用紧凑写法 `锁 N · 排 M · 待 K · 宿 J`，面板首行给图例，避免再猜。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

@@ -223,6 +223,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync
 } from 'node:fs';
@@ -5995,8 +5996,8 @@ expect(
   `${s87WaitB.split('\n')[0]} / ${s87WaitC.split('\n')[0]}`
 );
 expect(
-  'S87 the queue is visible in collab_locks',
-  (await lockList('ses_lk3')).includes('waiters=ses_lk3#1:exclusive,ses_lk4#2:exclusive'),
+  'S87 the queue is visible in collab_locks, with each waiter’s heartbeat age',
+  /waiters=ses_lk3#1:exclusive\(\d+s?[^)]*\),ses_lk4#2:exclusive\(\d+s?[^)]*\)/.test(await lockList('ses_lk3')),
   (await lockList('ses_lk3')).split('\n').find(line => line.includes('fifo-window')) ?? '(缺失)'
 );
 
@@ -7814,6 +7815,307 @@ expect(
 // Leave no S94 artifacts for the other suites' closing checks.
 rmSync(qdir(S94_QUEUE), { recursive: true, force: true });
 archiveHttpServer.close();
+
+// ================== S95 (0.6.0: waiter heartbeat / four numbers / content dedupe)
+// R1: a waiter is not a lease and used to be immortal — one session that queued
+// once and vanished made a *free* resource unusable («资源空闲，但有人在排队»).
+// `at` is now a heartbeat, reaped by the next acquire (write path only).
+// R3: `collab_locks` still shows the age and `[stale]`, and writes nothing.
+// R5: the same thread + the same normalised body inside 60s is one message.
+
+/** A free record whose waiters carry the given (sid, heartbeat) pairs. */
+const s95Seed = (resource, waiters, over = {}) => {
+  writeFileSync(
+    lockFileOf(resource),
+    `${
+      JSON.stringify(
+        {
+          resource,
+          kind: 'named',
+          mode: 'exclusive',
+          holders: [],
+          acquiredAt: 0,
+          ttlMs: 0,
+          expiresAt: 0,
+          waiters,
+          history: [],
+          ...over
+        },
+        null,
+        2
+      )
+    }\n`
+  );
+};
+const minutesAgo = minutes => Date.now() - minutes * 60_000;
+
+// --- S95a: free + 3 stale waiters → the newcomer is granted, the ghosts are gone.
+s95Seed(
+  'named:stale-queue',
+  ['ses_s95a', 'ses_s95b', 'ses_s95c'].map(sid => ({ sid, at: minutesAgo(30), mode: 'exclusive' }))
+);
+const s95Take = await lockCall({ resource: 'stale-queue', ttlMs: 60_000 }, 'ses_s95d');
+const s95TakeRecord = lockRead('named:stale-queue');
+out('S95 stale queue reap', `${s95Take.split('\n')[0]}\n${JSON.stringify(s95TakeRecord.waiters)}`);
+expect(
+  'S95 free + 3 expired waiters → the new applicant is granted directly',
+  s95Take.startsWith('已获得资源租约') && s95TakeRecord.holders.join(',') === 'ses_s95d',
+  s95Take.split('\n')[0]
+);
+expect(
+  'S95 … and all three heartbeat-less waiters are gone (history: leave/stale)',
+  s95TakeRecord.waiters.length === 0 &&
+    s95TakeRecord.history.filter(entry => entry.event === 'leave' && entry.reason === 'stale').length === 3,
+  JSON.stringify(s95TakeRecord.history.filter(entry => entry.event === 'leave'))
+);
+await unlockCall('stale-queue', 'ses_s95d');
+
+// --- S95b: a live heartbeat still owns its place (FIFO is not skipped).
+s95Seed('named:live-queue', [{ sid: 'ses_s95w', at: Date.now(), mode: 'exclusive' }]);
+const s95Jump = await lockCall({ resource: 'live-queue', ttlMs: 60_000 }, 'ses_s95e');
+const s95LiveList = await lockList('ses_s95w');
+out('S95 live waiter', `${s95Jump.split('\n')[0]}\n${s95LiveList.split('\n').find(line => line.includes('live-queue'))}`);
+expect(
+  'S95 free + 1 live waiter → the newcomer is refused (no queue jumping)',
+  s95Jump.includes('资源空闲，但有人在排队') &&
+    lockRead('named:live-queue').holders.length === 0 &&
+    lockRead('named:live-queue').waiters.map(waiter => waiter.sid).join(',') === 'ses_s95w',
+  s95Jump.split('\n')[0]
+);
+expect(
+  'S95 collab_locks shows the live waiter age and does not mark it stale',
+  /waiters=ses_s95w#1:exclusive\(\d+s\)/.test(s95LiveList) && !s95LiveList.includes('[stale]'),
+  s95LiveList.split('\n').find(line => line.includes('live-queue'))
+);
+
+// --- S95c: the read view shows a stale heartbeat, and writes nothing.
+s95Seed('named:stale-view', [{ sid: 'ses_s95s', at: minutesAgo(20), mode: 'exclusive' }]);
+const s95ViewBefore = statSync(lockFileOf('named:stale-view')).mtimeMs;
+const s95View = await lockList('ses_s95s');
+const s95ViewAfter = statSync(lockFileOf('named:stale-view')).mtimeMs;
+out('S95 stale view', s95View.split('\n').find(line => line.includes('stale-view')) ?? '(缺失)');
+expect(
+  'S95 collab_locks marks an over-TTL waiter [stale] and prints its age',
+  /waiters=ses_s95s#1:exclusive\(\d+m[^)]*\)\[stale\]/.test(s95View) ||
+    /waiters=ses_s95s#1:exclusive\(\d+[^)]*\)\[stale\]/.test(s95View),
+  s95View.split('\n').find(line => line.includes('stale-view'))
+);
+expect(
+  'S95 … says how many waiters are stale in the header',
+  s95View.includes('排队心跳过期 1 人'),
+  s95View.split('\n')[0]
+);
+expect(
+  'S95 … and the read command wrote nothing at all (same mtime, same record)',
+  s95ViewBefore === s95ViewAfter && lockRead('named:stale-view').waiters.length === 1,
+  `${s95ViewBefore} → ${s95ViewAfter}`
+);
+
+// --- S95c-2 (review P3①/P3③): the display honours the *configured* TTL, and a
+// misspelled TTL falls back to the default instead of clamping to one minute.
+await writeConfig({ allowWrite: true, waiterTtlMs: 3_600_000 });
+s95Seed('named:ttl-60m', [{ sid: 'ses_s95t20', at: minutesAgo(20), mode: 'exclusive' }], {
+  holders: ['ses_s95hold'],
+  holder: 'ses_s95hold',
+  acquiredAt: Date.now(),
+  ttlMs: 3_600_000,
+  expiresAt: Date.now() + 3_600_000
+});
+const s95TtlConfirm = await lockCall({ resource: 'ttl-60m', wait: true }, 'ses_s95new');
+out('S95 configured TTL', s95TtlConfirm.split('\n').find(line => line.includes('holders=')) ?? '(缺失)');
+expect(
+  'S95 a waiter younger than the configured TTL is not shown as [stale] in the confirm receipt',
+  s95TtlConfirm.includes('ses_s95t20') && !s95TtlConfirm.includes('[stale]'),
+  s95TtlConfirm.split('\n').find(line => line.includes('holders='))
+);
+
+await writeConfig({ allowWrite: true, waiterTtlMs: '10m' });
+s95Seed('named:ttl-typo', [{ sid: 'ses_s95t5', at: minutesAgo(5), mode: 'exclusive' }], {
+  holders: ['ses_s95hold'],
+  holder: 'ses_s95hold',
+  acquiredAt: Date.now(),
+  ttlMs: 3_600_000,
+  expiresAt: Date.now() + 3_600_000
+});
+const s95TypoList = await lockList('ses_s95t5');
+const s95TypoLine = s95TypoList.split('\n').find(line => line.includes('ttl-typo')) ?? '';
+out('S95 TTL typo', s95TypoLine);
+expect(
+  'S95 a misspelled waiterTtlMs falls back to 10 minutes (a 5m waiter is not [stale])',
+  s95TypoLine.includes('ses_s95t5') && !s95TypoLine.includes('[stale]'),
+  s95TypoLine
+);
+await writeConfig({ allowWrite: true });
+
+// --- S95d: the three heartbeat sources (each with its own session, so the 30s
+// throttle of one source cannot mask another).
+await lockCall({ resource: 'hb-window', ttlMs: 900_000 }, 'ses_s95h0');
+const s95Watch = sid => lockRead('named:hb-window').waiters.find(waiter => waiter.sid === sid)?.at ?? 0;
+
+// ① 同 sid 再次 collab_lock
+await lockCall({ resource: 'hb-window', wait: true }, 'ses_s95h1');
+lockWriteRaw('named:hb-window', {
+  waiters: lockRead('named:hb-window').waiters.map(waiter =>
+    waiter.sid === 'ses_s95h1' ? { ...waiter, at: minutesAgo(7) } : waiter
+  )
+});
+const s95H1Old = s95Watch('ses_s95h1');
+await lockCall({ resource: 'hb-window', wait: true }, 'ses_s95h1');
+expect(
+  'S95 heartbeat ①: re-applying collab_lock refreshes the waiter’s `at`',
+  s95H1Old > 0 && s95Watch('ses_s95h1') > s95H1Old,
+  `${s95H1Old} → ${s95Watch('ses_s95h1')}`
+);
+
+// ② the session's own context hook (once per request)
+await lockCall({ resource: 'hb-window', wait: true }, 'ses_s95h2');
+lockWriteRaw('named:hb-window', {
+  waiters: lockRead('named:hb-window').waiters.map(waiter =>
+    waiter.sid === 'ses_s95h2' ? { ...waiter, at: minutesAgo(7) } : waiter
+  )
+});
+const s95H2Old = s95Watch('ses_s95h2');
+await hooks.context(contextEvent('ses_s95h2'));
+const s95H2New = s95Watch('ses_s95h2');
+const s95H2Mtime = statSync(lockFileOf('named:hb-window')).mtimeMs;
+await hooks.context(contextEvent('ses_s95h2'));
+out('S95 heartbeat hook', `${s95H2Old} → ${s95H2New} (throttled second call: ${s95Watch('ses_s95h2')})`);
+expect('S95 heartbeat ②: the context hook refreshes it', s95H2New > s95H2Old, `${s95H2Old} → ${s95H2New}`);
+expect(
+  'S95 … and a second hook within the 30s throttle writes nothing',
+  s95Watch('ses_s95h2') === s95H2New && statSync(lockFileOf('named:hb-window')).mtimeMs === s95H2Mtime,
+  `${s95H2New} / ${s95H2Mtime}`
+);
+
+// ③ any writing collab_* call (here: collab_send)
+await lockCall({ resource: 'hb-window', wait: true }, 'ses_s95h3');
+lockWriteRaw('named:hb-window', {
+  waiters: lockRead('named:hb-window').waiters.map(waiter =>
+    waiter.sid === 'ses_s95h3' ? { ...waiter, at: minutesAgo(7) } : waiter
+  )
+});
+const s95H3Old = s95Watch('ses_s95h3');
+await call(
+  'collab_send',
+  { target: 'ses_bbb', text: 'S95 心跳来源③（写工具顺手 touch）', kind: 'note', confirm: true },
+  as('ses_s95h3')
+);
+expect(
+  'S95 heartbeat ③: a writing collab_* call (collab_send) refreshes it too',
+  s95Watch('ses_s95h3') > s95H3Old,
+  `${s95H3Old} → ${s95Watch('ses_s95h3')}`
+);
+// A read command is not a heartbeat and never writes (R3).
+lockWriteRaw('named:hb-window', {
+  waiters: lockRead('named:hb-window').waiters.map(waiter =>
+    waiter.sid === 'ses_s95h1' ? { ...waiter, at: minutesAgo(7) } : waiter
+  )
+});
+const s95ReadAt = s95Watch('ses_s95h1');
+const s95ReadMtime = statSync(lockFileOf('named:hb-window')).mtimeMs;
+await lockList('ses_s95h1');
+expect(
+  'S95 a read command (collab_locks) is not a heartbeat: no write, no refresh',
+  s95Watch('ses_s95h1') === s95ReadAt && statSync(lockFileOf('named:hb-window')).mtimeMs === s95ReadMtime,
+  `${s95ReadAt} / ${s95ReadMtime}`
+);
+
+// The tool description states the contract (age + [stale] + read-only).
+const s95LocksDesc = String(tool('collab_locks').description);
+expect(
+  'S95 the collab_locks description explains age / [stale] / read-only reaping',
+  /heartbeat/i.test(s95LocksDesc) && /stale/.test(s95LocksDesc) && /read-only/i.test(s95LocksDesc),
+  s95LocksDesc.slice(0, 160)
+);
+
+// --- S95e: content de-duplication (R5) — same thread + same normalised body.
+const S95_THREAD = 't_s95_dedupe';
+const s95Prompts = prompts.length;
+const s95First = await call(
+  'collab_send',
+  { target: 'ses_bbb', kind: 'note', threadID: S95_THREAD, text: 'S95 同一句话\n带换行  ', confirm: true },
+  as('ses_aaa')
+);
+const s95ThreadAfterFirst = store.get(`collab/threads/${S95_THREAD}`)?.msgs?.length ?? 0;
+const s95Second = await call(
+  'collab_send',
+  { target: 'ses_bbb', kind: 'note', threadID: S95_THREAD, text: 'S95   同一句话 带换行', confirm: true },
+  as('ses_aaa')
+);
+out('S95 dedupe (same body)', `${s95First.split('\n')[0]}\n${s95Second.split('\n')[0]}`);
+expect(
+  'S95 the same thread + the same body (whitespace folded) within 60s is delivered once',
+  prompts.length === s95Prompts + 1 &&
+    s95Second.includes('未重复投递') &&
+    s95Second.includes('60s 内已有同文'),
+  `${prompts.length - s95Prompts} deliveries / ${s95Second.split('\n')[0]}`
+);
+expect(
+  'S95 … and the duplicate is not appended to the thread either',
+  (store.get(`collab/threads/${S95_THREAD}`)?.msgs?.length ?? 0) === s95ThreadAfterFirst,
+  `${s95ThreadAfterFirst} → ${store.get(`collab/threads/${S95_THREAD}`)?.msgs?.length}`
+);
+const s95Third = await call(
+  'collab_send',
+  { target: 'ses_bbb', kind: 'note', threadID: S95_THREAD, text: 'S95 换一句话', confirm: true },
+  as('ses_aaa')
+);
+expect(
+  'S95 a different body on the same thread is still delivered',
+  prompts.length === s95Prompts + 2 && s95Third.startsWith('已投递'),
+  `${prompts.length - s95Prompts} deliveries / ${s95Third.split('\n')[0]}`
+);
+// collab_reply goes through the same funnel.
+const s95ReplyPrompts = prompts.length;
+const s95Reply1 = await call(
+  'collab_reply',
+  { threadID: S95_THREAD, text: 'S95 回执同文', confirm: true },
+  as('ses_bbb')
+);
+const s95Reply2 = await call(
+  'collab_reply',
+  { threadID: S95_THREAD, text: 'S95 回执同文 ', confirm: true },
+  as('ses_bbb')
+);
+expect(
+  'S95 collab_reply is de-duplicated the same way (one delivery)',
+  prompts.length === s95ReplyPrompts + 1 && s95Reply1.startsWith('已投递') && s95Reply2.includes('未重复投递'),
+  `${prompts.length - s95ReplyPrompts} deliveries / ${s95Reply2.split('\n')[0]}`
+);
+// `dedupeWindowMs: 0` is the rollback switch.
+await settle(10);
+writeFileSync(collabConfigPath, JSON.stringify({ dedupeWindowMs: 0 }));
+const s95OffBase = prompts.length;
+const S95_THREAD_OFF = 't_s95_off';
+await call(
+  'collab_send',
+  { target: 'ses_bbb', kind: 'note', threadID: S95_THREAD_OFF, text: 'S95 关闭去重后同文', confirm: true },
+  as('ses_aaa')
+);
+const s95OffSecond = await call(
+  'collab_send',
+  { target: 'ses_bbb', kind: 'note', threadID: S95_THREAD_OFF, text: 'S95 关闭去重后同文', confirm: true },
+  as('ses_aaa')
+);
+expect(
+  'S95 dedupeWindowMs:0 turns the check off (two deliveries of the same body)',
+  prompts.length === s95OffBase + 2 && s95OffSecond.startsWith('已投递'),
+  `${prompts.length - s95OffBase} deliveries`
+);
+writeFileSync(collabConfigPath, JSON.stringify({}));
+const s95Desc = String(tool('collab_send').description);
+expect(
+  'S95 the collab_send description states the dedupe window and the 0 switch',
+  /dedupeWindowMs/.test(s95Desc) && /60s/i.test(s95Desc),
+  s95Desc.slice(0, 160)
+);
+// Cleanup: leave no S95 leases/threads behind for the closing summary.
+await unlockCall('hb-window', 'ses_s95h0');
+for (const resource of ['named:stale-queue', 'named:live-queue', 'named:stale-view', 'named:hb-window']) {
+  rmSync(lockFileOf(resource), { force: true });
+}
+store.delete(`collab/threads/${S95_THREAD}`);
+store.delete(`collab/threads/${S95_THREAD_OFF}`);
 
 // Cleanup: leave no queue files behind for the closing summary.
 rmSync(ownerQueueDir, { recursive: true, force: true });

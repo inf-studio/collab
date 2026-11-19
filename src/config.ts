@@ -5,8 +5,11 @@ import {
   BUILTIN_PROTECT,
   CONFIG_PATH,
   DEFAULTS,
+  DEDUPE_WINDOW_MAX_MS,
   DEFAULT_READONLY_AGENTS,
-  LEGACY_ALIAS_PATH
+  LEGACY_ALIAS_PATH,
+  LOCK_WAITER_TTL_MAX_MS,
+  LOCK_WAITER_TTL_MIN_MS
 } from './constants.ts';
 import type { CollabConfig } from './types.ts';
 import { asObject, clamp, dedupe, mtime, readJsonFile } from './util.ts';
@@ -86,6 +89,30 @@ export function loadConfig(options: unknown): CollabConfig {
     ARCHIVE_GRACE_MAX_MS
   );
 
+  // 0.6.0 (R1): the waiter heartbeat TTL. Clamped so a typo (`600` = 0.6s, or a
+  // week) cannot either reap a working queue or keep a dead waiter forever.
+  // A misspelled value (`"10m"`, `"60000"`) falls back to the default: `clamp()`
+  // would turn NaN into the *minimum* (1 minute), silently reaping live queues.
+  const rawWaiterTtl = file.waiterTtlMs ?? fromOptions.waiterTtlMs;
+  const waiterTtlMs =
+    typeof rawWaiterTtl === 'number' && Number.isFinite(rawWaiterTtl) && rawWaiterTtl > 0
+      ? clamp(rawWaiterTtl, LOCK_WAITER_TTL_MIN_MS, LOCK_WAITER_TTL_MAX_MS)
+      : DEFAULTS.waiterTtlMs;
+  // R2: the `context`-hook half of the heartbeat is a rollback switch, not a
+  // number — the tool-call half always runs (it is a write path by definition).
+  const waiterHeartbeat =
+    typeof file.waiterHeartbeat === 'boolean'
+      ? file.waiterHeartbeat
+      : typeof fromOptions.waiterHeartbeat === 'boolean'
+        ? fromOptions.waiterHeartbeat
+        : DEFAULTS.waiterHeartbeat;
+  // R5: `0` disables content de-duplication; anything else is a window in ms.
+  const dedupeWindowMs = clamp(
+    file.dedupeWindowMs ?? fromOptions.dedupeWindowMs ?? DEFAULTS.dedupeWindowMs,
+    0,
+    DEDUPE_WINDOW_MAX_MS
+  );
+
   return {
     aliases,
     autoDeliver,
@@ -95,6 +122,9 @@ export function loadConfig(options: unknown): CollabConfig {
     readonlyAgents,
     archiveSpawned,
     archiveGraceMs,
+    waiterTtlMs,
+    waiterHeartbeat,
+    dedupeWindowMs,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

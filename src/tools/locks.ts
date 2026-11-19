@@ -12,7 +12,8 @@ import {
   readLock,
   release,
   sanitizeReason,
-  stateOf
+  stateOf,
+  touchWaiters
 } from '../core/locks.ts';
 import type { LockKind, LockState, ToolDefinition } from '../types.ts';
 import { fmtTime, truncate } from '../util.ts';
@@ -54,17 +55,25 @@ function holderLine(state: LockState, protect: string[] = []): string {
 }
 
 /**
- * `waiters=ses_a#1:exclusive,ses_b#2:exclusive` — display only. A long queue is
- * cut to the head plus a `+(N)` count so one listing line stays readable; the
- * record itself always keeps every waiter (and `collab_locks` never truncates
- * the data, only this rendered preview).
+ * `waiters=ses_a#1:exclusive(12m),ses_b#2:exclusive(3s)[stale]` — display only.
+ *
+ * 0.6.0 (R3): the age is the time since that waiter's **last heartbeat** — the
+ * number that tells a human whether the queue is real. `[stale]` marks a
+ * heartbeat older than `waiterTtlMs`: it is still shown (a read command never
+ * writes) and is reaped by the next `collab_lock`. A long queue is cut to the
+ * head plus a `+(N)` count so one listing line stays readable; the record itself
+ * always keeps every waiter.
  */
 function queueLine(state: LockState): string {
   if (!state.waiters.length) return 'waiters=-';
   const shown = 8;
   const head = state.waiters
     .slice(0, shown)
-    .map(waiter => `${waiter.sid}#${waiter.position}:${waiter.mode}`)
+    .map((waiter, index) => {
+      const age = fmtTtl(state.waiterAgeMs?.[index] ?? 0);
+      const stale = state.staleWaiters?.includes(waiter.sid) ? '[stale]' : '';
+      return `${waiter.sid}#${waiter.position}:${waiter.mode}(${age})${stale}`;
+    })
     .join(',');
   const more = state.waiters.length - shown;
   return `waiters=${head}${more > 0 ? `,…(+${more})` : ''}`;
@@ -142,7 +151,9 @@ export function lockTool(kit: ToolKit): ToolDefinition {
       const wait = input?.wait === true;
       const now = Date.now();
       const existing = readLock(resource);
-      const state = stateOf(existing ?? emptyLock(resource, kind, mode), now, sid);
+      const state = stateOf(existing ?? emptyLock(resource, kind, mode), now, sid, {
+        waiterTtlMs: config.waiterTtlMs
+      });
 
       if (input?.confirm !== true) {
         return {
@@ -154,14 +165,34 @@ export function lockTool(kit: ToolKit): ToolDefinition {
             `记录: ${lockFile(resource)}`,
             state.free
               ? state.waiters.length
-                ? `资源空闲但已有 ${state.waiters.length} 人在排队（下一位 ${state.waiters[0]?.sid}）→ 确认后会排在队尾，不插队。`
+                ? state.staleWaiters?.length === state.waiters.length
+                  ? `资源空闲，${state.waiters.length} 个排队者的心跳都已超过等待 TTL → 确认时会先回收它们，然后直接获得。`
+                  : `资源空闲但已有 ${state.waiters.length} 人在排队（下一位 ${state.waiters[0]?.sid}）→ 确认后会排在队尾，不插队。` +
+                    (state.staleWaiters?.length
+                      ? ` 其中 ${state.staleWaiters.length} 人最后一次心跳已超过等待 TTL，确认时会先回收（不再挡路）。`
+                      : '')
                 : '资源空闲 → 确认后立即获得。'
               : `资源被占用 → 未传 wait:true 时只会返回「持有者 + 剩余 TTL」；传 wait:true 则进入排队。`
           ].join('\n')
         };
       }
 
-      const result = await acquire({ resource, kind, mode, ttlMs, reason, wait, sid, now });
+      // R2 (0.6.0): re-applying is itself a heartbeat — a session that polls
+      // `collab_lock` while queued must not be reaped. Throttled inside (30s),
+      // and only after the preview branch: a preview writes nothing.
+      await touchWaiters(sid, now);
+
+      const result = await acquire({
+        resource,
+        kind,
+        mode,
+        ttlMs,
+        waiterTtlMs: config.waiterTtlMs,
+        reason,
+        wait,
+        sid,
+        now
+      });
 
       if (result.status === 'held') {
         const renewed = result.renewed;
@@ -268,7 +299,9 @@ export function unlockTool(kit: ToolKit): ToolDefinition {
       if (!sid) throw invalid('无法确定当前会话 ID（sessionID 缺失）');
       const { resource, kind } = resolve(kit, input?.resource);
       const now = Date.now();
-      const state = stateOf(readLock(resource) ?? emptyLock(resource, kind), now, sid);
+      const state = stateOf(readLock(resource) ?? emptyLock(resource, kind), now, sid, {
+        waiterTtlMs: config.waiterTtlMs
+      });
 
       if (input?.confirm !== true) {
         return {
@@ -284,7 +317,7 @@ export function unlockTool(kit: ToolKit): ToolDefinition {
         };
       }
 
-      const result = await release({ resource, sid, now });
+      const result = await release({ resource, sid, now, waiterTtlMs: config.waiterTtlMs });
       if (!result.ok) {
         if (result.reason === 'free') {
           return {
@@ -334,9 +367,11 @@ export function locksTool(kit: ToolKit): ToolDefinition {
     name: 'collab_locks',
     description:
       'List resource leases: resource (named:/file:), free|held, mode, holders (with remaining TTL), and the ' +
-      'FIFO queue. Read-only — this command never writes, never reaps and never wakes a waiter; an expired ' +
-      'lease is simply shown as free (reclaimed on the next collab_lock). `resource` narrows the answer to one ' +
-      'resource (normalised the same way); omit it for every lease in the global lock directory. ' +
+      'FIFO queue with each waiter\'s age since its last heartbeat (`sid#pos:mode(age)`, `[stale]` when older ' +
+      'than the waiter TTL — a stale waiter holds nothing and is reaped by the next collab_lock). Read-only — ' +
+      'this command never writes, never reaps and never wakes a waiter; an expired lease is simply shown as free ' +
+      '(reclaimed on the next collab_lock). `resource` narrows the answer to one resource (normalised the same ' +
+      'way); omit it for every lease in the global lock directory. ' +
       '`collab_list` additionally shows your own holdings / queue position.',
     input: jsonInput({
       properties: {
@@ -352,11 +387,13 @@ export function locksTool(kit: ToolKit): ToolDefinition {
 
       if (raw) {
         const { resource, kind } = resolve(kit, raw);
-        const state = stateOf(readLock(resource) ?? emptyLock(resource, kind), now, sid);
+        const state = stateOf(readLock(resource) ?? emptyLock(resource, kind), now, sid, {
+          waiterTtlMs: config.waiterTtlMs
+        });
         return { content: formatLocks([state], config.protect, sid) };
       }
 
-      const states = allLocks().map(record => stateOf(record, now, sid));
+      const states = allLocks().map(record => stateOf(record, now, sid, { waiterTtlMs: config.waiterTtlMs }));
       if (!states.length) {
         return {
           content: `没有资源租约（目录 ${LOCK_DIR}）。可用: collab_lock { resource:"test-window", confirm:true }`
@@ -379,10 +416,13 @@ function formatLocks(states: LockState[], protect: string[], sid: string | undef
     );
   });
   const held = states.filter(state => !state.free).length;
+  const waiting = states.reduce((count, state) => count + state.waiters.length, 0);
+  const stale = states.reduce((count, state) => count + (state.staleWaiters?.length ?? 0), 0);
   return [
-    `资源租约 ${states.length} 个（held=${held} free=${states.length - held}）:`,
+    `资源租约 ${states.length} 个（持有=${held} 排队=${waiting} free=${states.length - held}` +
+      `${stale ? `，其中排队心跳过期 ${stale} 人` : ''}）:`,
     ...lines,
-    '读命令：不改状态、不回收、不叫醒排队者；过期租约在下一次 collab_lock 时回收。',
+    '读命令：不改状态、不回收、不叫醒排队者；过期租约 / 过期排队心跳在下一次 collab_lock 时回收。',
     sid ? `释放: collab_unlock { resource:"<资源名>", confirm:true }` : ''
   ]
     .filter(Boolean)

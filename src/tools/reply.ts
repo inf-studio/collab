@@ -21,7 +21,9 @@ export function replyTool(kit: ToolKit): ToolDefinition {
       "thread's counterpart (resolved from storage, so no target is needed). Only a participant of the thread " +
       "may reply. Always delivered with mode=queue, so it never interrupts the requester's running turn. " +
       'A protected counterpart is only reachable as the bounded receipt of the bid it broadcast and the caller ' +
-      'claimed. Requires confirm:true; otherwise it only previews.',
+      'claimed. Content de-duplication applies too: the same thread + the same body within `dedupeWindowMs` ' +
+      '(default 60s, 0 disables) is one message, so a retyped reply is not delivered twice. ' +
+      'Requires confirm:true; otherwise it only previews.',
     input: jsonInput({
       properties: {
         threadID: { type: 'string', description: 'Thread to answer (`t_…`), as received in the request.' },

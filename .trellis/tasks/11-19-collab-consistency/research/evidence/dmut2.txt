@@ -1,0 +1,3 @@
+# delta mutation: dmut2 (failures + summary)
+  ✗ S95 a misspelled waiterTtlMs falls back to 10 minutes (a 5m waiter is not [stale]) — - named:ttl-typo  held  mode=exclusive  holders=ses_s95hold  剩余=1h00m  ttl=1h00m  waiters=ses_s95t5#1:exclusive(5m)[stale]  ← 我排第 1
+=== 658/659 checks passed

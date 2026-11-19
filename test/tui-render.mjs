@@ -73,12 +73,13 @@ const SNAPSHOT = {
 };
 
 /** A host double: only the fields the plugin reads, plus call counters. */
-function harness({ fail = false, sessions = [], snapshot = SNAPSHOT, panelOpen = true } = {}) {
+function harness({ fail = false, sessions = [], snapshot = SNAPSHOT, panelOpen = true, pending = 0 } = {}) {
   const slots = {};
   const layers = [];
   const calls = [];
   const opened = [];
   const toasts = [];
+  const syncs = [];
   const context = {
     options: {},
     location: { directory: '/data/project/collab' },
@@ -92,7 +93,20 @@ function harness({ fail = false, sessions = [], snapshot = SNAPSHOT, panelOpen =
         }
       })
     },
-    data: { session: { list: () => sessions, status: () => 'idle' } },
+    data: {
+      session: {
+        list: () => sessions,
+        status: () => 'idle',
+        // 0.6.0 (R4): 宿主排队 — the app's own prompt queue (`delivery:"queue"`).
+        pending: {
+          list: () => Array.from({ length: pending }, (_, index) => ({ id: `msg_pending_${index}` })),
+          sync: async sessionID => {
+            syncs.push(sessionID);
+          },
+          invalidate: () => {}
+        }
+      }
+    },
     theme: {
       text: {
         base: '#ffffff',
@@ -129,7 +143,7 @@ function harness({ fail = false, sessions = [], snapshot = SNAPSHOT, panelOpen =
       }
     }
   };
-  return { context, slots, layers, calls, opened, toasts };
+  return { context, slots, layers, calls, opened, toasts, syncs };
 }
 
 function panelInput(over = {}) {
@@ -309,11 +323,82 @@ const sidebar = await mount(side.context, () => side.slots['sidebar.content']({ 
   height: 4
 });
 expect(
-  'R5 the sidebar line is 锁 N · 交接 M · 队列 K',
-  sidebar.frame.includes('锁 2 · 交接 1 · 队列 1'),
+  'R5 the sidebar line is the four compact numbers 锁 · 排 · 待 · 宿',
+  sidebar.frame.includes('锁 2 · 排 1 · 待 1 · 宿 0'),
   sidebar.frame.trim()
 );
 await sidebar.setup.dispose();
+
+/* ------------------------- 6b. R4 (0.6.0): the four numbers, one vocabulary */
+
+// 1 held + 3 queued + 2 owner-queue + 1 host pending → 锁 1 · 排 3 · 待 2 · 宿 1.
+// The second lease is free with a stale waiter: it must NOT count as held (the
+// old `locks.length` did — that was the misleading "锁 1").
+const FOUR = {
+  at: SNAPSHOT.at,
+  reachable: true,
+  sessions: [],
+  locks: [
+    {
+      resource: 'named:test-window',
+      kind: 'named',
+      mode: 'exclusive',
+      holders: ['ses_a'],
+      waiters: 2,
+      waiting: ['ses_b', 'ses_c'],
+      expiresInMs: 600_000,
+      waiterAgeMs: [1_000, 2_000]
+    },
+    {
+      resource: 'named:build',
+      kind: 'build',
+      mode: 'exclusive',
+      holders: [],
+      waiters: 1,
+      waiting: ['ses_d'],
+      expiresInMs: 0,
+      waiterAgeMs: [11 * 60_000],
+      staleWaiters: ['ses_d'],
+      stale: true
+    }
+  ],
+  handoffs: [],
+  queue: [
+    { queueId: 'q_1_aaaa', target: 'ses_p', ageMs: 1_000, summary: 'a', seen: false },
+    { queueId: 'q_2_bbbb', target: 'ses_p', ageMs: 2_000, summary: 'b', seen: false }
+  ]
+};
+
+const four = harness({ snapshot: FOUR, pending: 1 });
+const fourCleanup = await plugin.setup(four.context);
+const fourSidebar = await mount(four.context, () => four.slots['sidebar.content']({ sessionID: 'ses_probe' }), {
+  width: 46,
+  height: 4
+});
+expect(
+  'R4 the TUI sidebar reads 锁 1 · 排 3 · 待 2 · 宿 1 (held ≠ rows; the stale waiter holds nothing)',
+  fourSidebar.frame.includes('锁 1 · 排 3 · 待 2 · 宿 1'),
+  fourSidebar.frame.split('\n').map(line => line.trim()).filter(Boolean).join(' | ')
+);
+const fourPanel = await mount(four.context, () => four.slots['session.panel'](panelInput()), {
+  width: 100,
+  height: 30
+});
+expect(
+  'R4 the TUI panel prints the same four numbers in the long form',
+  fourPanel.frame.includes('持有 1 · 排队 3 · 待受保护 2 · 宿主排队 1'),
+  fourPanel.frame.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 3).join(' | ')
+);
+expect(
+  'R4 … and a legend so the four words are not guessed at',
+  fourPanel.frame.includes('图例: 持有=真实持有者') &&
+    fourPanel.frame.includes('排队=FIFO 等候') &&
+    fourPanel.frame.includes('宿主排队=宿主 prompt 队列'),
+  fourPanel.frame.split('\n').find(line => line.includes('图例'))?.trim() ?? '(无)'
+);
+await fourPanel.setup.dispose();
+await fourSidebar.setup.dispose();
+await fourCleanup();
 
 const sideOffline = harness({ fail: true });
 await sideCleanup();
@@ -351,7 +436,7 @@ expect(
   'R3 the sidebar starts collapsed: one line, a ▸ caret, no detail rows',
   sidebarLines.length === 1 &&
     sidebarLines[0].startsWith('▸') &&
-    sidebarLines[0].includes('锁 2 · 交接 1 · 队列 1') &&
+    sidebarLines[0].includes('锁 2 · 排 1 · 待 1 · 宿 0') &&
     !collapsedFrame.includes('🔒'),
   sidebarLines.join(' | ')
 );

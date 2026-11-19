@@ -1,0 +1,8 @@
+# full suite after P3 fixes
+=== 659/659 checks passed
+=== 12/12 checks passed
+=== 42/42 checks passed
+=== 32/32 checks passed
+=== 47/47 checks passed
+=== 7/7 panel checks passed
+skills ok

@@ -93,6 +93,18 @@ const records = [
     acquiredAt: 0,
     ttlMs: 0,
     expiresAt: 0
+  }),
+  // 0.6.0 (R3): free, one waiter whose heartbeat is 11 minutes old — still
+  // listed (a read view never reaps), but flagged so "1 lease" is not read as
+  // "1 holder".
+  lease({
+    resource: 'named:stale-window',
+    holders: [],
+    holder: undefined,
+    acquiredAt: 0,
+    ttlMs: 0,
+    expiresAt: 0,
+    waiters: [{ sid: 'ses_a3', at: now - 11 * 60_000, mode: 'exclusive' }]
   })
 ];
 
@@ -238,9 +250,61 @@ expect(
   'C2 a free lease nobody waits for is not listed',
   !snapshot.locks.some(lock => lock.resource === 'named:free-noise')
 );
+// 0.6.0 (R3): the waiter heartbeat is a read-only derived field — age, and a
+// `[stale]` marker once it is older than the waiter TTL. The row stays.
+expect(
+  'C2 a queued waiter carries its heartbeat age (read-only, never reaped by the view)',
+  held?.waiterAgeMs?.length === 1 && held?.waiterAgeMs[0] === 5_000 && held?.stale !== true,
+  JSON.stringify({ waiterAgeMs: held?.waiterAgeMs, stale: held?.stale })
+);
+const staleWindow = snapshot.locks.find(lock => lock.resource === 'named:stale-window');
+expect(
+  'C2 a heartbeat older than the waiter TTL is flagged stale and still listed (free, 0 holders)',
+  staleWindow?.holders.length === 0 &&
+    staleWindow?.stale === true &&
+    staleWindow?.staleWaiters?.join(',') === 'ses_a3' &&
+    staleWindow?.waiterAgeMs?.[0] >= 11 * 60_000,
+  JSON.stringify(staleWindow)
+);
+
+/* ------------------------------------------------- 2b. the four numbers (R4) */
+
+// 0.6.0: one definition shared by the GUI header, the TUI sidebar and the TUI
+// panel. `held` counts *holders*: the expired `named:build` lease and the free
+// `named:stale-window` row are listed but hold nothing, so they must not count.
+const { countsOf, pendingCountOf } = built.__internals ?? {};
+expect('R4 __internals exports countsOf + pendingCountOf', Boolean(countsOf) && Boolean(pendingCountOf));
+const counts = countsOf?.(snapshot) ?? {};
+const mineCounts = countsOf?.(await buildSnapshot(source, { session: 'ses_a1' }, now)) ?? {};
+expect(
+  'R4 countsOf: held = holders>0, waiting = sum of queues, protected = owner-queue length',
+  counts.held === 1 && counts.waiting === 3 && counts.protected === 0 &&
+    mineCounts.held === 1 && mineCounts.waiting === 3 && mineCounts.protected === 2,
+  JSON.stringify({ snapshot: counts, mine: mineCounts })
+);
+expect(
+  'R4 countsOf tolerates an empty / absent snapshot (0 · 0 · 0, never a throw)',
+  JSON.stringify(countsOf?.(undefined)) === '{"held":0,"waiting":0,"protected":0}' &&
+    JSON.stringify(countsOf?.({ locks: [], queue: [] })) === '{"held":0,"waiting":0,"protected":0}',
+  JSON.stringify(countsOf?.(undefined))
+);
+expect(
+  'R4 pendingCountOf reads the host prompt queue and never throws (no API / a throwing host → 0)',
+  pendingCountOf?.({ list: () => [{}, {}] }, 'ses_a1') === 2 &&
+    pendingCountOf?.(undefined, 'ses_a1') === 0 &&
+    pendingCountOf?.({ list: () => undefined }, 'ses_a1') === 0 &&
+    pendingCountOf?.(
+      {
+        list: () => {
+          throw new Error('host has no pending queue');
+        }
+      },
+      'ses_a1'
+    ) === 0 &&
+    pendingCountOf?.({ list: () => [{}] }, '') === 0
+);
 
 /* ---------------------------------------------------------------- 3. handoffs */
-
 expect(
   'C2 a decided hand-off is not "open"',
   !snapshot.handoffs.some(handoff => handoff.bid === 'b_00000000c3')
@@ -336,6 +400,16 @@ expect(
   Boolean(output.properties?.handoffs?.items?.properties?.archived) &&
     !output.properties?.handoffs?.items?.required?.includes('archived'),
   JSON.stringify(output.properties?.handoffs?.items?.properties)
+);
+expect(
+  'C2 the lock row declares optional waiterAgeMs / staleWaiters / stale (0.6.0)',
+  Boolean(output.properties?.locks?.items?.properties?.waiterAgeMs) &&
+    Boolean(output.properties?.locks?.items?.properties?.staleWaiters) &&
+    Boolean(output.properties?.locks?.items?.properties?.stale) &&
+    ['waiterAgeMs', 'staleWaiters', 'stale'].every(
+      key => !output.properties?.locks?.items?.required?.includes(key)
+    ),
+  JSON.stringify(output.properties?.locks?.items?.properties)
 );
 
 /* ------------------------------------------------------------- 7. GUI bundle */

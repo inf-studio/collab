@@ -1,5 +1,13 @@
 import type { ConfigReader } from '../config.ts';
-import { BCAST_DONE_STATES, CONFIG_PATH, INBOX_TEXT_LIMIT, REPLY_POLL_MS, STORAGE_ALIASES } from '../constants.ts';
+import {
+  BCAST_DONE_STATES,
+  CONFIG_PATH,
+  DEDUPE_MEMO_LIMIT,
+  DEDUPE_REPLY_LOOKBACK,
+  INBOX_TEXT_LIMIT,
+  REPLY_POLL_MS,
+  STORAGE_ALIASES
+} from '../constants.ts';
 import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
 import { allBroadcasts, mergeDelivery, readBroadcast } from '../core/claim.ts';
@@ -8,6 +16,7 @@ import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
+import { fmtTtl, touchWaiters } from '../core/locks.ts';
 import { takeoverBody } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import type { WakeSignal } from '../ids.ts';
@@ -169,6 +178,17 @@ export interface ToolKit {
    */
   capabilityNote(agent: unknown, expected: unknown): string | undefined;
   resolveMode(requested: unknown, agent: unknown): DeliveryMode;
+  /**
+   * R5 (0.6.0): the same thread + the same normalised body inside
+   * `dedupeWindowMs` is one message, not two. Returns the moment of the
+   * duplicate (and where it was found) or `undefined`. Read-only.
+   */
+  findDuplicateSend(input: {
+    threadID: string;
+    text: string;
+    record?: BroadcastRecord;
+    now?: number;
+  }): Promise<DuplicateSend | undefined>;
   dispatch(input: {
     context: ToolContext | undefined;
     input: JsonObject | undefined;
@@ -194,6 +214,59 @@ export interface ToolKit {
     threadID?: string;
     spawn?: boolean;
   }): Promise<{ delivered: boolean; record: BroadcastRecord }>;
+}
+
+/**
+ * R5 (0.6.0): where a duplicate was found and when it was admitted.
+ * `thread` = the thread's own message list (persistent, survives a reload);
+ * `record` = the hand-off record's recent `replies`; `memo` = the in-process
+ * fallback for a send that never made it into a thread message.
+ */
+export interface DuplicateSend {
+  at: number;
+  source: 'thread' | 'record' | 'memo';
+}
+
+/**
+ * The de-dup normalisation: whitespace is layout, not content — the same
+ * sentence with a different line break (a re-typed message, a pasted one, a
+ * wrapper that wrapped it) is the same message.
+ */
+export function normalizeSendBody(text: unknown): string {
+  return String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Process-local memo for sends that have no thread message to compare against.
+ * Cleared when the plugin reloads — acceptable: the thread is the SSOT, the memo
+ * only covers a same-process repeat.
+ */
+const sendMemo = new Map<string, number>();
+
+/**
+ * The de-dup window as a human label: below two minutes it is spelled in
+ * seconds (`60s 内同文`, exactly what the PRD asks the receipt to say);
+ * longer windows use the shared `14m`/`1h02m` shape.
+ */
+function dedupeWindowLabel(ms: number): string {
+  return ms < 120_000 ? `${Math.round(ms / 1000)}s` : fmtTtl(ms);
+}
+
+/** `threadID + '\n' + normalised body` — the de-dup key (design §3). */
+function sendKey(threadID: string, text: string): string {
+  return `${threadID}\n${normalizeSendBody(text)}`;
+}
+
+function rememberSend(threadID: string, text: string, at: number): void {
+  sendMemo.set(sendKey(threadID, text), at);
+  // Bounded: oldest key out first (insertion order), never a scan per send.
+  while (sendMemo.size > DEDUPE_MEMO_LIMIT) {
+    const oldest = sendMemo.keys().next();
+    if (oldest.done) break;
+    sendMemo.delete(oldest.value);
+  }
 }
 
 export function createToolKit(deps: ToolDeps): ToolKit {
@@ -274,6 +347,58 @@ export function createToolKit(deps: ToolDeps): ToolKit {
   function resolveMode(requested: unknown, agent: unknown): DeliveryMode {
     if (isReadonlyAgent(agent)) return { mode: 'queue', forced: true };
     return { mode: requested === 'steer' ? 'steer' : 'queue', forced: false };
+  }
+
+  /**
+   * R5 (0.6.0): content-level idempotency for `collab_send` / `collab_reply`.
+   *
+   * The record layer only ever deduped `cid` / ack traffic, so the **same text**
+   * sent twice into the same thread 15 s apart was delivered twice (observed).
+   * Three sources are consulted, cheapest first — all read-only:
+   *
+   *   ① the hand-off record's own recent `replies` (a bounded receipt lands
+   *     there, `DEDUPE_REPLY_LOOKBACK` of them);
+   *   ② the thread's own message list — the persistent source (survives a plugin
+   *     reload; `dispatch` appends every admitted body there);
+   *   ③ a process-local memo, for a send that never became a thread message.
+   *
+   * Nothing is ever delivered *or* appended when this hits: the caller gets the
+   * readback ("未重复投递") instead of a silent second copy.
+   */
+  async function findDuplicateSend({
+    threadID,
+    text,
+    record,
+    now = Date.now()
+  }: {
+    threadID: string;
+    text: string;
+    record?: BroadcastRecord;
+    now?: number;
+  }): Promise<DuplicateSend | undefined> {
+    const windowMs = Math.max(0, Number(readConfig().dedupeWindowMs) || 0);
+    if (!windowMs) return undefined; // `dedupeWindowMs:0` = off (rollback switch)
+    const thread = String(threadID ?? '');
+    const norm = normalizeSendBody(text);
+    if (!thread || !norm) return undefined;
+    const fresh = (at: number): boolean => Number.isFinite(at) && at > 0 && now - at <= windowMs && now >= at;
+
+    for (const reply of (record?.replies ?? []).slice(-DEDUPE_REPLY_LOOKBACK)) {
+      const at = Number(reply?.at) || 0;
+      if (fresh(at) && normalizeSendBody(reply?.text) === norm) return { at, source: 'record' };
+    }
+
+    const stored = await threads.read(thread);
+    // The tail only: an old message in a long-lived thread is history, not a repeat.
+    for (const message of [...(stored?.msgs ?? [])].reverse().slice(0, 20)) {
+      const at = Number(message?.ts) || 0;
+      if (!fresh(at)) continue;
+      if (normalizeSendBody(message?.text) === norm) return { at, source: 'thread' };
+    }
+
+    const memoAt = sendMemo.get(sendKey(thread, text));
+    if (memoAt && fresh(memoAt)) return { at: memoAt, source: 'memo' };
+    return undefined;
   }
 
   /** Delivery + thread bookkeeping shared by `collab_send` and `collab_reply`. */
@@ -393,6 +518,37 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       };
     }
 
+    // R5 (0.6.0): the same thread + the same normalised body inside the dedupe
+    // window is one message. Checked *after* the preview branch (a preview writes
+    // nothing, including the memo) and *before* the delivery: no prompt, no
+    // thread append, no record write.
+    const dedupeWindowMs = Math.max(0, Number(config.dedupeWindowMs) || 0);
+    if (dedupeWindowMs > 0) {
+      const bid = String(input?.bid ?? '').trim();
+      const duplicate = await findDuplicateSend({
+        threadID: threadID ?? '',
+        text: body,
+        ...(bid ? { record: readBroadcast(bid) } : {})
+      });
+      if (duplicate) {
+        return {
+          content: [
+            `未重复投递: thread ${threadID} 在 ${dedupeWindowLabel(dedupeWindowMs)} 内已有同文（去重窗口），` +
+              `本次未投递、也未追加回复。`,
+            `目标: ${targetLine}`,
+            `kind=${kind}  命中来源=${duplicate.source}  上次=${fmtTime(duplicate.at)}`,
+            '只有正文归一化后完全一致才算重复（空白差异会被折叠）。确实要再发一次：改一处措辞 / 换 threadID，' +
+              '或把 collab.json 的 dedupeWindowMs 设为 0 关闭去重。',
+            `读回已有消息: collab_wait { threadID:"${threadID}" } 或 collab_inbox`
+          ].join('\n')
+        };
+      }
+    }
+
+    // R2 (0.6.0): any writing collab call refreshes this session's waiter
+    // heartbeat (throttled ≥30s inside) — the context hook is not the only path.
+    await touchWaiters(context?.sessionID);
+
     const admittedAt = Date.now();
     const admitted = await deliverPrompt({
       sessionID,
@@ -424,6 +580,10 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           })
         )
       : undefined;
+
+    // R5 (0.6.0): remember this body for the in-process half of the check. A
+    // thread message is the persistent half and needs no memo.
+    if (threadID) rememberSend(threadID, body, admittedAt);
 
     return {
       content: [
@@ -540,6 +700,9 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const config = readConfig();
     const guard = await createLineage(ctx).protectedAncestor(target, config.protect);
     if (guard) return { delivered: false, record: current }; // never deliver into a protected line
+    // R2 (0.6.0): a hand-off attempt is a writing collab call — it also counts as
+    // the requester's waiter heartbeat (throttled ≥30s inside).
+    await touchWaiters(current.from?.sid);
     const requester = String(record?.from?.sid ?? '');
     const from = senderLabel(requester) || 'handoff';
     const previous = current.delivery ?? {};
@@ -626,6 +789,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     isReadonlyAgent,
     capabilityNote,
     resolveMode,
+    findDuplicateSend,
     dispatch,
     waitForReply,
     deliveryStatus,

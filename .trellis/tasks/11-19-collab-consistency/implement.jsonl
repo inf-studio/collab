@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "可读拒绝与失败隔离：waiter 回收/去重命中都要返回可读结果"}
+{"file": ".trellis/spec/frontend/type-safety.md", "reason": "snapshot 新增可选字段与 i18n 参数的类型约定"}
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "GUI/TUI 单一轮询与四数展示的既有约定"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "core(锁/计数) → tools → snapshot → GUI/TUI 的数据流"}

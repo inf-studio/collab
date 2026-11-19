@@ -59,7 +59,13 @@ export const DEFAULTS = {
   protect: BUILTIN_PROTECT,
   readonlyAgents: DEFAULT_READONLY_AGENTS,
   /** 0.5.0: archive the sessions we spawned once their hand-off is over. */
-  archiveSpawned: true
+  archiveSpawned: true,
+  /** 0.6.0: a waiter that stops heartbeating this long is reaped on the next acquire. */
+  waiterTtlMs: 10 * 60 * 1000,
+  /** 0.6.0: refresh `waiter.at` from the session's own `context` hook. */
+  waiterHeartbeat: true,
+  /** 0.6.0: the same thread + the same normalised body inside this window is one message. */
+  dedupeWindowMs: 60_000
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -264,6 +270,53 @@ export const LOCK_HISTORY_LIMIT = 50;
 export const LOCK_QUEUE_LIMIT = 50;
 /** `reason` is one line, ≤200 chars, control characters stripped. */
 export const LOCK_REASON_LIMIT = 200;
+
+// ------------------------------------------------ waiter heartbeat (0.6.0, R1/R2)
+
+/**
+ * A queued waiter is **not** a lease: it has no TTL and used to live forever,
+ * so one session that queued once and never came back could keep a free
+ * resource unusable for everyone else («资源空闲，但有人在排队», observed ≥3×
+ * in one night). `LockWaiter.at` therefore became a **heartbeat**:
+ *
+ *   - `collab_lock` (re-apply) / the session's own `context` hook / any writing
+ *     `collab_*` call refresh it (`touchWaiters`, throttled);
+ *   - the next `acquire` drops waiters whose heartbeat is older than this
+ *     (`reapWaiters`) — only the *write* path, never a read command.
+ *
+ * Default 10 min: long enough for a session that is working through a long
+ * turn (the heartbeat is per request, not per tool call), short enough that a
+ * lost session frees the queue within one coffee break.
+ */
+export const LOCK_WAITER_TTL_MS = 10 * 60 * 1000;
+/** Floor: below this a heartbeat could not span one long turn. */
+export const LOCK_WAITER_TTL_MIN_MS = 60 * 1000;
+/** Ceiling: a waiter is never kept for a whole afternoon. */
+export const LOCK_WAITER_TTL_MAX_MS = 60 * 60 * 1000;
+/**
+ * Minimum interval between two heartbeat **writes** for one session. The touch
+ * runs on every writing tool call / model request; without the throttle a long
+ * turn would rewrite the same lock file dozens of times for no new information.
+ */
+export const LOCK_WAITER_TOUCH_MS = 30 * 1000;
+
+// ---------------------------------------------- content de-duplication (0.6.0, R5)
+
+/**
+ * R5 (0.6.0): `collab_send` / `collab_reply` treat the **same thread** + the
+ * **same normalised body** inside `dedupeWindowMs` (default 60s,
+ * `DEFAULTS.dedupeWindowMs`; `0` = off) as one message. The record layer only
+ * ever deduped `cid` / ack traffic, so the same text sent twice 15 s apart was
+ * delivered twice (observed).
+ *
+ * `DEDUPE_WINDOW_MAX_MS` is the ceiling (a wider window would swallow a real
+ * re-send); the other two bound the per-check work.
+ */
+export const DEDUPE_WINDOW_MAX_MS = 24 * 60 * 60 * 1000;
+/** How many recent `record.replies` entries are consulted (the persistent half). */
+export const DEDUPE_REPLY_LOOKBACK = 3;
+/** The in-process memo (records without a bid) is pruned above this size. */
+export const DEDUPE_MEMO_LIMIT = 200;
 
 // ------------------------------------------------------- delivery / ack (0.1.6)
 

@@ -46,7 +46,13 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 > 侧栏的 `collab` 面板（0.3.0 起，只读，与 `collab_locks` 同一数据源）。
 >
 > 入口（0.5.1，全部只读）：Desktop 用命令面板的 `collab.open` / `mod+shift+l` / `/collab`，或点会话头部的
-> `锁 N · 交接 M · 队列 K` 计数条；TUI 用 `/collab`（`ctrl+shift+l`），或点侧栏摘要行展开明细、再点明细行开面板。
+> 计数条；TUI 用 `/collab`（`ctrl+shift+l`），或点侧栏摘要行展开明细、再点明细行开面板。
+>
+> 0.6.0 计数口径（GUI 会话头 = `持有 N · 排队 M · 待受保护 K · 宿主排队 J`，TUI 侧栏紧凑写成
+> `锁 N · 排 M · 待 K · 宿 J`）：**持有**只数真正有持有者的资源（排队者不算，`free 但有 waiter` 也不算
+> 被占用）；**排队**是各资源 FIFO 人数之和（可能全是 `[stale]` 过期心跳，不占位）；**待受保护**是本会话提交给
+> 受保护目标的请求；**宿主排队**是宿主自己的 prompt 队列。看 `collab_locks` 时同理：`free` + `waiters=…`
+> 不是被占用。
 >
 > 0.5.2 探针：Desktop 标题栏常驻一个 **`collab` pill**（无数据时就是 `collab`，有数据 `collab N`）。
 > 有会话时点它开面板；**没有会话时点它会弹「Collab GUI 已加载」toast**——看到 toast 就说明这个窗口确实
@@ -67,6 +73,9 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 - `seen=-` **不等于**「没送到」：目标 busy 时它只是还没开下一轮；busy 目标**永不重发**。
 - 只会补投 **1 次**（admission 失败，或 2h 无 `seen` 且目标当时 idle），同 `cid` 幂等。
 - `unacked=yes` = 预算用满 + 窗口已过仍无 ack → 人工补投；受保护发起方恒为 `seen=n/a`（`ackUnavailable`）。
+- **正文去重（0.6.0）**：同 thread + 归一化后（空白折叠）完全一致的正文在 `dedupeWindowMs`（默认 60s）内
+  只投递一次；重复时返回「未重复投递…60s 内已有同文」，**不投递、不追加 thread 消息**。真要再发就改措辞 /
+  换 threadID，或把 `dedupeWindowMs` 设为 0 关闭。预览（`confirm:false`）不受影响。
 
 **闭环后追加（pull，不是 push）**：
 

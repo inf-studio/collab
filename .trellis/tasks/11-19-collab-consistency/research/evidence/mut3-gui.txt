@@ -1,0 +1,3 @@
+# mutation run: mut3-gui.log (only failures + summary kept)
+  ✗ PN5 the session header prints 持有 1 · 排队 3 · 待受保护 2 · 宿主排队 1 (held ≠ rows) — "持有 2 · 排队 3 · 待受保护 2 · 宿主排队 1"
+=== 6/7 panel checks passed

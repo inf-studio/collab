@@ -50,6 +50,16 @@ export interface SnapshotLock {
   waiting: string[];
   /** Remaining TTL in ms; `0` when the resource is free. */
   expiresInMs: number;
+  /**
+   * 0.6.0 (R3): `now − waiter.at` per queued session, same order as `waiting` —
+   * "is this queue alive or is it a heartbeat-less leftover?". Optional: an
+   * older server answers without it and every consumer must tolerate that.
+   */
+  waiterAgeMs?: number[];
+  /** 0.6.0 (R3): the queued sids whose heartbeat is older than the waiter TTL. */
+  staleWaiters?: string[];
+  /** 0.6.0 (R3): shorthand for `staleWaiters.length > 0`. */
+  stale?: boolean;
   reason?: string;
 }
 
@@ -151,6 +161,10 @@ export const CollabState = {
                 waiters: num,
                 waiting: strArray,
                 expiresInMs: num,
+                // 0.6.0 (R3): optional, so an older server's answer stays valid.
+                waiterAgeMs: { type: 'array', items: num },
+                staleWaiters: strArray,
+                stale: bool,
                 reason: str
               },
               ['resource', 'kind', 'mode', 'holders', 'waiters', 'waiting', 'expiresInMs']
