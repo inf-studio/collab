@@ -1,4 +1,5 @@
 import { VERDICT_MESSAGE_LIMIT, VERDICT_NOTE_LIMIT, BCAST_LEASE_MS } from '../constants.ts';
+import { normalizeThreadID } from '../ids.ts';
 import type { BroadcastRecord, SessionMessageLike } from '../types.ts';
 import { truncateRaw } from '../util.ts';
 
@@ -235,6 +236,57 @@ export function verdictFromTexts(texts: string[] | undefined, { bid }: { bid?: s
 }
 
 /**
+ * 0.7.0 (R2): the receiving-side protocol header — the first lines of every
+ * hand-off block, so a session knows it is the claimant and how to answer
+ * *before* it reads the task. Without it the pilot's `explore` session answered
+ * in its own turn and never sent a receipt.
+ *
+ * **P2 (0.7.0 review): the advertised command must actually close the hand-off.**
+ * The first version printed `collab_reply { threadID, confirm:true }` plus
+ * `阻塞用 kind:"note"`, and neither works:
+ *   - `collab_reply` requires `text` (a copy-paste fails with `text 不能为空`);
+ *   - it has no `kind` field, and an explicit `note` is ignored as a non-receipt;
+ *   - a plain-text reply closes nothing — only a `[handoff] DONE|BLOCKED <bid>`
+ *     line moves the record (`applyReceipt` → `parseReceiptLine`).
+ * So the header now hands out two copy-pasteable commands whose `text` already
+ * carries the `[handoff]` line. Peer scope has no usable thread across
+ * locations, so there the `[handoff]` line itself is the receipt (pushed with
+ * `collab_send`, which the block's ①②③ steps spell out with the requester sid).
+ */
+export function protocolHeader({
+  bid,
+  threadID,
+  peer = false
+}: {
+  bid?: string;
+  threadID?: string;
+  /** Cross-workspace: never advertise `collab_reply` (no shared thread there). */
+  peer?: boolean;
+}): string[] {
+  const id = String(bid ?? '');
+  const target = id || '<bid>';
+  const thread = normalizeThreadID(threadID);
+  const ids = [id ? `bid=${id}` : '', thread ? `thread=${thread}` : ''].filter(Boolean).join(' / ');
+  const lines = [`你是承接方（${ids || '未标注 id'}）`];
+  if (thread && !peer) {
+    // Local scope: `collab_reply` resolves the counterpart, but the body still
+    // has to carry the `[handoff]` line — that line *is* the receipt.
+    lines.push(
+      `完成后回执：collab_reply { threadID:"${thread}", text:"[handoff] DONE ${target} <摘要>", confirm:true }`,
+      `阻塞回执：collab_reply { threadID:"${thread}", text:"[handoff] BLOCKED ${target} <缺什么>", confirm:true }`
+    );
+  } else if (id) {
+    lines.push(
+      `完成后回执：[handoff] DONE|BLOCKED ${id} <摘要>（把这一行写进 collab_send 的 text 发给发起方，confirm:true；` +
+        '阻塞写清缺什么，不要只在会话里说“完成了”）。'
+    );
+  } else {
+    lines.push('完成后回执：把 [handoff] DONE|BLOCKED <bid> <摘要> 写进 collab_send 的 text 发给发起方。');
+  }
+  return lines;
+}
+
+/**
  * R1: the takeover message body, shared by the three places that deliver it:
  * the `busy > 30min` wake prompt, the freshly spawned session and the 0.1.6
  * resend (same `cid`, so the receiving side de-duplicates it). One builder keeps
@@ -255,6 +307,8 @@ export function takeoverBody({
   // takeover text asks for the in-session `[handoff]` line instead.
   const receiptMode: 'push' | 'pull' = record?.receiptMode === 'pull' ? 'pull' : 'push';
   return [
+    // 0.7.0 (R2): the claimant learns who it is and how to answer first.
+    ...protocolHeader({ bid: record.bid, threadID: record.threadID, peer: record.scope === 'peer' }),
     `[collab-handoff] ${record.title ?? '(untitled)'}`,
     `提案：${record.issuePath ?? '-'}${record.workspace ? `（工作区 ${record.workspace}，scope=${record.scope}）` : ''}`,
     `影响面：${(record.affectedFiles ?? []).slice(0, 8).join(', ') || '(未标注)'}`,

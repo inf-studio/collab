@@ -1,0 +1,33 @@
+{
+  "id": "collab-0p7",
+  "name": "collab-0p7",
+  "title": "0.7：协作自动感知与转发链",
+  "description": "父任务：让会话自动知道何时该协作（而不是靠人提醒），并补齐转发链的对接人/多 thread/去重/结构化字段",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "@长久同学^v^",
+  "assignee": "@长久同学^v^",
+  "createdAt": "2026-11-19",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-19-collab-awareness",
+    "11-19-collab-origin",
+    "11-19-collab-dedupe-target",
+    "11-19-collab-threads",
+    "11-19-collab-blocked",
+    "11-19-collab-decisions"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

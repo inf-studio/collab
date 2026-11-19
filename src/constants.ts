@@ -17,6 +17,18 @@ export const COLLAB_PREFIX_RE = /^\[collab:([^\]]*)\]/;
 export const COLLAB_ENVELOPE_RE = /^\[collab:([^\]]*)\](?:\[([a-z]+)(?::([^\]]*))?\])?\s*/;
 
 export const DEFAULT_MAX_INJECT = 3;
+/**
+ * 0.7.0 (R1/R3): the one-line awareness hint is injected at most once per
+ * session per window, and the cross-workspace session page is read at most once
+ * per window — the hint must never turn into a per-request poll.
+ */
+export const AWARENESS_TTL_MS = 10 * 60 * 1000;
+/**
+ * One page for "count everyone else". Deliberately larger than
+ * `SCORE_CANDIDATE_LIMIT` (20) — a count is truncated silently, a ranking is
+ * not, so the page must not cut off the workspaces we are counting (R3).
+ */
+export const AWARENESS_LIST_LIMIT = 200;
 /** Ancestor hops followed by the lineage guard (protect list + `collab_list`). */
 export const MAX_LINEAGE_DEPTH = 8;
 export const INJECT_CHARS = 200;
@@ -65,7 +77,12 @@ export const DEFAULTS = {
   /** 0.6.0: refresh `waiter.at` from the session's own `context` hook. */
   waiterHeartbeat: true,
   /** 0.6.0: the same thread + the same normalised body inside this window is one message. */
-  dedupeWindowMs: 60_000
+  dedupeWindowMs: 60_000,
+  /**
+   * 0.7.0 (R5): the read-only awareness hint ("本工作区候选 N · 其它工作区候选 M").
+   * `line` (default) injects at most one line per 10 min; `off` injects none.
+   */
+  awareness: 'line' as 'line' | 'off'
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)

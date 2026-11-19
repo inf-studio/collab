@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -201,6 +201,35 @@ collab_freeze { scope:"session", target:"ses_…", freeze:false, confirm:true } 
 - 存储 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename +
   短锁），两个工作区同时写不会互相覆盖。
 - **冻结 ≠ 归档 ≠ 删除**：不隐藏会话、不删文件、不写 permissions、不切 agent；`freeze:false` 立刻恢复。
+
+## 一点十一、自动感知：一行提示 + 承接方协议头（0.7.0）
+
+**需求侧**：不用等人提醒「用 collab_handoff」。`context` 注入**末尾**会有一行（每会话每 10 分钟最多一次）：
+
+```text
+协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）
+```
+
+- 只给**数量与通道**，不猜「该找谁」：要名单用 `collab_list`，要选人让 `collab_handoff` 打分或人来定。
+- 单边为 0 就省略该半句；两边都 0 不出现；`awareness:"off"` 关闭（`~/.config/opencode/collab.json`）。
+- 以下情况**不出现**（不是故障）：当前会话是 `[protected*]`；自己已有一笔**未闭环**交接（先处理它）；
+  注入预算被未读消息占满（交接 / 队列 / 未读永远优先）。
+- 只读：不写记录、不建 thread、不投递。每个 10 分钟窗口只查 **2 页**（一页本工作区数 N、一页全局数 M）；
+  没有 `ctx.location.directory` 时 N=0，只显示 M；宿主报错就只显示 N。
+
+**承接侧**：收到的交接投递 / 接管请求，**最前面几行**固定是（命令可直接执行，且执行后真的闭环）——
+
+```text
+你是承接方（bid=b_… / thread=t_…）
+完成后回执：collab_reply { threadID:"t_…", text:"[handoff] DONE b_… <摘要>", confirm:true }
+阻塞回执：collab_reply { threadID:"t_…", text:"[handoff] BLOCKED b_… <缺什么>", confirm:true }
+```
+
+跨工作区（peer，没有可用 thread）第二行是
+`完成后回执：[handoff] DONE|BLOCKED b_… <摘要>（把这一行写进 collab_send 的 text 发给发起方）`。
+「回执」才是完成：只在会话里说「做完了」既不会被采纳，也不会自动闭环——闭环**只认**正文里的
+`[handoff] DONE|BLOCKED <bid>` 行；`collab_reply` 没有 `kind` 参数，`text` 是必填，别省（协议头里的
+`①领取 → ②回执 → ③只分析=未完成` 三步照旧）。
 
 ## 二、同工作区（local）
 

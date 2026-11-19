@@ -56,6 +56,7 @@ import {
   HANDOFF_DECLINE_RE,
   handoffActions,
   parseReceiptLine,
+  protocolHeader,
   receiptAllowed,
   receiptMatches,
   takeoverBody,
@@ -1007,6 +1008,13 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           const requester = String(record.from?.sid ?? '');
           const leaseMin = Math.round((record.asked?.leaseMs ?? BCAST_LEASE_MS) / 60_000);
           lines.push(
+            // 0.7.0 (R2): the receiving side's protocol header — first two lines
+            // of the block: "you are the claimant" + the exact receipt command.
+            ...protocolHeader({
+              bid: record.bid,
+              threadID: record.threadID,
+              peer: record.scope === 'peer'
+            }),
             `- 接管请求 ${record.bid}：${truncate(record.title ?? '(untitled)', 80)}（提案 ${record.issuePath}，期望 ${record.expected}，影响面 ${files}）` +
               ` 发起方=${requester || '(缺失，用 collab_inbox 查)'} → ${handoffActions({
                 bid: record.bid,

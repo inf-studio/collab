@@ -9262,6 +9262,537 @@ rmSync(freezeFile, { force: true });
 rmSync(`${freezeFile}.lock`, { force: true });
 rmSync(ownerQueueDir, { recursive: true, force: true });
 
+// ================== S99 (0.7.0: 自动感知 awareness line + 承接方协议头)
+// R1–R5: one read-only line telling a session which channel exists and how many
+// candidates there are, then a fixed two-line header on every hand-off *block*
+// the receiving side gets (claimant identity + the exact receipt command).
+// Every case swaps the session page so the counts are exact — a count that is
+// merely "some number > 0" would pass with a broken filter.
+const S99_WS = ws('s99');
+const S99_WS_B = ws('s99b');
+const S99_WS_C = ws('s99c');
+const S99_WS_ALONE = ws('s99-alone');
+const S99_WS_ZERO = ws('s99-zero');
+
+const s99Session = (id, directory, extra = {}) => ({
+  id,
+  agent: 'build',
+  title: id,
+  time: { updated: now, busy: 0 },
+  location: { directory },
+  ...extra
+});
+
+// Count the cross-workspace page reads: the awareness `M` query is the only
+// `list({ limit: AWARENESS_LIST_LIMIT })` **without** a `directory`.
+const s99ListCalls = [];
+const s99RealList = ctx.session.list;
+ctx.session.list = async (input = {}) => {
+  s99ListCalls.push({ directory: input?.directory, limit: input?.limit });
+  return s99RealList(input);
+};
+const s99RemoteReads = () =>
+  s99ListCalls.filter(call => call.limit === internals.AWARENESS_LIST_LIMIT && !call.directory).length;
+
+const s99SavedDirectory = ctx.location.directory;
+async function withAwarenessCase({ dir: directory, map }, fn) {
+  const saved = { ...sessions };
+  for (const key of Object.keys(sessions)) delete sessions[key];
+  Object.assign(sessions, map);
+  ctx.location.directory = directory;
+  try {
+    return await fn();
+  } finally {
+    for (const key of Object.keys(sessions)) delete sessions[key];
+    Object.assign(sessions, saved);
+    ctx.location.directory = s99SavedDirectory;
+  }
+}
+
+// --- S99a: 同工作区 1 + 其它工作区 3 → 一行两半；10 分钟内第二次不出现，列表只查一次
+const S99_ME = 'ses_s99_me';
+const s99aMap = {
+  [S99_ME]: s99Session(S99_ME, S99_WS),
+  ses_s99_mate: s99Session('ses_s99_mate', S99_WS),
+  ses_s99_child: s99Session('ses_s99_child', S99_WS, { parentID: 'ses_s99_mate' }),
+  ses_s99_arch: s99Session('ses_s99_arch', S99_WS, { time: { updated: now, busy: 0, archived: now } }),
+  ses_s99_b1: s99Session('ses_s99_b1', S99_WS_B),
+  ses_s99_b2: s99Session('ses_s99_b2', S99_WS_B),
+  ses_s99_c1: s99Session('ses_s99_c1', S99_WS_C)
+};
+let s99aText = '';
+let s99aSecond = '';
+let s99aReads = 0;
+let s99aReadsAfterSecond = 0;
+let s99aPageShape = { workspace: 0, global: 0 };
+await withAwarenessCase({ dir: S99_WS, map: s99aMap }, async () => {
+  const before = s99RemoteReads();
+  const windowStart = s99ListCalls.length;
+  const first = contextEvent(S99_ME);
+  await hooks.context(first);
+  s99aText = textOf(first);
+  s99aReads = s99RemoteReads() - before;
+  // P3a（复核）：一个 10 分钟窗口是 **2 页** —— 一页带 `directory` 数本工作区，
+  // 一页全局数其它工作区。文档与断言必须说同一个口径。
+  const windowCalls = s99ListCalls.slice(windowStart).filter(call => call.limit === internals.AWARENESS_LIST_LIMIT);
+  s99aPageShape = {
+    workspace: windowCalls.filter(call => Boolean(call.directory)).length,
+    global: windowCalls.filter(call => !call.directory).length
+  };
+  const second = contextEvent(S99_ME);
+  await hooks.context(second);
+  s99aSecond = textOf(second);
+  s99aReadsAfterSecond = s99RemoteReads() - before;
+});
+out('S99 awareness line (N=1, M=3)', s99aText);
+expect(
+  'S99 the line carries both counts (child + archived sessions are not candidates)',
+  s99aText.includes(
+    '协作：本工作区候选 1（collab_handoff） · 其它工作区候选 3（collab_broadcast，需提案）'
+  ),
+  s99aText.split('\n').find(line => line.includes('协作：')) ?? '(缺失)'
+);
+expect(
+  'S99 the cross-workspace page is read once (not per candidate, not per request)',
+  s99aReads === 1,
+  `${s99aReads} page read(s)`
+);
+expect(
+  'S99 a second request inside 10min injects no line and reads no page',
+  !s99aSecond.includes('协作：') && s99aReadsAfterSecond === 1,
+  `line=${s99aSecond.includes('协作：')} reads=${s99aReadsAfterSecond}`
+);
+expect(
+  'S99 one window reads 2 pages: one workspace page (N) + one global page (M)',
+  s99aPageShape.workspace === 1 && s99aPageShape.global === 1,
+  `workspace=${s99aPageShape.workspace} global=${s99aPageShape.global}`
+);
+
+// --- S99b: 只有跨工作区（N=0）→ 只出现后半句
+let s99bText = '';
+await withAwarenessCase(
+  {
+    dir: S99_WS_ALONE,
+    map: {
+      ses_s99_alone: s99Session('ses_s99_alone', S99_WS_ALONE),
+      ses_s99_r1: s99Session('ses_s99_r1', S99_WS_B),
+      ses_s99_r2: s99Session('ses_s99_r2', S99_WS_C)
+    }
+  },
+  async () => {
+    const event = contextEvent('ses_s99_alone');
+    await hooks.context(event);
+    s99bText = textOf(event);
+  }
+);
+expect(
+  'S99 N=0 keeps only the broadcast half (no 本工作区候选)',
+  s99bText.includes('协作：其它工作区候选 2（collab_broadcast，需提案）') && !s99bText.includes('本工作区候选'),
+  s99bText.split('\n').find(line => line.includes('协作：')) ?? '(缺失)'
+);
+
+// --- S99c: N+M=0 → 不注入，且空结果也在 10 分钟缓存里（不重复查宿主列表）
+let s99cFirst = '';
+let s99cSecond = '';
+let s99cReads = 0;
+await withAwarenessCase(
+  { dir: S99_WS_ZERO, map: { ses_s99_zero: s99Session('ses_s99_zero', S99_WS_ZERO) } },
+  async () => {
+    const before = s99RemoteReads();
+    const event = contextEvent('ses_s99_zero');
+    await hooks.context(event);
+    s99cFirst = textOf(event);
+    const second = contextEvent('ses_s99_zero');
+    await hooks.context(second);
+    s99cSecond = textOf(second);
+    s99cReads = s99RemoteReads() - before;
+  }
+);
+expect(
+  'S99 nobody to ask → no line at all',
+  !s99cFirst.includes('协作：') && !s99cSecond.includes('协作：'),
+  s99cFirst.split('\n').slice(0, 2).join(' | ') || '(空)'
+);
+expect(
+  'S99 an empty count is cached too (the page is not re-read per request)',
+  s99cReads === 1,
+  `${s99cReads} page read(s)`
+);
+
+// --- S99d: 已有未闭环交接（from.sid = me，非终态）→ 不注入
+const S99_OPEN_BID = 'b_99999999999900d1';
+writeFileSync(
+  bcFile(S99_OPEN_BID),
+  JSON.stringify({
+    bid: S99_OPEN_BID,
+    scope: 'local',
+    workspace: S99_WS,
+    state: 'acked',
+    threadID: 't_s99_open',
+    title: 'S99 未闭环交接',
+    expected: 'implement',
+    claim: { by: 'ses_s99_mate', kind: 'handoff', at: now, leaseMs: 300_000 },
+    attempts: 0,
+    from: { sid: 'ses_s99_busy', directory: S99_WS },
+    createdAt: now
+  })
+);
+let s99dText = '';
+let s99dReads = 0;
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      ses_s99_busy: s99Session('ses_s99_busy', S99_WS),
+      ses_s99_mate2: s99Session('ses_s99_mate2', S99_WS)
+    }
+  },
+  async () => {
+    const before = s99RemoteReads();
+    const event = contextEvent('ses_s99_busy');
+    await hooks.context(event);
+    s99dText = textOf(event);
+    s99dReads = s99RemoteReads() - before;
+  }
+);
+rmSync(bcFile(S99_OPEN_BID), { force: true });
+expect(
+  'S99 an unfinished hand-off of my own suppresses the hint (and costs no page read)',
+  !s99dText.includes('协作：') && s99dReads === 0,
+  `line=${s99dText.includes('协作：')} reads=${s99dReads}`
+);
+
+// --- S99e: protected → 不注入（它只能靠队列 / 被问询）
+let s99eText = '';
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      [internals.BUILTIN_PROTECT[0]]: s99Session(internals.BUILTIN_PROTECT[0], S99_WS),
+      ses_s99_mate3: s99Session('ses_s99_mate3', S99_WS),
+      ses_s99_b3: s99Session('ses_s99_b3', S99_WS_B)
+    }
+  },
+  async () => {
+    const event = contextEvent(internals.BUILTIN_PROTECT[0]);
+    await hooks.context(event);
+    s99eText = textOf(event);
+  }
+);
+expect('S99 a protected session gets no hint', !s99eText.includes('协作：'), s99eText.slice(0, 120) || '(空)');
+
+// --- S99f: awareness:"off" → 0 行
+await writeConfig({ awareness: 'off' });
+let s99fText = '';
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      ses_s99_off: s99Session('ses_s99_off', S99_WS),
+      ses_s99_mate4: s99Session('ses_s99_mate4', S99_WS)
+    }
+  },
+  async () => {
+    const event = contextEvent('ses_s99_off');
+    await hooks.context(event);
+    s99fText = textOf(event);
+  }
+);
+await writeConfig({});
+expect('S99 awareness:"off" injects zero lines', !s99fText.includes('协作：'), s99fText.slice(0, 120) || '(空)');
+
+// --- S99g: 宿主列表抛错 → 只写 N，不抛
+let s99gText = '';
+let s99gError;
+const s99ListWithThrow = ctx.session.list;
+ctx.session.list = async (input = {}) => {
+  if (!input?.directory) throw new Error('host list unavailable (S99)');
+  return s99ListWithThrow(input);
+};
+try {
+  await withAwarenessCase(
+    {
+      dir: S99_WS,
+      map: {
+        ses_s99_deg: s99Session('ses_s99_deg', S99_WS),
+        ses_s99_mate5: s99Session('ses_s99_mate5', S99_WS)
+      }
+    },
+    async () => {
+      const event = contextEvent('ses_s99_deg');
+      await hooks.context(event);
+      s99gText = textOf(event);
+    }
+  );
+} catch (error) {
+  s99gError = error;
+}
+ctx.session.list = s99ListWithThrow;
+expect(
+  'S99 an unreadable host list degrades to N only (no throw, no invented M)',
+  !s99gError &&
+    s99gText.includes('协作：本工作区候选 1（collab_handoff）') &&
+    !s99gText.includes('其它工作区候选'),
+  s99gError ? `threw: ${s99gError.message}` : s99gText.split('\n').find(line => line.includes('协作：')) ?? '(缺失)'
+);
+
+// --- S99h: 预算满时不追加（maxInject 让位给未读消息）
+await writeConfig({ maxInject: 1 });
+push(
+  inbound('ses_s99_budget', '[collab:ses_s99_mate6][note:s99_n1] 未读一', {
+    from: 'ses_s99_mate6',
+    fromSessionID: 'ses_s99_mate6',
+    cid: 'c_s99_n1',
+    kind: 'note',
+    threadID: 's99_n1'
+  }, 's99_inbox_n1')
+);
+push(
+  inbound('ses_s99_budget', '[collab:ses_s99_mate6][note:s99_n2] 未读二', {
+    from: 'ses_s99_mate6',
+    fromSessionID: 'ses_s99_mate6',
+    cid: 'c_s99_n2',
+    kind: 'note',
+    threadID: 's99_n2'
+  }, 's99_inbox_n2')
+);
+await settle();
+let s99hText = '';
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      ses_s99_budget: s99Session('ses_s99_budget', S99_WS),
+      ses_s99_mate6: s99Session('ses_s99_mate6', S99_WS)
+    }
+  },
+  async () => {
+    const event = contextEvent('ses_s99_budget');
+    await hooks.context(event);
+    s99hText = textOf(event);
+  }
+);
+await writeConfig({});
+expect(
+  'S99 a full injection budget drops the hint first (the unread message keeps its slot)',
+  s99hText.includes('新消息') && s99hText.includes('还有 1 条') && !s99hText.includes('协作：'),
+  s99hText.split('\n').slice(0, 3).join(' | ') || '(空)'
+);
+
+// --- S99i: 承接方协议头 · 本工作区（命令必须**可执行且能闭环**）
+// P2（复核）：第一版写的是 `collab_reply {threadID, confirm}` + `kind:"note"`——
+// 前者缺 `text`（直接报错），后者 collab_reply 没有这个字段、且显式 note 入站被忽略；
+// 真正能闭环的只有正文里的 `[handoff] DONE|BLOCKED <bid>` 行。这里既断言文案形状，
+// 也**直接从协议头里取命令**照做（只替换 `<摘要>`/`<缺什么>`），所以文案一旦退回
+// 缺 `text` 的旧版，闭环断言必然失败。
+let s99iPrompt = '';
+let s99iResult = '';
+let s99iThread = '';
+let s99iBid = '';
+let s99iDoneState = '';
+let s99iBlockedState = '';
+let s99iReplyNote = '';
+/** 从协议头的一行里取出可执行参数（`threadID:"…"` / `text:"…"`），只换占位符。 */
+const s99CommandArgs = (line, summary) => ({
+  threadID: /threadID:"([^"]+)"/.exec(line)?.[1] ?? '',
+  text: (/text:"([^"]+)"/.exec(line)?.[1] ?? '').replace(/<(?:摘要|缺什么)>/g, summary)
+});
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      ses_s99_req: s99Session('ses_s99_req', S99_WS),
+      ses_s99_target: s99Session('ses_s99_target', S99_WS)
+    }
+  },
+  async () => {
+    const promptsBefore = prompts.length;
+    s99iResult = await call(
+      'collab_handoff',
+      { target: 'ses_s99_target', text: 'S99 任务正文：请处理 X', confirm: true },
+      as('ses_s99_req')
+    );
+    s99iPrompt = String(prompts[promptsBefore]?.text ?? '');
+    s99iBid = bidOf(s99iResult) ?? '';
+    s99iThread = /thread=(t_[a-z0-9_]+)/.exec(s99iResult)?.[1] ?? '';
+
+    // ① 完成后回执：命令来自协议头本身。
+    try {
+      const doneLine = s99iPrompt.split('\n').find(line => line.startsWith('完成后回执：')) ?? '';
+      s99iReplyNote = await call(
+        'collab_reply',
+        { ...s99CommandArgs(doneLine, '已修复并自测通过'), confirm: true },
+        as('ses_s99_target')
+      );
+      const donePrompt = prompts.at(-1);
+      push(inbound('ses_s99_req', donePrompt.text, { ...donePrompt.metadata.collab }, 's99_inbox_done'));
+      await settle();
+    } catch (error) {
+      s99iReplyNote = `ERR: ${String(error?.message ?? error)}`;
+    }
+    s99iDoneState = String(bcRead(s99iBid).state ?? '');
+
+    // ② 阻塞场景：另起一单，命令同样取自协议头。
+    const blockedBefore = prompts.length;
+    const blockedHandoff = await call(
+      'collab_handoff',
+      { target: 'ses_s99_target', text: 'S99 任务正文：请处理 Y', confirm: true },
+      as('ses_s99_req')
+    );
+    const blockedBid = bidOf(blockedHandoff) ?? '';
+    const blockedPromptText = String(prompts[blockedBefore]?.text ?? '');
+    try {
+      const blockedLine = blockedPromptText.split('\n').find(line => line.startsWith('阻塞回执：')) ?? '';
+      await call(
+        'collab_reply',
+        { ...s99CommandArgs(blockedLine, '缺少 fixtures 权限'), confirm: true },
+        as('ses_s99_target')
+      );
+      const blockedPrompt = prompts.at(-1);
+      push(inbound('ses_s99_req', blockedPrompt.text, { ...blockedPrompt.metadata.collab }, 's99_inbox_blocked'));
+      await settle();
+    } catch {
+      // The assertion below reports the state; a rejected command leaves it `acked`.
+    }
+    s99iBlockedState = String(bcRead(blockedBid).state ?? '');
+    rmSync(bcFile(blockedBid), { force: true });
+  }
+);
+out('S99 local hand-off prompt (first 3 lines)', s99iPrompt.split('\n').slice(0, 3).join('\n'));
+const s99iLines = s99iPrompt.split('\n');
+expect(
+  'S99 the local hand-off prompt starts with the claimant header (bid / thread)',
+  s99iLines[0].includes('你是承接方（bid=b_') && s99iLines[0].includes(' / thread=t_'),
+  s99iLines[0]
+);
+expect(
+  'S99 … line 2 is a copy-pasteable collab_reply whose text carries the [handoff] line',
+  s99iLines[1].includes(
+    `collab_reply { threadID:"${s99iThread}", text:"[handoff] DONE ${s99iBid} <摘要>", confirm:true }`
+  ) && s99iPrompt.indexOf('完成后回执：') < s99iPrompt.indexOf('S99 任务正文'),
+  s99iLines[1]
+);
+expect(
+  'S99 … line 3 is the BLOCKED variant, and no dead kind:"note" survives',
+  s99iLines[2].includes(`text:"[handoff] BLOCKED ${s99iBid} <缺什么>"`) &&
+    !s99iPrompt.includes('kind:"note"'),
+  s99iLines[2]
+);
+expect(
+  'S99 following the header command really closes the hand-off (state=done)',
+  s99iDoneState === 'done',
+  `state=${s99iDoneState} / reply=${String(s99iReplyNote).split('\n')[0]}`
+);
+expect(
+  'S99 the BLOCKED variant closes the next hand-off as blocked',
+  s99iBlockedState === 'blocked',
+  `state=${s99iBlockedState}`
+);
+if (s99iBid) rmSync(bcFile(s99iBid), { force: true });
+
+// --- S99j: 承接方协议头 · 跨工作区（peer 注入块 → [handoff] DONE|BLOCKED）
+const S99_PEER_BID = 'b_99999999999900e1';
+const S99_PEER_REQ = 'ses_s99_preq';
+const S99_PEER_ASK = 'ses_s99_pask';
+writeFileSync(
+  bcFile(S99_PEER_BID),
+  JSON.stringify({
+    bid: S99_PEER_BID,
+    scope: 'peer',
+    workspace: S99_WS,
+    issuePath: 'docs/issues/fix-s99.md',
+    title: 'S99 peer 交接',
+    expected: 'implement',
+    affectedFiles: ['packages/x/src/y.ts'],
+    state: 'open',
+    asked: { sid: S99_PEER_ASK, at: now, leaseMs: 300_000 },
+    attempts: 0,
+    skipped: [],
+    seenBy: [],
+    askSeen: [],
+    reminded: [],
+    replies: [],
+    from: { sid: S99_PEER_REQ, directory: S99_WS },
+    createdAt: now
+  })
+);
+let s99jText = '';
+await withAwarenessCase(
+  {
+    dir: S99_WS,
+    map: {
+      [S99_PEER_REQ]: s99Session(S99_PEER_REQ, S99_WS),
+      [S99_PEER_ASK]: s99Session(S99_PEER_ASK, S99_WS)
+    }
+  },
+  async () => {
+    const event = contextEvent(S99_PEER_ASK);
+    await hooks.context(event);
+    s99jText = textOf(event);
+  }
+);
+rmSync(bcFile(S99_PEER_BID), { force: true });
+out('S99 peer takeover block', s99jText.split('\n').slice(0, 4).join('\n'));
+const s99jLines = s99jText.split('\n');
+const s99jHeader = s99jLines.findIndex(line => line.includes('你是承接方（bid=' + S99_PEER_BID));
+expect(
+  'S99 the peer block keeps [handoff] DONE|BLOCKED and says it must ride inside collab_send text',
+  s99jHeader >= 0 &&
+    s99jLines[s99jHeader].includes(`bid=${S99_PEER_BID}`) &&
+    String(s99jLines[s99jHeader + 1] ?? '').startsWith(`完成后回执：[handoff] DONE|BLOCKED ${S99_PEER_BID}`) &&
+    String(s99jLines[s99jHeader + 1] ?? '').includes('collab_send 的 text') &&
+    !String(s99jLines[s99jHeader + 1] ?? '').includes('kind:"note"'),
+  s99jHeader >= 0 ? s99jLines.slice(s99jHeader, s99jHeader + 2).join(' | ') : '(缺失)'
+);
+
+// --- S99k: 纯函数口径（两半都可 0，单边省略）
+expect(
+  'S99 awarenessText omits a zero half and returns nothing when both are zero',
+  internals.awarenessText({ n: 1, m: 3 }) ===
+    '协作：本工作区候选 1（collab_handoff） · 其它工作区候选 3（collab_broadcast，需提案）' &&
+    internals.awarenessText({ n: 0, m: 2 }) === '协作：其它工作区候选 2（collab_broadcast，需提案）' &&
+    internals.awarenessText({ n: 2, m: 0 }) === '协作：本工作区候选 2（collab_handoff）' &&
+    internals.awarenessText({ n: 2 }) === '协作：本工作区候选 2（collab_handoff）' &&
+    internals.awarenessText({ n: 0 }) === undefined &&
+    internals.awarenessText({ n: 0, m: 0 }) === undefined,
+  String(internals.awarenessText({ n: 1, m: 3 }))
+);
+
+// --- S99l: 无 ctx.location.directory → N=0，只把全局页计入 M（复核 P3b）
+let s99lText = '';
+let s99lReads = 0;
+await withAwarenessCase(
+  {
+    dir: undefined,
+    map: {
+      ses_s99_nows: s99Session('ses_s99_nows', S99_WS),
+      ses_s99_w1: s99Session('ses_s99_w1', S99_WS_B),
+      ses_s99_w2: s99Session('ses_s99_w2', S99_WS_C)
+    }
+  },
+  async () => {
+    const before = s99RemoteReads();
+    const event = contextEvent('ses_s99_nows');
+    await hooks.context(event);
+    s99lText = textOf(event);
+    s99lReads = s99RemoteReads() - before;
+  }
+);
+out('S99 no workspace', s99lText.split('\n').find(line => line.includes('协作：')) ?? '(无)');
+expect(
+  'S99 without a workspace the same sessions are not counted twice (N=0, only M)',
+  s99lText.includes('协作：其它工作区候选 2（collab_broadcast，需提案）') && !s99lText.includes('本工作区候选'),
+  s99lText.split('\n').find(line => line.includes('协作：')) ?? '(缺失)'
+);
+expect(
+  'S99 … and it costs the global page only (no workspace page to read)',
+  s99lReads === 1,
+  `${s99lReads} global page read(s)`
+);
+
+// Restore the host list wrapper so nothing else observes S99's counter.
+ctx.session.list = s99RealList;
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);
 if (failed.length) {

@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "注入失败/列表不可用要降级不抛"}
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "注入与看板约定"}
+{"file": ".trellis/spec/guides/cross-workspace-collab-guide.md", "reason": "跨工作区协作协议（handoff vs broadcast）"}

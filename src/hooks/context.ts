@@ -1,4 +1,5 @@
 import { allBroadcasts } from '../core/claim.ts';
+import { createAwareness } from '../core/awareness.ts';
 import { isAckText } from '../core/ack.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
@@ -28,6 +29,13 @@ export type ContextEventHandler = (event: ContextHookEvent) => Promise<void>;
  */
 export function createContextHook(deps: ToolDeps): ContextEventHandler {
   const { readConfig, inbox, threads, chain } = deps;
+  // 0.7.0 (R1–R5): one instance per setup — it owns the 10-minute cache, so a
+  // reload of the plugin resets the window (and a config flip is immediate).
+  const awareness = createAwareness({
+    ctx: deps.ctx,
+    readConfig,
+    listSessions: input => chain.listSessions(input)
+  });
 
   /**
    * Unread cross-session messages. Only messages that are neither already
@@ -39,14 +47,14 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
    * receiving side, so its hand-off cid is acked on a side path (`[ack] <cid>
    * seen`). `[ack]` messages themselves are neither injected nor acked.
    */
-  async function injectInbox(event: ContextHookEvent): Promise<string | undefined> {
+  async function injectInbox(event: ContextHookEvent): Promise<{ text?: string; shown: number; rest: number }> {
     const config = readConfig();
-    if (!config.autoDeliver) return undefined;
+    if (!config.autoDeliver) return { shown: 0, rest: 0 };
     const sessionID = event?.sessionID;
-    if (!sessionID) return undefined;
+    if (!sessionID) return { shown: 0, rest: 0 };
 
     const box = await inbox.read(sessionID);
-    if (!box.messages.length) return undefined;
+    if (!box.messages.length) return { shown: 0, rest: 0 };
 
     const inRequest = collectRequestKeys(event);
     // `accounted` = messages this session has already been shown: injected in
@@ -116,7 +124,7 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
           };
         });
       }
-      return undefined;
+      return { shown: 0, rest: pending.length };
     }
 
     const rest = pending.length - shown.length;
@@ -160,11 +168,15 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       };
     });
 
-    return [
-      `[collab] ${head}`,
-      ...[...requests, ...replies, ...notes].map(lineOf),
-      rest > 0 ? `…还有 ${rest} 条，调用 collab_inbox 查看全文。` : '全文/状态用 collab_inbox。'
-    ].join('\n');
+    return {
+      text: [
+        `[collab] ${head}`,
+        ...[...requests, ...replies, ...notes].map(lineOf),
+        rest > 0 ? `…还有 ${rest} 条，调用 collab_inbox 查看全文。` : '全文/状态用 collab_inbox。'
+      ].join('\n'),
+      shown: shown.length,
+      rest
+    };
   }
 
   /**
@@ -230,8 +242,8 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     try {
       if (!event?.sessionID || !Array.isArray(event?.system)) return;
       const blocks: string[] = [];
-      const inboxText = await injectInbox(event);
-      if (inboxText) blocks.push(inboxText);
+      const inboxPart = await injectInbox(event);
+      if (inboxPart.text) blocks.push(inboxPart.text);
       // Stale classes are computed *before* the chain refresh: that refresh
       // reopens a lapsed `claimed` record, which would hide exactly the state
       // this reminder exists to report.
@@ -241,6 +253,24 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       if (chainPart.text) blocks.push(chainPart.text);
       const noticeText = await injectReportNotice(event);
       if (noticeText) blocks.push(noticeText);
+      // 0.7.0 (R1/R3): the awareness hint is appended **last** and only when the
+      // shared `maxInject` budget still has room — an unread message or a
+      // hand-off/queue line always wins. It is read-only and cached per session,
+      // so it never costs more than one session page per 10 minutes.
+      //
+      // Its own try/catch: a hint is the least important block, and a failure
+      // here must not cost the hand-off/queue lines already collected above
+      // (the outer catch would otherwise drop the whole push).
+      const budget = readConfig().maxInject - inboxPart.shown;
+      let awarenessText: string | undefined;
+      if (budget > 0) {
+        try {
+          awarenessText = await awareness.line(event.sessionID);
+        } catch (error) {
+          log('awareness line failed:', (error as Error)?.message ?? error);
+        }
+      }
+      if (awarenessText) blocks.push(awarenessText);
       if (blocks.length) {
         event.system.push({ type: 'text', text: blocks.join('\n\n') });
         // F1 (0.3.1): the follow-up hint is "seen" only now that it is really in
@@ -250,6 +280,9 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         // D1 (0.4.0): the same rule for the owner-queue lines — `seenAt` is
         // written after the push, so a failed injection shows them again.
         if (chainPart.ownerQueue.length) markQueueSeen(event.sessionID, chainPart.ownerQueue);
+        // Same rule for the awareness hint: stamp the 10-minute window only
+        // once the line really reached the request.
+        if (awarenessText) awareness.markShown(event.sessionID);
       }
     } catch (error) {
       // Never break a model request because of collab bookkeeping.

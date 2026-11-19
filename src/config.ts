@@ -113,6 +113,12 @@ export function loadConfig(options: unknown): CollabConfig {
     DEDUPE_WINDOW_MAX_MS
   );
 
+  // 0.7.0 (R5): the awareness hint is on by default (`line`); only the exact
+  // string `off` turns it off. A typo falls back to the default instead of
+  // silently disabling a feature the operator did not ask to lose.
+  const rawAwareness = file.awareness ?? fromOptions.awareness;
+  const awareness: 'line' | 'off' = rawAwareness === 'off' ? 'off' : DEFAULTS.awareness;
+
   return {
     aliases,
     autoDeliver,
@@ -125,6 +131,7 @@ export function loadConfig(options: unknown): CollabConfig {
     waiterTtlMs,
     waiterHeartbeat,
     dedupeWindowMs,
+    awareness,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

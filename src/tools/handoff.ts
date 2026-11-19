@@ -4,6 +4,7 @@ import { invalid } from '../core/errors.ts';
 import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
+import { protocolHeader } from '../core/verdict.ts';
 import { newThreadID } from '../ids.ts';
 import type { JsonObject, ToolDefinition } from '../types.ts';
 import { hash16, sessionState, truncate } from '../util.ts';
@@ -166,7 +167,12 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
 
       const delivered = await dispatch({
         context,
-        input: { text: body, confirm: true },
+        input: {
+          // 0.7.0 (R2): the first two lines tell the receiver it is the claimant
+          // and how to answer — the task body follows, unchanged.
+          text: [...protocolHeader({ bid, threadID }), '', body].join('\n'),
+          confirm: true
+        },
         kind: 'request',
         threadID,
         mode,

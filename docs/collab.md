@@ -299,6 +299,9 @@ opencode plugin add @inf-studio/collab@0.1.0
   已经被本次请求包含的条目（`collab_send` 的正文本身就是 user turn）会被标记为「已见」而**不注入**，
   因此同一句话不会出现两次；只影响本会话本次请求，不写历史、不改别人。
   无 thread 的 legacy 消息（CLI 的 `[collab:…]` 纯文本）提示「无需回执」，不会拼出不存在的 threadID。
+- **自动感知（0.7.0）**：同一注入的**最后**追加一行只读提示「本工作区候选 N · 其它工作区候选 M」
+  （每会话每 10 分钟最多一次、预算满时最先让位、protected 与「自己有未闭环交接」时不出现），
+  `awareness:"off"` 关闭；详见 §11.15。
 
 ### 11.4 全局配置 `~/.config/opencode/collab.json`
 
@@ -314,6 +317,7 @@ opencode plugin add @inf-studio/collab@0.1.0
   "waiterTtlMs": 600000,
   "waiterHeartbeat": true,
   "dedupeWindowMs": 60000,
+  "awareness": "line",
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -331,6 +335,9 @@ opencode plugin add @inf-studio/collab@0.1.0
 `dedupeWindowMs`（默认 **60000**，`0` 关闭）是**正文去重**窗口：同一 thread + 归一化后（空白折叠）完全一致的
 正文在窗口内重复提交时，`collab_send` / `collab_reply` 只投递第一次，第二次**不投递、不追加 thread 消息**，
 回执写明「60s 内已有同文，未重复投递」（§11.9.4）。
+
+`awareness`（默认 **`"line"`**，`"off"` 关闭）是**自动感知**提示：`context` 注入末尾每会话每 10 分钟最多
+一行「本工作区候选 N · 其它工作区候选 M」，只读、不写记录、不投递（§11.15）。
 
 `report.to`（别名或 `ses_…`）是**缺陷上报的主通道**：插件把上报当作 `note`（`queue`）投给该会话，
 空闲也会被唤醒；文件只作证据与兜底。`report.enabled:false` 关闭投递但仍落盘（回滚开关）。
@@ -1270,6 +1277,79 @@ collab_freeze { scope:"session",   target:"ses_…",       freeze:false, confirm
 - **语义边界**：冻结 **≠** 归档 **≠** 删除——不隐藏会话、不删文件、不写 `permissions`、不切 agent；
   也不覆盖既有硬边界（受保护线依然 0 投递、只读 agent 依然被强制 `queue`），只是**叠加**一层拒绝。
 - **回滚**：删掉 `~/.config/opencode/collab-freeze.json`（或 `rm` 单条）即全量解除；代码回滚见任务目录 `implement.md`。
+
+### 11.15 协作自动感知（0.7.0）
+
+**为什么**：0.6.0 把工具配齐了，但「什么时候用哪个」仍然靠人提醒——需要帮忙的会话不知道还有别的会话可问，
+跨工作区更是全靠人点。实测链路 A（issues-wt）→ B（mojo-studio）就是一个例子。0.7.0 只补两处**只读**提示：
+
+#### 11.15.1 需求侧：一行双计数（R1 / R3 / R4 / R5）
+
+`context` 注入**末尾**（所有既有行之后）追加：
+
+```text
+协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）
+```
+
+| 项 | 规则 |
+| --- | --- |
+| N | 同 `ctx.location.directory` 的**根会话**里，排除自己、子会话（`parentID`）、已归档（`time.archived`）；**无 workspace 时 N=0**（否则同一批会话会被 N、M 各算一次） |
+| M | 其它工作区（按 `location.directory` 分组）的同口径会话数；一次 `session.list` 页内去重 id；页上限 `AWARENESS_LIST_LIMIT=200`，宿主会话更多时 M 是**下界** |
+| 单边为 0 | 省略该半句（只有跨工作区时只留后半句；只有本工作区时只留前半句） |
+| N+M = 0 | **不注入** |
+| 频率 | 每会话每 **10 分钟**最多一次（进程内 Map；插件重载重置） |
+| 成本 | 每窗口 **2 页**：一页带 `directory` 数本工作区（N）+ 一页全局数其它工作区（M），各一次；宿主抛错 → **M 省略、只写 N**，不抛 |
+| 抑制条件 | `awareness:"off"` · 当前会话 `[protected*]` · 当前会话有**自己发起的未闭环交接**（`from.sid = 自己` 且状态非 `done/blocked/expired`） |
+| 预算 | 与 `maxInject` 共享：未读消息已占满（`shown = maxInject`）时本行**不追加**——交接 / 队列 / 未读永远优先 |
+| 写入 | **零**。不写记录、不建 thread、不投递；只读会话列表与广播目录 |
+
+不猜「该找谁」：行里只有数量与通道，选人仍由 `collab_handoff` 打分或人指定。`collab_list` 看名单。
+
+#### 11.15.2 承接侧：协议头 + **可执行**的回执命令（R2）
+
+交接**投递文本 / 注入块**的前几行固定为（`src/core/verdict.ts` 的 `protocolHeader`）：
+
+```text
+你是承接方（bid=b_… / thread=t_…）
+完成后回执：collab_reply { threadID:"t_…", text:"[handoff] DONE b_… <摘要>", confirm:true }
+阻塞回执：collab_reply { threadID:"t_…", text:"[handoff] BLOCKED b_… <缺什么>", confirm:true }
+```
+
+这三行是**能直接执行、执行后真的闭环**的（0.7.0 复核对第一版的修正，见下）。跨工作区（peer，跨 location 没有
+可用 thread）第二行改为：
+
+```text
+完成后回执：[handoff] DONE|BLOCKED b_… <摘要>（把这一行写进 collab_send 的 text 发给发起方，confirm:true）。
+```
+
+> **为什么必须带 `text` 里的 `[handoff]` 行**：`collab_reply` 的 `text` 是必填参数；`kind` 根本不在它的入参里，
+> 而且入站把显式 `note` 当作「有意非回执」忽略；闭环只认正文里的 `[handoff] DONE|BLOCKED <bid>`。
+> 第一版写的 `collab_reply { threadID, confirm }` + `kind:"note"` 两条路都走不通（照抄报 `text 不能为空` /
+> 发出去了但记录停在 `acked`，只能等 2h 的 `acked-stale` 兜底），所以回执命令必须把 `[handoff]` 行放进 `text`：
+> 只有「能闭环」的命令才配当协议头。
+
+覆盖三处投递面：`collab_handoff` 的 thread 投递正文（正文最前几行）、peer 的**接管请求条目**
+（该条目自己的前两行；注入块整体仍以 `[collab-handoff] 交接链路提醒…` 起头，协议头不抢块首）、以及
+`takeoverBody`（spawn / `busy > 30min` 叫醒 / 重发，投递文本最前几行）。正文里的 `①②③` 步骤与 `DECLINE` 不变——
+协议头只是把「你是谁、怎么回」提到最前面（试点里对端把交接当分析请求、答完就算，就是缺这一句）。
+
+> `DONE|BLOCKED` 是**模板**，不会被回执解析误判：`[handoff]` 行必须点名**当前 bid**，且摘要位残留
+> `<…>` 占位符一律当作回显（§5.3 的 H1 规则），所以照抄协议头（不替换占位符）不会闭环任何单。
+
+#### 11.15.3 验收与回滚
+
+| 用例 | 期望 |
+| --- | --- |
+| 同工作区 1 + 其它工作区 3 | `本工作区候选 1 · 其它工作区候选 3`（子会话 / 已归档不算） |
+| 仅跨工作区 | 只有后半句 |
+| 无 `ctx.location.directory` | `N=0`，只出现后半句（同一批会话不被两半各算一次） |
+| N+M = 0 / protected / 有未闭环交接 / `awareness:"off"` | 不出现 |
+| 10 分钟内两次 `context` | 只出现一次；两页（本工作区 + 跨工作区）各只读一次（第二次连查询都不发） |
+| 宿主列表抛错 | 只写 N，不抛 |
+| 承接方块 | 首行含「承接方」；第二行是可复制的 `collab_reply`/`collab_send` 命令，且 `text` 里带 `[handoff]` |
+| 照协议头回执 | `collab_reply {text:"[handoff] DONE <bid> …"}` → 记录 `done`；BLOCKED → `blocked` |
+
+回滚：`awareness:"off"` 立即归零；代码见任务 `11-19-collab-awareness` 的 `implement.md`。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

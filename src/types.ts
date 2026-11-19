@@ -610,6 +610,12 @@ export interface CollabConfig {
    * one message (default 60000; `0` disables the check).
    */
   dedupeWindowMs: number;
+  /**
+   * 0.7.0 (R1–R5): the one-line awareness hint. `line` (default) injects
+   * 「本工作区候选 N · 其它工作区候选 M」 at most once per 10 min; `off`
+   * injects nothing. Read-only either way.
+   */
+  awareness: 'line' | 'off';
   report?: ReportConfig;
 }
 

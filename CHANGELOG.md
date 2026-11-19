@@ -7,6 +7,28 @@
 
 > 0.6.0 复核对 `board` 留下的三条低风险 nit 一次收掉：**冻结判定回到一份实现**、
 > **孤儿行有了纯单测**、**按键分派按宿主的 `enabled()` 门控测**。不改行为、不改快照契约、不新增依赖、工具仍 20。
+> 同一发布窗口还收了 **协作自动感知**（`11-19-collab-awareness`）：一行双计数提示 + 承接方两行协议头。
+
+### Added
+
+- **协作自动感知（R1–R5，`src/core/awareness.ts`）**：`context` 注入**末尾**追加一行
+  `协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）`。
+  0.6.0 之后工具齐全，但「何时用哪个通道」仍靠人提醒（实测 A(issues-wt) → B(mojo-studio) 全靠人点）。
+  - N = 同 `ctx.location.directory` 的根会话（排除自己 / 子会话 / 已归档）；M = 其它工作区同口径会话数，
+    一次 `session.list` 页内去重；单边为 0 省略该半句，两边都 0 不注入。
+  - 抑制：`awareness:"off"`、`[protected*]`、当前会话有**自己发起的未闭环交接**（`from.sid = 自己` 且
+    state 非 `done/blocked/expired`）。
+  - 成本上界（R3）：每会话每 **10 分钟**最多一行（进程内 Map）；每窗口 2 页（一页带 `directory` 数 N、
+    一页全局数 M，`listedAt` 让两者都只读一次）；宿主列表抛错 → **M 省略、只写 N、不抛**。
+  - 只读（R4）/ 预算：不写记录、不建 thread、不投递；`maxInject` 已满（未读已占满）时本行**先让位**，
+    而且只有 `event.system.push` 成功后才记 10 分钟窗口（与 §11.9.3 的 F1 规则一致）。
+- **承接方协议头（R2，`protocolHeader`）**：`collab_handoff` 投递正文、peer 接管请求注入块与
+  `takeoverBody`（spawn / 叫醒 / 重发）最前面的行固定为 `你是承接方（bid=… / thread=…）` +
+  `collab_reply { threadID:"…", text:"[handoff] DONE <bid> <摘要>", confirm:true }`（阻塞同形，`BLOCKED`）；
+  peer（无 thread）为 `[handoff] DONE|BLOCKED <bid> <摘要>`（写进 `collab_send` 的 `text`）。正文的 ①②③ 与 DECLINE 不变。
+- **配置项 `awareness`**（`collab.json` / 插件 options，默认 `"line"`，`"off"` 关闭）：启动日志打印
+  `awareness=…`；`DEFAULTS` 增 `awareness`，`__internals` 增 `awarenessText` / `AWARENESS_TTL_MS` /
+  `AWARENESS_LIST_LIMIT`（纯渲染 + 两个界值可无宿主单测）。
 
 ### Changed
 
@@ -20,6 +42,20 @@
   - `buildBoard(snapshot, freezes, now)` 的 `freezes` 语义写进注释：`readFreezes(now)` 的输出（已过滤过期）；
     board 仍用同一个纯 `liveFreezes` 兜底，所以更老的调用方也不会画出过期冻结。
 
+### Fixed
+
+- **协议头的回执命令其实闭不了环（0.7.0 复核 P2）**：第一版第二行是
+  `collab_reply { threadID, confirm:true }；阻塞用 kind:"note"`——`text` 是 `collab_reply` 的必填参数（照抄直接报
+  `text 不能为空`），`kind` 根本不在它的入参里，且显式 `note` 入站被当作「有意非回执」忽略；补上 `text` 只写「已完成」
+  也不会闭环（记录停在 `acked`，要等 2h 的 `acked-stale` 兜底）。现在协议头给的是**可执行且能闭环**的两条命令
+  （`text` 里带 `[handoff] DONE|BLOCKED <bid>`），peer 面明确写「把这一行写进 `collab_send` 的 `text`」；
+  S99 增加「照协议头回执 → `done` / `blocked`」的端到端断言（原来只断言文案前缀）。
+- **无 `ctx.location.directory` 时重复计数（复核 P3b）**：同一批会话被 N（全局页）与 M 各算一次
+  （实测 `本工作区候选 2 · 其它工作区候选 2`）；现在无 workspace 时 `N=0`，只渲染 M。
+- **文档成本口径（复核 P3a）**：文档原写「会话列表页每 10 分钟最多一份」，实际是每窗口 **2 页**
+  （本工作区页 + 全局页）；`docs/collab.md` / `skills/collab/SKILL.md` 已改成与实现一致的表述，并补
+  「`AWARENESS_LIST_LIMIT=200` 下 M 是下界」。
+
 ### Tests
 
 - **`boardOrphans` 纯单测（R2）**：进 `__internals`；`test/board-shape.mjs` 新增孤儿锁 / 孤儿交接 /
@@ -30,11 +66,23 @@
   切回后一次 `enter` 只 toggle 一次、一次 `j` 只走一行。TUI 渲染 **44 → 49 项**。
 - 两组变异验证（原始输出见任务 `research/impl-notes.md`）：删 `boardOrphans` 的分支 → 对应断言失败；
   把冻结优先级改回 workspace 先于 session → 优先级断言失败；去掉 `enabled()` 的聚焦判断 → 门控断言失败。
+- **自动感知 / 协议头（S99，`test/handoff-harness.mjs`）**：每个计数用例都**换掉会话页**（子会话 / 已归档
+  各一条）以避免「数字恰好 >0 也算过」；断言双计数文案、仅跨工作区、两边都 0、无 workspace 不重复计数、
+  未闭环交接、protected、`awareness:"off"`、宿主列表抛错降级、`maxInject` 满时让位、10 分钟内第二次不注入且
+  两页各只读一次（假宿主计数，并单独断言「一窗口 2 页」）、本工作区 / peer 两种协议头，外加
+  **「照协议头回执 → `done` / `blocked`」的端到端断言**与 `awarenessText` 的纯渲染口径。交接链 **735 → 756 项**。
+- 两组变异验证（原始输出见 `research/impl-notes.md`）：把 `n+m>=1` 收窄成 `n>=1` → 仅跨工作区与纯函数两条失败；
+  去掉 10 分钟窗口（`shownAt` 去重 + `listedAt` 复用）→ 两条缓存断言失败（`line=true reads=2`）；
+  把 `protocolHeader` 改回缺 `text` 的旧文案 → 「照回执后 done」断言失败；无 workspace 分支改回两边都算 →
+  重复计数断言失败。
 
 ### Docs
 
 - `README.md` 测试计数同步（20 项看板 / 49 项 TUI）；`docs/collab.md` §11.11.6 写明看板复用
   `freeze-pure` 的判定，不再复制优先级。版本三处（`package.json` / `PLUGIN_VERSION` / GUI 常量）→ `0.6.1`。
+- **自动感知**：`docs/collab.md` §11.3 + 新增 §11.15（双计数口径 / 抑制条件 / 成本上界（每窗口 2 页）/ 协议头
+  与可执行回执命令 / 验收与回滚）与 §11.4 配置说明；`README.md` 配置样例 + 配置表新增 `awareness` 行 +
+  `context` hook 段落；`skills/collab/SKILL.md` 新增「一点十一、自动感知」。版本号不变（0.7.0 由父任务统一）。
 
 ## [0.6.0] - 2026-11-19
 

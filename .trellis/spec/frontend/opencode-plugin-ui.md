@@ -126,6 +126,17 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 （实测切走再切回 → 2 个 enabled 层，`enter` toggle 两次、`j/k` 跳两格）。注册放组件体顶层，
 `enabled` 里读 reactive props 即可；测试断言「切走再切回只有 1 个带 `enter` 的 enabled 层」。
 
+## 2.9 协作自动感知与协议头
+
+- **感知行默认开**（`awareness:"line"`）：`context` 注入末尾一行
+  `协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）`。
+  只有「非 protected + 无自己发起的未闭环交接 + N+M≥1 + 10 分钟未提示」才注入；`maxInject` 满时**本行先让位**。
+- **成本上界**：每窗口最多 **2 页**（本工作区页 + 全局页）；`M` 在 `AWARENESS_LIST_LIMIT` 下是**下界**；
+  宿主列表失败只写 N，不抛。**无 `ctx.location.directory` 时 N=0**，只渲染 M（否则同一批会话会被算两次）。
+- **协议头必须可照抄且能闭环**：给 `collab_reply { threadID, text:"[handoff] DONE|BLOCKED <bid> <摘要>", confirm:true }`；
+  不要给缺 `text` 或 `kind:"note"` 的写法（实测停在 `acked`，看板一直 open）。peer 无 thread 时给
+  `collab_send { text:"[handoff] DONE|BLOCKED <bid> <摘要>" }`。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

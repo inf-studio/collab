@@ -3,6 +3,7 @@ import { createContextHook } from './hooks/context.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { createHandoffChain } from './core/chain.ts';
+import { awarenessText } from './core/awareness.ts';
 import { allBroadcasts } from './core/claim.ts';
 import { archiveSession, shouldArchive } from './core/archive.ts';
 import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason, touchWaiters } from './core/locks.ts';
@@ -26,7 +27,7 @@ import { createReporter, reportDir, signature } from './core/report.ts';
 import { staleClass } from './core/stale.ts';
 import { appendThreadMessage, createInboxStore, createThreadStore, extractInbound } from './core/storage.ts';
 import { createSignal } from './ids.ts';
-import { BUILTIN_PROTECT, PLUGIN_VERSION } from './constants.ts';
+import { AWARENESS_LIST_LIMIT, AWARENESS_TTL_MS, BUILTIN_PROTECT, PLUGIN_VERSION } from './constants.ts';
 import { log } from './log.ts';
 import { createToolKit, registerTools } from './tools/index.ts';
 import type { CollabContext } from './types.ts';
@@ -228,6 +229,9 @@ const plugin: Plugin.Plugin = {
       `waiterTtlMs=${initial.waiterTtlMs} waiterHeartbeat=${initial.waiterHeartbeat} ` +
         `dedupeWindowMs=${initial.dedupeWindowMs}${initial.dedupeWindowMs ? '' : ' (正文去重已关闭)'}`
     );
+    // 0.7.0 (R5): whether the read-only awareness hint is on — the one config
+    // flip an operator may want to confirm without opening collab.json.
+    log(`awareness=${initial.awareness}${initial.awareness === 'off' ? ' (自动感知提示已关闭)' : ''}`);
     // R8④: the report entry point is visible without reading any docs — one
     // line in the plugin's own setup log (stderr), next to the other diagnostics.
     log(
@@ -260,6 +264,11 @@ export default plugin;
 export const __internals = {
   PLUGIN_VERSION,
   BUILTIN_PROTECT,
+  // 0.7.0 (R1–R5): the awareness hint is a pure renderer + two bounds; the
+  // harness checks the wording and the 10-minute page budget without a host.
+  awarenessText,
+  AWARENESS_TTL_MS,
+  AWARENESS_LIST_LIMIT,
   // Defect-reporting taxonomy (R1/R4/R6) — pure, unit-testable without a host.
   classify,
   signature,

@@ -41,6 +41,9 @@
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
+0.7.0 起它在**末尾**再追加一行只读的**自动感知**提示（每会话每 10 分钟最多一次、预算满时最先让位）：
+`协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）`——
+只给数量与通道，不猜「该找谁」；`awareness:"off"` 关闭。受保护会话拿不到这一行。
 受保护会话的注入面是白名单：只有「闭环后追加」与「`[owner-queue]` 未读队列项」两类只读行
 （每条一次，不含指令、不产生投递；两类合计 ≤3 行，同一提案只渲染 `at` 最新的一条）。
 
@@ -210,6 +213,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
   "waiterTtlMs": 600000,
   "waiterHeartbeat": true,
   "dedupeWindowMs": 60000,
+  "awareness": "line",
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -226,6 +230,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `waiterTtlMs`    | `600000`           | 排队**心跳**存活窗口（1 分钟–1 小时）：超过未心跳的排队者在下一次 `collab_lock` 被回收；`collab_locks` 只标 `[stale]` 不写文件 |
 | `waiterHeartbeat`| `true`             | `false` 只关「会话 `context` 每轮刷新排队心跳」这一半；`collab_lock` / 写工具的 touch 仍在 |
 | `dedupeWindowMs` | `60000`            | 正文去重窗口：同 thread + 归一化后同文在窗口内只投递一次；**`0` 关闭**（回滚开关） |
+| `awareness`      | `"line"`           | **自动感知**提示：`context` 里每 10 分钟最多一行「本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）」；`"off"` = 0 行。只读、不写记录、不投递 |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |
