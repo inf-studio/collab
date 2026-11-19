@@ -145,6 +145,18 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - **TUI**：树不变；只有 `j/k` 打开下方 3–5 行详情，`esc` 清除；`enter/space/click` 只做展开，不再附带「激活详情」。
 - **测试要点**：槽位顺序用直接子元素类名数组逐字比较；断点用可注入 `matchMedia` 夹住 `639`（单栏）/`641`（分栏）两侧——否则改数值/换顺序都能全绿。
 
+## 2.11 关系图（0.8.0）
+
+- 派生唯一来源 `src/core/graph.ts`：L0 工作区 / L1 工作区展开 / L2 会话 ±1 跳（≤8 + `+N`）；四类边
+  `handoff` / `origin` / `spawn` / `subagent`。节点按 id、边按 `from+kind+to` **码位排序**——同一快照两次构建、
+  甚至输入数组倒序都必须字节一致（测试必须验证倒序）。
+- `origin` 边依赖快照字段 `handoffs[].origin`（0.8.0 起 `toHandoff` 透传 `record.origin.sid`，且 `origin === from` 不写）。
+  **不要**只在图里读记录文件：远端/无盘时那条边会静默消失。
+- 线型：`handoff` 实线；**任何指向工作区占位节点的边一律虚线**（跨界边，与 kind 无关——判断顺序必须在
+  `spawn/subagent` 之前）；`origin` 虚线；`spawn/subagent` 点线。没有图库依赖，用 `stroke-dasharray`。
+- 交互（GUI）：点会话节点=选中（联动左列表/items）；点工作区=切 L1；`▸/▾` 折叠一跳（仅组件内存）；悬停高亮。
+- 已知覆盖缺口：跨界 `spawn/subagent` 的虚线没有专门夹具（只有 kind 内联线型有断言）。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

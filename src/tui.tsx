@@ -46,6 +46,7 @@ import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from './rpc.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
 import { buildBoard, boardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
+import { buildGraph, type GraphEdge, type GraphLevel } from './core/graph.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
 const POLL_MS = 2000;
@@ -572,6 +573,98 @@ function detailLines(session: BoardSession, width: number): Line[] {
 }
 
 
+/* ------------------------------------------------------------- relation graph */
+
+const GRAPH_LEVEL_LABEL: Record<GraphLevel, string> = {
+  global: '全局',
+  workspace: '工作区',
+  session: '会话'
+};
+
+/**
+ * R3 (0.8.0, `board2-graph`): the TUI form of the same `buildGraph` the GUI
+ * draws. A box-drawing text tree, two spaces of indent per hop (depth capped at
+ * three), `─交接─▶` / `┄origin┄▶` / `┈agent┈▶` connectors, and `↳ ` for a spawn —
+ * the board's `↳` notation, which is what a reader already knows. Every line is
+ * `clip`ped to the panel width, so a narrow terminal gets `…` instead of a
+ * wrapped, unreadable mess (and never a throw).
+ *
+ * Level follows the selection exactly like the GUI: a selected `ses:` row is L2
+ * (that session ±1 hop), nothing selected is L0 (workspaces). The terminal has
+ * no workspace cursor, so L1 stays a GUI level; the derivation supports it all
+ * the same (`buildGraph` is shared).
+ */
+function graphRows(
+  data: Snapshot,
+  level: GraphLevel,
+  workspace: string | undefined,
+  session: string | undefined,
+  width: number
+): BoardRow[] {
+  const graph = buildGraph(data, [], { level, workspace, session });
+  if (!graph.nodes.length) return [];
+  const heading =
+    level === 'session' && session
+      ? `关系图 · ${GRAPH_LEVEL_LABEL.session} ${shortSid(session)}`
+      : level === 'workspace'
+        ? `关系图 · ${GRAPH_LEVEL_LABEL.workspace} ${workspaceLabel(workspace ?? '') || '全局'}`
+        : `关系图 · ${GRAPH_LEVEL_LABEL.global}`;
+  const rows: BoardRow[] = [{ text: clip(heading, width), tone: 'muted' }];
+
+  const byId = new Map(graph.nodes.map(node => [node.id, node] as const));
+  const labelOf = (id: string): string => {
+    const node = byId.get(id);
+    if (!node) return shortSid(id);
+    if (node.kind === 'workspace') return node.label || '全局';
+    const title = node.label && node.label !== node.id ? ` · ${node.label}` : '';
+    return `${shortSid(node.id)}${title}${node.archived ? ' [archived]' : ''}`;
+  };
+  const toneOf = (id: string): Tone => {
+    const node = byId.get(id);
+    if (!node || node.kind === 'workspace' || node.archived) return 'muted';
+    if (node.frozen) return 'danger';
+    if (node.urgent) return 'warning';
+    return 'base';
+  };
+
+  const outgoing = new Map<string, GraphEdge[]>();
+  const incoming = new Set<string>();
+  for (const edge of graph.edges) {
+    const list = outgoing.get(edge.from);
+    if (list) list.push(edge);
+    else outgoing.set(edge.from, [edge]);
+    incoming.add(edge.to);
+  }
+
+  const visited = new Set<string>();
+  const emit = (id: string, indent: string, connector: string, depth: number): void => {
+    if (visited.has(id) || depth > 3) return;
+    visited.add(id);
+    rows.push({ text: clip(`${indent}${connector}${labelOf(id)}`, width), tone: toneOf(id) });
+    for (const edge of outgoing.get(id) ?? []) {
+      const count = edge.count && edge.count > 1 ? String(edge.count) : '';
+      const mark =
+        edge.kind === 'spawn'
+          ? '↳ '
+          : edge.kind === 'origin'
+            ? '┄origin┄▶ '
+            : edge.kind === 'subagent'
+              ? '┈agent┈▶ '
+              : `─交接${count}─▶ `;
+      emit(edge.to, `${indent}  `, mark, depth + 1);
+    }
+  };
+
+  for (const node of graph.nodes) {
+    if (!incoming.has(node.id)) emit(node.id, '  ', '', 0);
+  }
+  // A pure cycle has no root: emit whatever the first pass could not reach.
+  for (const node of graph.nodes) emit(node.id, '  ', '', 0);
+
+  if (graph.truncated > 0) rows.push({ text: clip(`  … +${graph.truncated}`, width), tone: 'muted' });
+  return rows;
+}
+
 /**
  * The whole panel as lines. Reading `panel.name` here (and in the caller's memo)
  * keeps it reactive: switching to another plugin's panel empties the list, and
@@ -629,6 +722,19 @@ function panelLines(
     // `ses:` row has one; an `arch:` fold row selected by `j/k` adds nothing.
     const selectedSession = sessionByKey(board, selectedKey);
     if (selectedSession) out.push(...detailLines(selectedSession, width));
+
+    // 0.8.0 (`board2-graph`): the same relation derivation the GUI draws. A
+    // selected session is the centre (L2); nothing selected is the global view
+    // (L0). Reading the derived board — not a second RPC — like every row above.
+    out.push(
+      ...graphRows(
+        data,
+        selectedSession ? 'session' : 'global',
+        selectedSession?.workspace,
+        selectedSession?.sid,
+        width
+      )
+    );
 
     // Compatibility with a snapshot whose `sessions` block is empty (an older
     // server, a hand-built fixture): leases / hand-offs / queue items that no

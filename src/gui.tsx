@@ -55,6 +55,7 @@ import {
 import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
+import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
@@ -342,6 +343,29 @@ const CSS = `
 .collab-counts{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;line-height:1;padding:0 4px;margin:0;border-radius:4px;opacity:.6;white-space:nowrap;cursor:pointer;}
 .collab-counts:hover{opacity:.9;background:color-mix(in srgb, currentColor 10%, transparent);}
 .collab-counts:focus-visible{outline:1px solid currentColor;outline-offset:1px;opacity:.9;}
+.collab-graph{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.collab-graph-svg{display:block;width:100%;max-width:320px;height:auto;overflow:visible;color:inherit;}
+.collab-graph-edge{stroke:currentColor;stroke-width:1;fill:none;opacity:.45;}
+.collab-graph-edge-active{opacity:1;stroke-width:2;}
+.collab-graph-node{cursor:pointer;}
+.collab-graph-node .collab-graph-box{fill:color-mix(in srgb, currentColor 8%, transparent);stroke:currentColor;stroke-width:1;opacity:.75;}
+.collab-graph-node:hover .collab-graph-box{opacity:1;}
+.collab-graph-node-selected .collab-graph-box{fill:color-mix(in srgb, currentColor 18%, transparent);stroke-width:2;opacity:1;}
+.collab-graph-node-archived .collab-graph-box{stroke-dasharray:2 2;opacity:.45;}
+.collab-graph-node-frozen .collab-graph-box{stroke:#f85149;}
+.collab-graph-node-urgent .collab-graph-box{stroke:#d29922;}
+.collab-graph-node-workspace .collab-graph-box{fill:transparent;stroke-dasharray:4 3;}
+.collab-graph-label{fill:currentColor;font-size:9px;font-family:var(--font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);}
+.collab-graph-toggle{cursor:pointer;opacity:.7;}
+.collab-graph-toggle:hover{opacity:1;}
+.collab-graph-toggle .collab-graph-toggle-box{fill:color-mix(in srgb, currentColor 12%, transparent);}
+.collab-graph-toggle .collab-graph-toggle-label{fill:currentColor;font-size:8px;}
+.collab-graph-more{font-size:10px;opacity:.6;}
+.collab-graph-legend{font-size:10px;opacity:.5;}
+.collab-ws{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;padding:0 2px;margin:0;min-width:0;cursor:pointer;border-radius:4px;}
+.collab-ws:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
+.collab-ws:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+.collab-ws-selected{background:color-mix(in srgb, currentColor 10%, transparent);}
 `;
 
 /* ----------------------------------------------------------------------- rows */
@@ -514,9 +538,11 @@ function GroupView(props: {
   group: BoardWorkspace;
   current: string;
   selected: string | null;
+  selectedWorkspace: string | null;
   expanded: (key: string) => boolean;
   onToggle: (key: string) => void;
   onSelect: (sid: string) => void;
+  onSelectWorkspace: (workspace: string) => void;
 }) {
   const ctx = usePlugin();
   const label = () => workspaceLabel(props.group.workspace) || ctx.t('panel.global');
@@ -524,9 +550,19 @@ function GroupView(props: {
   return (
     <section class="collab-group">
       <header class="collab-head">
-        <span class="collab-head-label" title={props.group.workspace || undefined}>
-          {label()}
-        </span>
+        {/* 0.8.0 (`board2-graph`): clicking the workspace name selects the
+            workspace, which is what puts the graph on its L1 level. The same
+            button is the only way there — the session rows keep selecting a
+            session (L2). */}
+        <button
+          type="button"
+          class={`collab-ws${props.selectedWorkspace === props.group.workspace ? ' collab-ws-selected' : ''}`}
+          title={props.group.workspace || undefined}
+          aria-pressed={props.selectedWorkspace === props.group.workspace}
+          onClick={() => props.onSelectWorkspace(props.group.workspace)}
+        >
+          <span class="collab-head-label">{label()}</span>
+        </button>
         <span class="collab-muted">
           {ctx.t('panel.workspaceCounts', {
             sessions: props.group.counts.sessions,
@@ -624,16 +660,273 @@ function DetailHeader(props: { session: BoardSession; current: string }) {
  * The slot classes are computed, not literals: the GUI bundle inlines static
  * attributes (unquoted, no separator), and the test host's template parser
  * needs the class set at runtime, like every other class in this file. The
- * `data-collab-slot` attribute is what `board2-graph` / `board2-actions` select
- * on.
+ * `data-collab-slot` attribute is the slot's stable identity: `board2-graph`
+ * now renders inside `graph` (see `GraphSlot`); `board2-actions` still mounts
+ * in the empty `actions` element.
  */
 function slotClass(kind: 'graph' | 'actions'): string {
   return `collab-detail-section collab-${kind}-slot`;
 }
 
-/** `board2-graph` mounts here; today an empty, zero-height slot that never collapses. */
-function GraphSlot() {
-  return <div class={slotClass('graph')} data-collab-slot="graph" />;
+/* ---------------------------------------------------------------------- graph */
+
+/** The little SVG's fixed coordinate space; CSS scales it to the pane width. */
+const GRAPH_W = 320;
+const GRAPH_H = 180;
+const GRAPH_CX = GRAPH_W / 2;
+const GRAPH_CY = GRAPH_H / 2;
+/** Room for the node box + its `▸/▾` corner badge. */
+const GRAPH_LABEL_MAX = 14;
+
+interface GraphPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * A deliberately dumb layout: one ring, ordered by the (already sorted) node
+ * list. No force solver, no randomness — the same snapshot always produces the
+ * same circles, so the SVG is byte-identical between polls (R4) and a test can
+ * click a node by its stable `data-graph-node` id.
+ */
+function graphPositions(nodes: GraphNode[]): Map<string, GraphPoint> {
+  const points = new Map<string, GraphPoint>();
+  if (!nodes.length) return points;
+  if (nodes.length === 1) {
+    points.set(nodes[0]!.id, { x: GRAPH_CX, y: GRAPH_CY });
+    return points;
+  }
+  const radius = nodes.length <= 4 ? 50 : 62;
+  nodes.forEach((node, index) => {
+    const angle = -Math.PI / 2 + (index * 2 * Math.PI) / nodes.length;
+    points.set(node.id, {
+      x: Math.round((GRAPH_CX + radius * Math.cos(angle)) * 10) / 10,
+      y: Math.round((GRAPH_CY + radius * Math.sin(angle)) * 10) / 10
+    });
+  });
+  return points;
+}
+
+/**
+ * R1/R2 (0.8.0, `board2-graph`): the detail pane's graph slot.
+ *
+ * The derivation is `core/graph.ts` (the TUI renders the same object). This
+ * component owns exactly two pieces of **window-local** state:
+ *
+ *   - `collapsed` — a set of node ids whose one-hop neighbours are folded away
+ *     (a poll that replaces `data` must not unfold them);
+ *   - `hovered` — the node under the pointer, used to brighten its edges.
+ *
+ * Level follows the selection, which the panel owns: no selection = `global`
+ * (workspaces), a workspace = `workspace` (its sessions + ghost workspace
+ * nodes), a session = `session` (that session ±1 hop, ≤ `GRAPH_NODE_LIMIT`).
+ * Nodes are clickable: a session selects that session, a workspace selects that
+ * workspace — the left list and the items below follow (R2). Read-only (R5):
+ * the only effects of a click are those two selections.
+ */
+function GraphSlot(props: {
+  snapshot?: Snapshot;
+  level: GraphLevel;
+  workspace?: string;
+  session?: string;
+  onPickSession: (sid: string) => void;
+  onPickWorkspace: (workspace: string) => void;
+}) {
+  const ctx = usePlugin();
+  const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
+  const [hovered, setHovered] = createSignal<string | null>(null);
+
+  const graph = createMemo(() =>
+    buildGraph(props.snapshot, [], { level: props.level, workspace: props.workspace, session: props.session })
+  );
+
+  /**
+   * One-hop fold (R2): a node that is **only** reachable through a collapsed
+   * node disappears; the selected session and any node still connected to an
+   * expanded neighbour stay. Two passes over the (small) edge list, no state
+   * beyond the click set — a poll cannot fold a row by itself.
+   */
+  const hidden = createMemo((): Set<string> => {
+    const folded = collapsed();
+    const gone = new Set<string>();
+    if (!folded.size) return gone;
+    const view = graph();
+    for (const id of [...folded].sort()) {
+      for (const edge of view.edges) {
+        const other = edge.from === id ? edge.to : edge.to === id ? edge.from : undefined;
+        if (!other || other === props.session || gone.has(other)) continue;
+        const kept = view.edges.some(candidate => {
+          const pair =
+            candidate.from === other ? candidate.to : candidate.to === other ? candidate.from : undefined;
+          return pair !== undefined && pair !== id && !folded.has(pair);
+        });
+        if (!kept) gone.add(other);
+      }
+    }
+    return gone;
+  });
+
+  const nodes = createMemo(() => graph().nodes.filter(node => !hidden().has(node.id)));
+  const edges = createMemo(() =>
+    graph().edges.filter(edge => !hidden().has(edge.from) && !hidden().has(edge.to))
+  );
+  const positions = createMemo(() => graphPositions(nodes()));
+
+  const neighbours = (id: string): number =>
+    graph().edges.reduce((total, edge) => total + (edge.from === id || edge.to === id ? 1 : 0), 0);
+
+  const toggle = (id: string): void => {
+    setCollapsed(previous => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const labelOf = (node: GraphNode): string => {
+    const text = node.kind === 'workspace' ? node.label || ctx.t('panel.global') : node.label;
+    return text.length > GRAPH_LABEL_MAX ? `${text.slice(0, GRAPH_LABEL_MAX - 1)}…` : text;
+  };
+
+  const isSelected = (node: GraphNode): boolean =>
+    node.kind === 'session' ? props.session === node.id : props.workspace === node.id;
+
+  const nodeClass = (node: GraphNode): string =>
+    [
+      'collab-graph-node',
+      `collab-graph-node-${node.kind}`,
+      isSelected(node) ? 'collab-graph-node-selected' : '',
+      node.archived ? 'collab-graph-node-archived' : '',
+      node.frozen ? 'collab-graph-node-frozen' : '',
+      node.urgent ? 'collab-graph-node-urgent' : ''
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+  /**
+   * `stroke-dasharray` per R1: `handoff` solid, `origin` dashed, `spawn` /
+   * `subagent` dotted (a short dash reads as dots at this stroke width). An edge
+   * that leaves a workspace in L1 keeps the dashed form of a collapsed
+   * counterpart (`origin` stays dashed either way).
+   */
+  const dashOf = (edge: GraphEdge): string => {
+    // A cross-boundary edge is folded onto a workspace placeholder, whatever its
+    // kind: it stays dashed so it never reads like a session-to-session link.
+    const target = graph().nodes.find(node => node.id === edge.to);
+    if (target?.kind === 'workspace') return '4 3';
+    if (edge.kind === 'spawn' || edge.kind === 'subagent') return '1 3';
+    if (edge.kind === 'origin') return '4 3';
+    return '';
+  };
+
+  const edgeClass = (edge: GraphEdge): string => {
+    const active = hovered() === edge.from || hovered() === edge.to;
+    return `collab-graph-edge collab-graph-edge-${edge.kind}${active ? ' collab-graph-edge-active' : ''}`;
+  };
+
+  const pick = (node: GraphNode): void => {
+    if (node.kind === 'workspace') props.onPickWorkspace(node.id);
+    else props.onPickSession(node.id);
+  };
+
+  return (
+    <div class={slotClass('graph')} data-collab-slot="graph">
+      <div class="collab-graph" data-graph-level={props.level}>
+        <svg class="collab-graph-svg" viewBox={`0 0 ${GRAPH_W} ${GRAPH_H}`} aria-label={ctx.t('graph.title')}>
+          <For each={edges()}>
+            {edge => {
+              const from = () => positions().get(edge.from);
+              const to = () => positions().get(edge.to);
+              return (
+                <Show when={from() && to()}>
+                  <line
+                    class={edgeClass(edge)}
+                    data-graph-edge={edge.kind}
+                    data-graph-from={edge.from}
+                    data-graph-to={edge.to}
+                    x1={from()!.x}
+                    y1={from()!.y}
+                    x2={to()!.x}
+                    y2={to()!.y}
+                    stroke-dasharray={dashOf(edge)}
+                  />
+                </Show>
+              );
+            }}
+          </For>
+          <For each={nodes()}>
+            {node => {
+              const point = () => positions().get(node.id) ?? { x: GRAPH_CX, y: GRAPH_CY };
+              return (
+                <>
+                  <g
+                    class={nodeClass(node)}
+                    data-graph-node={node.id}
+                    onClick={() => pick(node)}
+                    onMouseOver={() => setHovered(node.id)}
+                    onMouseOut={() => setHovered(null)}
+                  >
+                    <rect
+                      class="collab-graph-box"
+                      x={point().x - 38}
+                      y={point().y - 11}
+                      width="76"
+                      height="22"
+                      rx="4"
+                    />
+                    <text class="collab-graph-label" x={point().x} y={point().y + 3} text-anchor="middle">
+                      {labelOf(node)}
+                    </text>
+                  </g>
+                  <Show when={neighbours(node.id) > 0}>
+                    <g
+                      class="collab-graph-toggle"
+                      data-graph-toggle={node.id}
+                      onClick={() => toggle(node.id)}
+                    >
+                      <rect
+                        class="collab-graph-toggle-box"
+                        x={point().x + 26}
+                        y={point().y - 18}
+                        width="12"
+                        height="10"
+                        rx="2"
+                      />
+                      <text
+                        class="collab-graph-toggle-label"
+                        x={point().x + 32}
+                        y={point().y - 10}
+                        text-anchor="middle"
+                      >
+                        {collapsed().has(node.id) ? '▸' : '▾'}
+                      </text>
+                    </g>
+                  </Show>
+                </>
+              );
+            }}
+          </For>
+        </svg>
+        <Show when={graph().truncated > 0}>
+          <span class="collab-graph-more" title={ctx.t('graph.truncated', { count: graph().truncated })}>
+            +{graph().truncated}
+          </span>
+        </Show>
+        <Show when={!nodes().length}>
+          <div class="collab-empty">{ctx.t('graph.empty')}</div>
+        </Show>
+        <Show when={nodes().length}>
+          <div class="collab-graph-legend">
+            {ctx.t('graph.legend', {
+              max: GRAPH_NODE_LIMIT,
+              level: ctx.t(`graph.level.${props.level}`)
+            })}
+          </div>
+        </Show>
+      </div>
+    </div>
+  );
 }
 
 /** `board2-actions` mounts here; today empty (R5 of this task: read-only). */
@@ -672,7 +965,15 @@ function DetailItems(props: { session: BoardSession; current: string }) {
   );
 }
 
-function BoardDetail(props: { session: BoardSession; current: string; narrow: boolean; onBack: () => void }) {
+function BoardDetail(props: {
+  session: BoardSession;
+  current: string;
+  narrow: boolean;
+  snapshot?: Snapshot;
+  onBack: () => void;
+  onPickSession: (sid: string) => void;
+  onPickWorkspace: (workspace: string) => void;
+}) {
   const ctx = usePlugin();
   return (
     <section class="collab-detail-pane">
@@ -682,7 +983,15 @@ function BoardDetail(props: { session: BoardSession; current: string; narrow: bo
         </button>
       </Show>
       <DetailHeader session={props.session} current={props.current} />
-      <GraphSlot />
+      {/* L2: the selected session is the centre (±1 hop, ≤ GRAPH_NODE_LIMIT). */}
+      <GraphSlot
+        snapshot={props.snapshot}
+        level="session"
+        workspace={props.session.workspace}
+        session={props.session.sid}
+        onPickSession={props.onPickSession}
+        onPickWorkspace={props.onPickWorkspace}
+      />
       <ActionRow />
       <DetailItems session={props.session} current={props.current} />
     </section>
@@ -716,6 +1025,10 @@ function PanelView(props: { session: { id: string } }) {
   // R3: the selection is component memory, not snapshot data — a poll that
   // replaces `data` cannot reset it.
   const [selected, setSelected] = createSignal<string | null>(null);
+  // 0.8.0 (`board2-graph`): a workspace can be selected too (the L1 level of the
+  // graph). Session and workspace selections are mutually exclusive: picking
+  // one clears the other, so the graph level is never ambiguous.
+  const [selectedWorkspace, setSelectedWorkspace] = createSignal<string | null>(null);
   // R1: the one breakpoint. Read once per mount (a media query, not a resize
   // listener on every render); a host without `matchMedia` is the wide form.
   const query = narrowQuery();
@@ -761,9 +1074,37 @@ function PanelView(props: { session: { id: string } }) {
     });
   });
 
+  // The same rule for a selected workspace: only when it stops being listed.
+  createEffect(() => {
+    const workspace = selectedWorkspace();
+    if (workspace === null || !store.state.data) return;
+    if (groups().some(group => group.workspace === workspace)) return;
+    setSelectedWorkspace(null);
+    ctx.toast.show({
+      title: ctx.t('panel.title'),
+      description: ctx.t('panel.workspaceGone'),
+      variant: 'default'
+    });
+  });
+
+  // The left list toggles a session off on a second click (unchanged). The
+  // graph's node click is absolute: clicking the centre must keep it selected.
   const select = (sid: string): void => {
     setSelected(previous => (previous === sid ? null : sid));
+    setSelectedWorkspace(null);
   };
+  const pickSession = (sid: string): void => {
+    setSelected(sid);
+    setSelectedWorkspace(null);
+  };
+  const selectWorkspace = (workspace: string): void => {
+    setSelectedWorkspace(previous => (previous === workspace ? null : workspace));
+    setSelected(null);
+  };
+
+  /** L0 / L1 / L2 — the one rule the graph slot reads (R2). */
+  const graphLevel = (): GraphLevel =>
+    selectedSession() ? 'session' : selectedWorkspace() !== null ? 'workspace' : 'global';
 
   // 0.5.3 (R3): name the server the rows came from — remote only. The app's own
   // server is the default and would be noise (`@sidecar` on every window).
@@ -796,7 +1137,7 @@ function PanelView(props: { session: { id: string } }) {
       >
         <Show when={groups().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
           <div class={`collab-split${narrow() ? ' collab-split-narrow' : ''}`}>
-            <Show when={!narrow() || !selected()}>
+            <Show when={!narrow() || (!selected() && selectedWorkspace() === null)}>
               <section class="collab-sidebar">
                 <For each={groups().filter(group => group.sessions.length || group.archived.length)}>
                   {group => (
@@ -804,9 +1145,11 @@ function PanelView(props: { session: { id: string } }) {
                       group={group}
                       current={props.session.id}
                       selected={selected()}
+                      selectedWorkspace={selectedWorkspace()}
                       expanded={isExpanded}
                       onToggle={toggle}
                       onSelect={select}
+                      onSelectWorkspace={selectWorkspace}
                     />
                   )}
                 </For>
@@ -815,11 +1158,31 @@ function PanelView(props: { session: { id: string } }) {
                 </Show>
               </section>
             </Show>
-            <Show when={!narrow() || selected()}>
+            <Show when={!narrow() || selected() || selectedWorkspace() !== null}>
               <Show
                 when={selectedSession()}
                 fallback={
                   <section class="collab-detail-pane">
+                    <Show when={narrow()}>
+                      <button
+                        type="button"
+                        class="collab-back"
+                        onClick={() => {
+                          setSelectedWorkspace(null);
+                          setSelected(null);
+                        }}
+                      >
+                        ← {ctx.t('panel.back')}
+                      </button>
+                    </Show>
+                    {/* No session selected: L0 (global) or L1 (a workspace). */}
+                    <GraphSlot
+                      snapshot={store.state.data}
+                      level={graphLevel()}
+                      workspace={selectedWorkspace() ?? undefined}
+                      onPickSession={pickSession}
+                      onPickWorkspace={selectWorkspace}
+                    />
                     <div class="collab-empty">{ctx.t('panel.pick')}</div>
                   </section>
                 }
@@ -829,8 +1192,12 @@ function PanelView(props: { session: { id: string } }) {
                     session={session()}
                     current={props.session.id}
                     narrow={narrow()}
+                    snapshot={store.state.data}
+                    onPickSession={pickSession}
+                    onPickWorkspace={selectWorkspace}
                     onBack={() => {
                       setSelected(null);
+                      setSelectedWorkspace(null);
                     }}
                   />
                 )}
@@ -980,7 +1347,15 @@ export default Plugin.define({
       'titlebar.title': 'Collab status — open the panel',
       'probe.title': 'Collab GUI loaded',
       'probe.description': 'plugin v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',
-      'panel.source': 'Rows come from this server'
+      'panel.source': 'Rows come from this server',
+      'panel.workspaceGone': 'That workspace is no longer in the snapshot',
+      'graph.title': 'Relations',
+      'graph.empty': 'No relations to draw.',
+      'graph.legend': '{{level}} · click a node to select it · ▸/▾ folds one hop · at most {{max}} nodes',
+      'graph.truncated': '{{count}} more node(s) not shown',
+      'graph.level.global': 'global',
+      'graph.level.workspace': 'workspace',
+      'graph.level.session': 'session'
     },
     zh: {
       'panel.title': '协作',
@@ -1032,7 +1407,15 @@ export default Plugin.define({
       'titlebar.title': '协作状态 — 打开面板',
       'probe.title': 'Collab GUI 已加载',
       'probe.description': '插件 v{{version}} · id={{id}} · panel={{panel}} · app={{app}}({{platform}}) · server={{server}}',
-      'panel.source': '数据来自该服务器'
+      'panel.source': '数据来自该服务器',
+      'panel.workspaceGone': '该工作区已不在快照中',
+      'graph.title': '关系图',
+      'graph.empty': '没有可画的关系。',
+      'graph.legend': '{{level}} · 点节点选中 · ▸/▾ 折叠一跳 · 最多 {{max}} 个节点',
+      'graph.truncated': '另有 {{count}} 个节点未显示',
+      'graph.level.global': '全局',
+      'graph.level.workspace': '工作区',
+      'graph.level.session': '会话'
     }
   },
 

@@ -140,11 +140,16 @@ function toHandoff(record: BroadcastRecord, now: number, freeze?: SnapshotFreeze
     (claim.kind === 'spawn' ? claim.by : undefined) ?? (expired.kind === 'spawn' ? expired.by : undefined) ?? ''
   );
   const isSpawn = claim.kind === 'spawn' || expired.kind === 'spawn';
+  const from = String(record.from?.sid ?? '');
+  // 0.8.0 (`board2-graph`): the chain head of a forwarded hand-off. A record
+  // written before 0.7.0 has none, and `origin === from` is a single hop (noise
+  // the writer already omits) — both are simply absent, never an empty marker.
+  const origin = String(asObject(record.origin).sid ?? '');
   return {
     bid,
     state,
     ageMs: Math.max(0, now - createdAt),
-    from: String(record.from?.sid ?? ''),
+    from,
     ...(record.claim?.by ? { claimBy: String(record.claim.by) } : {}),
     ...(record.workspace ? { workspace: String(record.workspace) } : {}),
     title: truncate(record.title ?? record.slug ?? '(untitled)', 60),
@@ -155,6 +160,7 @@ function toHandoff(record: BroadcastRecord, now: number, freeze?: SnapshotFreeze
     // 0.6.0 (board): `↳` relation, optional so an older server stays valid.
     ...(isSpawn ? { kind: 'spawn' as const } : {}),
     ...(spawned ? { spawned } : {}),
+    ...(origin && origin !== from ? { origin } : {}),
     // 0.6.0 (`collab_freeze`): the bid or its workspace is frozen (read-only).
     ...(freeze ? { freeze } : {})
   };

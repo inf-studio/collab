@@ -846,7 +846,7 @@ src/gui.tsx (./gui-experimental)                        src/tui.tsx (./tui)
   reachable: true,                         // server 真的回答了
   sessions: [{ sid, title, agent, busy, workspace, parent?, frozen?, archived? }],
   locks:    [{ resource, kind, mode, holders, waiters, waiting, expiresInMs, waiterAgeMs?, staleWaiters?, stale?, reason? }],
-  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title, archived?, priority?, freeze?, kind?, spawned? }],
+  handoffs: [{ bid, state, ageMs, from, claimBy?, workspace?, title, archived?, priority?, freeze?, kind?, spawned?, origin? }],
   queue:    [{ queueId, target, ageMs, summary, issuePath?, bid?, seen, priority? }]   // 0.4.2：{ session } 限定
 }
 ```
@@ -1098,7 +1098,7 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
     └ .collab-detail-pane       （窄屏 ≤640px 时与 sidebar 二选一）
        ├ .collab-back           「← 返回列表」（仅窄屏）
        ├ DetailHeader           标题 / agent / 完整 sid / 徽标
-       ├ GraphSlot              `data-collab-slot="graph"`（空，零高；关系图子任务挂这里）
+       ├ GraphSlot              `data-collab-slot="graph"`（0.8.0 `board2-graph`：三级关系图，见 §11.11.8）
        ├ ActionRow              `data-collab-slot="actions"`（空；动作子任务挂这里）
        └ DetailItems            锁 → 交接 → owner 队列 → `↳` 拉起的会话（复用 board.ts 派生）
 ```
@@ -1110,7 +1110,7 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
 | 消失清空 | `createEffect` 检查选中的 sid 是否仍在 `buildBoard()` 的活跃或已归档列表里；不在才清空 + `ctx.toast.show`「该会话已不在快照中」。**没有快照**（adopt / 一次失败）不算消失——保留行，由横幅解释 |
 | 归档 | 会话被归档后**仍存在**于快照与 `archived[]`，详情继续显示并带 `[archived]`；只有真的离开快照才清空 |
 | 窄窗口 | `matchMedia('(max-width: 640px)')`（没有 `matchMedia` 的宿主 = 宽屏）：单栏时 `selected ? 详情 : 列表`，详情顶部给「← 返回列表」；CSS 里同一断点把 grid 收成一列（`@media (max-width:640px)`） |
-| 槽位 | `GraphSlot` / `ActionRow` 现在渲染**空元素**（`data-collab-slot`），不是 `null`：下一个子任务在原地挂载，不重排布局；两者 `min-height:0`，今天不占高度 |
+| 槽位 | 两个槽位都是**真实元素**（`data-collab-slot`），不是 `null`：子任务在原地挂载，不重排布局。`GraphSlot` 已由 `board2-graph` 填上三级关系图（§11.11.8）；`ActionRow` 仍为空（`board2-actions` 挂载点），`min-height:0`、不占高度 |
 | 只读 | 本子任务不引入任何写路径：新增的 DOM 事件只有「选中 / 返回列表」两个本地信号写操作 |
 
 **TUI**（树不变）：`j`/`k` 移动光标即**选中**（`esc` 清除），树下方追加 3–5 行
@@ -1119,6 +1119,77 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
 0.6.0 的树断言逐字不变；`enter`/`space` 与鼠标点击保持 0.6.0 语义（只展开/收起，**不**打开详情块），`escape` 只清除选中。
 
 **回滚**：`git restore -- src/gui.tsx src/tui.tsx test/gui-panel.mjs test/tui-render.mjs`；没有运行时开关。
+
+#### 11.11.8 三级关系图（0.8.0，`board2-graph`）
+
+主从布局之后还剩一个说不清的关系：**谁和谁在协作**。0.6.0 的看板只能回答「这个会话持有/发起了什么」，
+回答不了「这条工作流从哪个工作区来、下一跳是谁」。这一节加一张图，三个级别，GUI 画 SVG、TUI 画文本树，
+**两个面板调同一个纯函数**（`src/core/graph.ts`），禁止各自算。
+
+```ts
+buildGraph(snapshot, freezes, { level, workspace?, session?, now? })
+  → { nodes: GraphNode[], edges: GraphEdge[], truncated: number }
+
+GraphNode  { id, kind: 'workspace'|'session', label, archived?, frozen?, urgent?, parent? }
+GraphEdge  { from, to, kind: 'handoff'|'origin'|'spawn'|'subagent', bid?, state?, count? }
+```
+
+| 级别 | 什么时候 | 节点 | 边 |
+| --- | --- | --- | --- |
+| **L0 `global`** | 没有选中（GUI 右详情初始态 / TUI 未 `j`/`k`） | 工作区（`id` = 绝对目录，`''` = 全局组；`label` = 末段路径） | 跨工作区交接；**同一对工作区合并为一条** `count`（同工作区不画自环） |
+| **L1 `workspace`** | GUI 点了工作区标题（TUI 没有工作区光标，不产出） | 该区全部会话（含已归档）+ 每条**跨越本区边界的边（出/入）**对应的一个**对端工作区节点**（不展开对方会话） | 本区内 `handoff` / `spawn` / `subagent` / `origin`；跨界的边折到对端工作区节点上（GUI 画虚线） |
+| **L2 `session`** | 选中一个会话 | 该会话（中心）+ 直接邻居（±1 跳），上限 **8** 个，超出进 `truncated`（GUI 显示 `+N`） | 两端都在保留集合里的边（诱导子图），方向、类型见下 |
+
+**边的来源与方向**（一条记录只产生一条主边，避免同一对会话画两遍）：
+
+| `kind` | 来源 | 方向 | 样式（GUI / TUI） |
+| --- | --- | --- | --- |
+| `handoff` | 非 spawn 的交接 | `from → claimBy`（请求方 → 承接方） | 实线 / `─交接─▶`（合并时 `─交接N─▶`） |
+| `origin` | `SnapshotHandoff.origin`（0.8.0 起由 `toHandoff` 透传 `record.origin.sid`；单跳同 `from` 不写） | `origin → from`（链头 → 上一跳） | 虚线 / `┄origin┄▶` |
+| `spawn` | `kind === "spawn"` | `from → spawned ?? claimBy` | 点线 / `↳`（与看板的 `↳` 同一记号） |
+| `subagent` | `session.parent` | `parent → sid` | 点线 / `┈agent┈▶` |
+
+- `origin` 是快照字段（`SnapshotHandoff.origin`，**可选**）：`toHandoff` 从 `record.origin.sid` 透传，
+  `origin === from` 的单跳不写；缺失就不画，绝不造节点。`graph.ts` 仍容忍旧远端可能透传的
+  `origin.sid` 对象 / `originSid` 两种拼写（`test/graph-shape.mjs` 有真实 `buildSnapshot` 路径与
+  旧拼写各一条断言）。
+- **L0 的对端工作区**：对端会话不在本快照时，用 `handoff.workspace`（peer 记录里它是**目标**工作区，
+  见 `src/tools/broadcast.ts`）；请求方目录未知时归入 `''`（全局）——快照不携带对方目录，宁可归到全局
+  也不猜。
+- **L1 的未知对端**：快照里没有该 sid 的目录，无法判断它属于哪个工作区，因此该边**丢弃**，不会错误地
+  折到本工作区节点上。
+- 冻结 / 加急：与看板同一优先级（快照 marker 优先，其次 `core/freeze-pure.ts` 的 `freezeFor`；
+  `urgent` 只来自交接的 `priority:"urgent"`），过期冻结不画。
+
+**确定性（R4）**：节点按 `id`、边按 `from + kind + to` 排序，都用**码位比较**（不用 `localeCompare`——
+它随机器 locale 变）。所以「同一快照两次渲染」字节一致，且**输入数组顺序颠倒也一致**（测试两条都断言；
+后者才是排序真正买到的性质）。`Map` 插入序不作为契约；同一 `(from,kind,to)` 出现多条记录的极端情况，
+保留输入中的第一条的 `bid/state`（GUI/TUI 都不显示 `bid`）。
+
+**GUI 交互**（`GraphSlot`，内联 SVG，无图库）：
+
+| 动作 | 效果 | 状态位置 |
+| --- | --- | --- |
+| 点会话节点 | 选中该会话：左列表高亮、右详情 `DetailHeader` / items 跟着换（等价于点列表行） | `PanelView` 的 `selected` 信号 |
+| 点工作区节点 / 左侧工作区标题 | 切到 L1（再点一次取消）。会话与工作区选中**互斥** | `selectedWorkspace` 信号 |
+| 节点右上 `▸/▾` | 折叠 / 展开该节点的**一跳邻居**（中心节点折叠 = 隐藏所有邻居） | `GraphSlot` 本地 `createSignal<Set<string>>`，轮询不重置 |
+| 悬停节点 | 相邻边加 `collab-graph-edge-active`（只高亮相邻） | 本地 `hovered` 信号 |
+| `+N` | `truncated` 个节点未显示（L2 上限 8） | `graph().truncated` |
+
+布局是**一圈均匀分布 + 列内排序**（没有力导向、没有随机数），所以截图/断言在同一快照上稳定可复现。
+所有点击都只写上面两个选中信号——看板仍然**只读**（R5），没有释放 / 归档 / 解冻 / 投递。
+
+**TUI**（`collab.status` 面板）：树下方多一段文本树，级别跟选中走（未选中 = L0，选中 `ses:` 行 = L2）。
+缩进 2 空格、深度上限 3；`─交接─▶` / `┄origin┄▶` / `┈agent┈▶` / `↳`；每行 `clip` 到面板宽度，
+窄终端以 `…` 截断（30 列实测不崩）。展开/收起与选中都是本地状态，`buildGraph` 不额外 `load()`。
+
+**测试与变异**：`test/graph-shape.mjs`（L0/L1/L2 的节点/边/方向/类型、`+N`、两次构建与**输入倒序**一致、
+目录 hash 前后不变；**真实路径** `buildSnapshot → toHandoff → buildGraph` 出 `origin` 边）；`test/gui-panel.mjs` 34 → 47（三级别切换、点节点联动、折叠/展开、悬停高亮、`+N`、轮询后图与选中不变、
+四类边线型逐类断言）。变异：M3 去 `origin` 透传（snapshot 1 + graph 2 条红）、M4 `spawn` 改实线（线型 1 条红）；`test/tui-render.mjs` 56 → 60（L0 `─交接─▶`、会话选中切 L2 的 `↳`、30 列 `…`）。
+变异两组都实测失败：① 把 `handoff`/`spawn` 边方向画反 → 方向断言失败；② 去掉节点/边排序 → 「输入倒序
+一致」与「按 id 排序」断言失败。
+
+**回滚**：`git restore -- src/core/graph.ts src/gui.tsx src/tui.tsx src/index.ts test/graph-shape.mjs test/gui-panel.mjs test/tui-render.mjs`。
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

@@ -13,6 +13,7 @@ import { createLineage } from './core/lineage.ts';
 import { mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
+import { buildGraph } from './core/graph.ts';
 import { CollabState } from './rpc.ts';
 import { assertCollabOnly, collabPermissionRules, mergeRules, missingRules, normalizeRules } from './core/grants.ts';
 import {
@@ -298,6 +299,8 @@ export const __internals = {
   buildBoard,
   // The orphan fallback (0.6.0 / pure-tested in 0.6.1) — rows no session owns.
   boardOrphans,
+  // Three-level relation graph (0.8.0) — the one pure derivation GUI / TUI share.
+  buildGraph,
   // The four-number vocabulary (0.6.0, R4) — pure, shared by GUI / TUI / tests.
   countsOf,
   pendingCountOf,

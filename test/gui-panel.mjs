@@ -957,6 +957,275 @@ const LAYOUT = {
   dispose();
 }
 
+/* ------------------- 10. 0.8.0 (board2-graph): three levels + interactions ---- */
+
+const GRAPH_A = '/data/project/alpha';
+const GRAPH_B = '/data/project/beta';
+const GRAPH = {
+  at: 1,
+  reachable: true,
+  sessions: [
+    { sid: 'ses_g_alpha01', title: 'graph alpha', agent: 'build', busy: true, workspace: GRAPH_A },
+    {
+      sid: 'ses_g_child01',
+      title: 'graph child',
+      agent: 'build',
+      busy: false,
+      workspace: GRAPH_A,
+      parent: 'ses_g_alpha01'
+    },
+    { sid: 'ses_g_beta01', title: 'graph beta', agent: 'build', busy: false, workspace: GRAPH_B }
+  ],
+  locks: [],
+  handoffs: [
+    {
+      bid: 'b_graph_cross',
+      state: 'claimed',
+      ageMs: 1_000,
+      from: 'ses_g_alpha01',
+      claimBy: 'ses_g_beta01',
+      workspace: GRAPH_B,
+      title: 'cross-workspace work',
+      // 0.8.0: the chain head of a forwarded record — the dashed `origin` edge.
+      // The snapshot carries it as a string (see `SnapshotHandoff.origin`).
+      origin: 'ses_g_head01'
+    },
+    {
+      bid: 'b_graph_spawn',
+      state: 'claimed',
+      ageMs: 2_000,
+      from: 'ses_g_alpha01',
+      claimBy: 'ses_g_child01',
+      spawned: 'ses_g_child01',
+      kind: 'spawn',
+      workspace: GRAPH_A,
+      title: 'spawn the child'
+    }
+  ],
+  queue: []
+};
+
+{
+  let graphLoads = 0;
+  const graphClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        graphLoads += 1;
+        return { ...GRAPH, at: graphLoads };
+      }
+    })
+  };
+  const GRAPH_SESSION = serverSession('ses_g_alpha01', 'srv-graph', graphClient);
+  const h = harness(GRAPH_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, GRAPH_SESSION);
+  const text = () => el?.textContent ?? '';
+  const graphRoot = () => findIn(el, node => String(node.className).split(' ').includes('collab-graph'));
+  const graphNode = id => findIn(el, node => node.attrs?.['data-graph-node'] === id);
+  const graphEdge = (from, to) =>
+    findIn(
+      el,
+      node =>
+        node.attrs?.['data-graph-edge'] !== undefined &&
+        node.attrs?.['data-graph-from'] === from &&
+        node.attrs?.['data-graph-to'] === to
+    );
+  const graphEdgeOf = (kind, from, to) =>
+    findIn(
+      el,
+      node =>
+        node.attrs?.['data-graph-edge'] === kind &&
+        node.attrs?.['data-graph-from'] === from &&
+        node.attrs?.['data-graph-to'] === to
+    );
+  const fireMouseOver = target => {
+    const event = { type: 'mouseover', target, cancelBubble: false };
+    for (const listener of documentStub.listeners.get('mouseover') ?? []) listener(event);
+  };
+
+  // R2: with nothing selected the graph is L0 — workspaces as nodes, one merged
+  // cross-workspace edge. A session id must not be a node at this level.
+  expect(
+    'PN10 L0 (no selection): the graph draws workspace nodes and the cross-workspace edge',
+    graphRoot()?.getAttribute('data-graph-level') === 'global' &&
+      Boolean(graphNode(GRAPH_A)) &&
+      Boolean(graphNode(GRAPH_B)) &&
+      !graphNode('ses_g_alpha01') &&
+      graphEdge(GRAPH_A, GRAPH_B)?.getAttribute('data-graph-edge') === 'handoff' &&
+      text().includes('全局'),
+    JSON.stringify({
+      level: graphRoot()?.getAttribute('data-graph-level'),
+      nodes: [...(graphRoot()?.childNodes ?? [])].length,
+      text: text()
+    })
+  );
+
+  // R2: clicking the workspace name is what reaches L1 — that workspace's
+  // sessions, plus ONE workspace node for the counterpart (never its sessions).
+  const wsButton = findIn(
+    el,
+    node => String(node.className).split(' ').includes('collab-ws') && node.textContent.includes('alpha')
+  );
+  expect('PN10 the workspace header is a select button', Boolean(wsButton), wsButton?.className);
+  fireClick(wsButton);
+  expect(
+    'PN10 L1 (workspace selected): alpha sessions expand, beta stays one dashed workspace node',
+    graphRoot()?.getAttribute('data-graph-level') === 'workspace' &&
+      Boolean(graphNode('ses_g_alpha01')) &&
+      Boolean(graphNode('ses_g_child01')) &&
+      Boolean(graphNode(GRAPH_B)) &&
+      !graphNode('ses_g_beta01') &&
+      graphEdge('ses_g_alpha01', GRAPH_B)?.getAttribute('data-graph-edge') === 'handoff' &&
+      text().includes('工作区'),
+    JSON.stringify({ level: graphRoot()?.getAttribute('data-graph-level'), text: text() })
+  );
+
+  // R2: selecting a session is L2 — the session ±1 hop.
+  const alphaRow = findIn(
+    el,
+    node => String(node.className).includes('collab-session') && node.textContent.includes('graph alpha')
+  );
+  fireClick(alphaRow);
+  expect(
+    'PN10 L2 (session selected): centre + direct neighbours only',
+    graphRoot()?.getAttribute('data-graph-level') === 'session' &&
+      Boolean(graphNode('ses_g_alpha01')) &&
+      Boolean(graphNode('ses_g_child01')) &&
+      Boolean(graphNode('ses_g_beta01')) &&
+      text().includes('会话'),
+    JSON.stringify({ level: graphRoot()?.getAttribute('data-graph-level'), text: text() })
+  );
+
+  // R1: the four edge kinds have four line styles — `handoff` solid, `origin`
+  // dashed, `spawn` / `subagent` dotted. Only a `stroke-dasharray` assertion
+  // catches a regression here (class names alone would not).
+  const dashOf = (kind, from, to) => graphEdgeOf(kind, from, to)?.getAttribute('stroke-dasharray');
+  expect(
+    'PN10 edge line styles follow R1: handoff solid / origin dashed / spawn & subagent dotted',
+    dashOf('handoff', 'ses_g_alpha01', 'ses_g_beta01') === '' &&
+      dashOf('origin', 'ses_g_head01', 'ses_g_alpha01') === '4 3' &&
+      dashOf('spawn', 'ses_g_alpha01', 'ses_g_child01') === '1 3' &&
+      dashOf('subagent', 'ses_g_alpha01', 'ses_g_child01') === '1 3',
+    JSON.stringify({
+      handoff: dashOf('handoff', 'ses_g_alpha01', 'ses_g_beta01'),
+      origin: dashOf('origin', 'ses_g_head01', 'ses_g_alpha01'),
+      spawn: dashOf('spawn', 'ses_g_alpha01', 'ses_g_child01'),
+      subagent: dashOf('subagent', 'ses_g_alpha01', 'ses_g_child01')
+    })
+  );
+
+  // R2: hovering a node brightens the edges that touch it (and only those).
+  const childNode = graphNode('ses_g_child01');
+  fireMouseOver(childNode);
+  const spawnEdge = () => graphEdge('ses_g_alpha01', 'ses_g_child01');
+  const crossEdge = () => graphEdge('ses_g_alpha01', 'ses_g_beta01');
+  expect(
+    'PN10 hovering a node highlights its edges (adjacent only)',
+    String(spawnEdge()?.className).includes('collab-graph-edge-active') &&
+      !String(crossEdge()?.className).includes('collab-graph-edge-active'),
+    JSON.stringify({ spawn: spawnEdge()?.className, cross: crossEdge()?.className })
+  );
+
+  // R2: a node click selects that session — the detail (and its items) follow.
+  fireClick(childNode);
+  expect(
+    'PN10 clicking a graph node selects that session (detail now names the child)',
+    text().includes('ses_g_child01') &&
+      graphRoot()?.getAttribute('data-graph-level') === 'session' &&
+      Boolean(findIn(el, node => String(node.className).includes('collab-session-selected') && node.textContent.includes('graph child'))),
+    JSON.stringify({ text: text() })
+  );
+
+  // Back to alpha, then fold one hop with the node's ▸/▾ badge.
+  fireClick(
+    findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('graph alpha'))
+  );
+  const toggle = findIn(el, node => node.attrs?.['data-graph-toggle'] === 'ses_g_alpha01');
+  expect('PN10 a node with neighbours carries a ▸/▾ fold badge', Boolean(toggle), toggle?.className);
+  fireClick(toggle);
+  expect(
+    'PN10 folding the centre hides its one-hop neighbours (only the centre remains)',
+    Boolean(graphNode('ses_g_alpha01')) && !graphNode('ses_g_child01') && !graphNode('ses_g_beta01'),
+    JSON.stringify(text())
+  );
+  fireClick(findIn(el, node => node.attrs?.['data-graph-toggle'] === 'ses_g_alpha01'));
+  expect(
+    'PN10 unfolding restores them (the fold set is window-local, not snapshot data)',
+    Boolean(graphNode('ses_g_child01')) && Boolean(graphNode('ses_g_beta01')),
+    JSON.stringify(text())
+  );
+
+  // The 2 s poll replaces `data`; the graph (and the selection) must survive it.
+  const loadsBefore = graphLoads;
+  await sleep(2100);
+  expect(
+    'PN10 a poll really replaced the snapshot during the wait',
+    graphLoads > loadsBefore,
+    `${loadsBefore} → ${graphLoads} loads`
+  );
+  expect(
+    'PN10 … and the L2 graph is still the selected session’s (selection is local memory)',
+    graphRoot()?.getAttribute('data-graph-level') === 'session' && Boolean(graphNode('ses_g_child01')),
+    JSON.stringify(text())
+  );
+  dispose();
+}
+
+/* ------------------- 11. 0.8.0 (board2-graph): the +N marker past the cap ---- */
+
+{
+  const CROWD = {
+    at: 1,
+    reachable: true,
+    sessions: [
+      { sid: 'ses_crowd_center', title: 'crowd centre', agent: 'build', busy: true, workspace: GRAPH_A },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        sid: `ses_crowd_${String(index).padStart(2, '0')}`,
+        title: `crowd ${index}`,
+        agent: 'build',
+        busy: false,
+        workspace: GRAPH_A
+      }))
+    ],
+    locks: [],
+    handoffs: Array.from({ length: 12 }, (_, index) => ({
+      bid: `b_crowd_${String(index).padStart(2, '0')}`,
+      state: 'claimed',
+      ageMs: 1_000,
+      from: 'ses_crowd_center',
+      claimBy: `ses_crowd_${String(index).padStart(2, '0')}`,
+      workspace: GRAPH_A,
+      title: 'crowd'
+    })),
+    queue: []
+  };
+  const CROWD_SESSION = serverSession('ses_crowd_center', 'srv-crowd', fakeClient({ reply: CROWD }));
+  const h = harness(CROWD_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, CROWD_SESSION);
+  fireClick(
+    findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('crowd centre'))
+  );
+  const nodes = [];
+  const walk = node => {
+    if (!node) return;
+    if (node.nodeType === 1) {
+      if (node.attrs?.['data-graph-node'] !== undefined) nodes.push(node.attrs['data-graph-node']);
+      for (const child of node.childNodes ?? []) walk(child);
+    }
+  };
+  walk(el);
+  const more = findIn(el, node => String(node.className).includes('collab-graph-more'));
+  expect(
+    'PN11 the graph caps at 8 nodes and prints +N for the rest (never a silent drop)',
+    nodes.length === 8 && more?.textContent === '+5',
+    JSON.stringify({ nodes: nodes.length, more: more?.textContent })
+  );
+  dispose();
+}
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} panel checks passed`);
 if (failed.length) {

@@ -42,7 +42,7 @@
   "scripts": {
     "build": "vp pack && vp build -c vite.gui.config.ts && vp build -c vite.tui.config.ts",
     "prepublishOnly": "pnpm run build",
-    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/board-shape.mjs && node test/snapshot-shape.mjs && node --conditions=browser test/tui-render.mjs && node --conditions=browser test/gui-entry.mjs && node --conditions=browser test/gui-panel.mjs",
+    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/board-shape.mjs && node test/graph-shape.mjs && node test/snapshot-shape.mjs && node --conditions=browser test/tui-render.mjs && node --conditions=browser test/gui-entry.mjs && node --conditions=browser test/gui-panel.mjs",
     "typecheck": "tsc --noEmit",
     "check:skill": "node scripts/check-skill.mjs"
   },

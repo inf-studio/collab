@@ -5,8 +5,9 @@
 
 ## [Unreleased]
 
-> 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节先收 `board2-layout`
-> （主从布局，只读）与 P2 的 `sender-name`（注入头带发出方名称）；版本号由父任务在子任务齐了之后统一发。
+> 0.8.0 的看板重构拆成三个子任务（结构 → 关系图 → 动作）。本节已收 `board2-layout`
+> （主从布局，只读）、`board2-graph`（三级关系图，只读）与 P2 的 `sender-name`
+> （注入头带发出方名称）；版本号由父任务在子任务齐了之后统一发。
 
 ### Added
 
@@ -38,9 +39,37 @@
   **3–5 行**详情（`详情 <sid> · <agent> · <标题>` + `N 持有 · N 排队 · N 交接 · N 队列 · N 拉起` +
   最多 3 条锁/交接/队列/`↳`，超出以 `… +N` 结尾）；`escape` 清除选中。挂载时未选中，
   所以 0.6.0 的树断言逐字不变（`enter`/`space` 与鼠标点击仍只展开/收起，**不**打开详情块）。
+- **三级关系图（0.8.0，`board2-graph`）**：新增纯派生 `src/core/graph.ts`
+  `buildGraph(snapshot, freezes, { level, workspace?, session?, now? }) → { nodes, edges, truncated }`，
+  GUI 与 TUI **同一份**（禁止各自算；与 `core/board.ts` 一样无 `node:` 导入、无时钟、无 I/O）。
+  - 三级：**L0** 未选中 = 工作区为节点、跨工作区交接为边（同一对工作区合并为一条 `count`，同区不画自环）；
+    **L1** 选中工作区 = 该区会话 + 每条出区边对应的一个**对端工作区节点**（不展开对方会话；快照没有对端
+    目录的边直接丢弃，不猜）；**L2** 选中会话 = 中心 ±1 跳，上限 **8** 节点，超出进 `truncated`（GUI `+N`）。
+  - 边：`handoff` = `from → claimBy`；`origin` = `origin.sid → from`（0.7.0 对接人；0.8.0 起由
+    `SnapshotHandoff.origin` 透传 `record.origin.sid`，与 `from` 相同则不写、缺失不画）；`spawn` =
+    `from → spawned ?? claimBy`（一条 spawn 记录只画 spawn，不再追加 handoff 副本）；`subagent` = `parent → sid`。
+  - 确定性（R4）：节点按 `id`、边按 `from + kind + to` **码位**排序（不用 `localeCompare`）。因此同一快照
+    两次渲染字节一致，且**输入数组倒序也一致**（测试两条都断言）。
+  - GUI（`src/gui.tsx` 的 `GraphSlot`）：内联 SVG、固定坐标空间 320×180、环形布局（无图库 / 无力导向）；
+    点会话节点 = 选中（联动左列表与 items），点工作区节点或左侧工作区标题 = L1；节点角标 `▸/▾` 折叠
+    **一跳邻居**；悬停高亮相邻边；`+N` 显示截断。折叠集合与悬停是**组件本地信号**，2 s 轮询不重置；
+    `GraphSlot` 仍是带 `data-collab-slot="graph"` 的真实元素（主从布局的槽位契约不变）。
+  - TUI（`src/tui.tsx`）：`collab.status` 面板树下方追加文本树，缩进 2 空格、深度上限 3；
+    `─交接─▶` / `┄origin┄▶` / `┈agent┈▶` / `↳`；每行 `clip` 到面板宽度，窄终端 `…`（30 列实测不崩）。
+    级别跟随 `j`/`k` 选中的会话（L2），未选中是 L0；不新增 RPC。
+  - 只读（R5）：图只过滤已有快照；点击只写两个本地选中信号。没有释放 / 归档 / 解冻 / 投递。
+  - 测试：新增 `test/graph-shape.mjs`（36：L0/L1/L2 节点·边·方向·类型、**经 `buildSnapshot`/`toHandoff`
+    的真实 origin 边**、`+N`、两次构建与**输入倒序**一致、目录 hash 前后不变、老快照/未知会话不崩）；
+    `test/snapshot-shape.mjs` 50 → 52（`origin` 透传两例：有 / 等于 `from` 不写）；
+    `test/gui-panel.mjs` 34 → 47（三级别、点节点联动、折叠/展开、悬停高亮、`+N`、轮询后选中与图不变、
+    四类边线型 `stroke-dasharray`）；`test/tui-render.mjs` 56 → 60（L0 `─交接─▶`、选中后 L2 `↳`、
+    30 列 `…`）。变异四组实测失败：边方向画反、去掉排序、去掉 origin 透传、把 spawn 改回实线
+    （详见任务 `research/impl-notes.md`）。
 - **测试**：`test/gui-panel.mjs` 17 → 34（分栏结构、槽位元素、点选联动、详情内容与顺序、轮询计数证明、
   消失清空 + toast、窄屏单栏 + 返回列表）；`test/tui-render.mjs` 49 → 56（挂载无选中、`j` 后 3–5 行、
-  计数与明细行、`k` 跟随、`esc` 清除）。工具数与快照契约不变，仍无写路径。
+  计数与明细行、`k` 跟随、`esc` 清除）；`board2-graph` 再加 `test/graph-shape.mjs` 36、
+  snapshot-shape 52 与 gui-panel 47 / tui-render 60（见上）。工具数仍 22，无写路径（快照只多一个
+  可选 `handoffs[].origin` 字符串）。
 
 ## [0.7.0] - 2026-11-19
 

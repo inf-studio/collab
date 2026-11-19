@@ -116,6 +116,10 @@ const broadcasts = [
     title: 'alpha proposal',
     from: { sid: 'ses_a2', directory: wsA },
     claim: { by: 'ses_a1', kind: 'local' },
+    // 0.8.0 (`board2-graph`): a forwarded record — the chain head is `ses_head`,
+    // not the hop that sent it. The snapshot must carry it (the graph's dashed
+    // `origin` edge is built from the snapshot, never from the record file).
+    origin: { sid: 'ses_head', directory: wsB },
     createdAt: now - 120_000
   },
   {
@@ -124,6 +128,8 @@ const broadcasts = [
     workspace: wsB,
     title: 'beta proposal',
     from: { sid: 'ses_b1', directory: wsB },
+    // A single hop: `origin === from` is not a chain and must not be written.
+    origin: { sid: 'ses_b1', directory: wsB },
     createdAt: now - 600_000
   },
   {
@@ -372,6 +378,21 @@ expect(
     snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.spawned === 'ses_a1' &&
     !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000a1')?.kind,
   JSON.stringify(snapshot.handoffs.map(handoff => [handoff.bid, handoff.kind, handoff.spawned]))
+);
+
+// 0.8.0 (`board2-graph`): `origin` is the chain head of a forwarded hand-off.
+// It is a **snapshot** field (the graph never reads the broadcast record), so
+// the passthrough is asserted here on the built payload.
+expect(
+  'C2 a forwarded hand-off carries origin:<record.origin.sid> (graph `origin` edge)',
+  snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000a1')?.origin === 'ses_head' &&
+    !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000d4')?.origin,
+  JSON.stringify(snapshot.handoffs.map(handoff => [handoff.bid, handoff.origin]))
+);
+expect(
+  'C2 an origin equal to `from` is omitted (a single hop is not a chain)',
+  !snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2')?.origin,
+  JSON.stringify(snapshot.handoffs.find(handoff => handoff.bid === 'b_00000000b2'))
 );
 
 /* ------------------------------------------------- 4b. freeze markers (0.6.0) */

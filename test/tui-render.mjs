@@ -626,6 +626,24 @@ const detailMounted = await mount(detailHarness.context, () =>
   detailHarness.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_a1' }))
 );
 const linesOf = frame => frame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+/**
+ * The selected row's detail block, **scoped** to the lines between `详情 …` and
+ * the next section. 0.8.0's `board2-graph` appends a `关系图 · …` section below
+ * it; counting the whole frame delta would fold graph lines into "3–5 detail
+ * lines" and make that contract depend on how many nodes the fixture happens to
+ * have.
+ */
+const detailOnly = frame => {
+  const rows = linesOf(frame);
+  const start = rows.findIndex(line => line.includes('详情 '));
+  if (start < 0) return [];
+  const out = [rows[start]];
+  for (const line of rows.slice(start + 1)) {
+    if (/^(关系图|资源租约|未闭环交接|受保护目标队列|只读)/.test(line.trim())) break;
+    out.push(line);
+  }
+  return out;
+};
 // `›` also ends the badges (`‹2›`), so the marker is "a line that *starts* with
 // `› `" — that is the only place `panelLines` puts it.
 const hasSelectionMarker = frame => linesOf(frame).some(line => line.startsWith('› '));
@@ -645,9 +663,12 @@ expect(
   'R4 j selects one row and appends 3–5 detail lines under the tree',
   hasSelectionMarker(selectedFrame) &&
     selectedFrame.includes('详情 ses_child') &&
-    selectedLines.length - mountLines.length >= 3 &&
-    selectedLines.length - mountLines.length <= 5,
-  `${mountLines.length} → ${selectedLines.length} lines: ${selectedLines.filter(line => line.includes('详情')).join(' | ')}`
+    detailOnly(selectedFrame).length >= 3 &&
+    detailOnly(selectedFrame).length <= 5 &&
+    detailOnly(detailMounted.frame).length === 0,
+  `${detailOnly(detailMounted.frame).length} → ${detailOnly(selectedFrame).length} detail lines: ${selectedLines
+    .filter(line => line.includes('详情'))
+    .join(' | ')}`
 );
 expect(
   'R4 the detail is header + counters + item rows (锁 / 交接 / 队列 / 拉起), from the same derivation',
@@ -704,6 +725,108 @@ expect(
 );
 await detailMounted.setup.dispose();
 await detailCleanup();
+
+/* --------------------- 5d. 0.8.0 (board2-graph): the text tree + levels ----- */
+
+// Two workspaces: a cross hand-off (alpha → beta) and a spawn inside alpha. At
+// mount nothing is selected → L0 (workspaces + `─交接─▶`); `j` selects the alpha
+// session → L2 (the centre ±1 hop, with `↳` for the spawn). Width 30 proves the
+// clip (`…`) path instead of an overflow.
+const GRAPH_TREE = {
+  at: SNAPSHOT.at,
+  reachable: true,
+  sessions: [
+    { sid: 'ses_g_a1', title: 'alpha worker', agent: 'build', busy: true, workspace: '/data/project/alpha' },
+    {
+      sid: 'ses_g_child',
+      title: 'child worker',
+      agent: 'build',
+      busy: false,
+      workspace: '/data/project/alpha',
+      parent: 'ses_g_a1'
+    },
+    { sid: 'ses_g_b1', title: 'beta worker', agent: 'build', busy: false, workspace: '/data/project/beta' }
+  ],
+  locks: [],
+  handoffs: [
+    {
+      bid: 'b_g_cross',
+      state: 'claimed',
+      ageMs: 1_000,
+      from: 'ses_g_a1',
+      claimBy: 'ses_g_b1',
+      workspace: '/data/project/beta',
+      title: 'cross-workspace work'
+    },
+    {
+      bid: 'b_g_spawn',
+      state: 'claimed',
+      ageMs: 2_000,
+      from: 'ses_g_a1',
+      claimBy: 'ses_g_child',
+      spawned: 'ses_g_child',
+      kind: 'spawn',
+      workspace: '/data/project/alpha',
+      title: 'spawn the child'
+    }
+  ],
+  queue: []
+};
+
+const graphTree = harness({ snapshot: GRAPH_TREE });
+const graphTreeCleanup = await plugin.setup(graphTree.context);
+const graphTreeMounted = await mount(graphTree.context, () =>
+  graphTree.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_g_a1' }))
+);
+const graphMountFrame = graphTreeMounted.frame;
+expect(
+  'R3 the L0 graph is a workspace text tree with a ─交接─▶ edge',
+  graphMountFrame.includes('关系图 · 全局') &&
+    graphMountFrame.includes('alpha') &&
+    graphMountFrame.includes('beta') &&
+    graphMountFrame.includes('─交接─▶'),
+  linesOf(graphMountFrame).filter(line => line.includes('关系图') || line.includes('─交接')).join(' | ')
+);
+expect(
+  'R3 the L0 graph is read-only and adds no second RPC (same snapshot)',
+  graphTree.calls.length === 1,
+  `${graphTree.calls.length} calls`
+);
+
+// `j` moves the cursor to the **next** row (the child), `k` back to alpha —
+// the host's own cursor semantics, not a selection call.
+hostPress(graphTree, 'j');
+hostPress(graphTree, 'k');
+await graphTreeMounted.setup.renderOnce();
+const graphSelectedFrame = await graphTreeMounted.setup.captureCharFrame();
+expect(
+  'R3 selecting a session switches the graph to L2 (session heading + ↳ spawn)',
+  graphSelectedFrame.includes('关系图 · 会话 ses_g_a1') &&
+    graphSelectedFrame.includes('─交接─▶') &&
+    graphSelectedFrame.includes('↳') &&
+    graphSelectedFrame.includes('ses_g_child'),
+  linesOf(graphSelectedFrame).filter(line => line.includes('关系图') || line.includes('▶') || line.includes('↳')).join(' | ')
+);
+await graphTreeMounted.setup.dispose();
+await graphTreeCleanup();
+
+const narrowGraph = harness({ snapshot: GRAPH_TREE });
+const narrowGraphCleanup = await plugin.setup(narrowGraph.context);
+const narrowGraphMounted = await mount(
+  narrowGraph.context,
+  () => narrowGraph.slots['session.panel'](panelInput({ width: 30, sessionID: 'ses_g_a1' })),
+  { width: 30, height: 30 }
+);
+hostPress(narrowGraph, 'j');
+await narrowGraphMounted.setup.renderOnce();
+const narrowGraphFrame = await narrowGraphMounted.setup.captureCharFrame();
+expect(
+  'R3 a 30-column panel clips the graph lines with … instead of crashing',
+  narrowGraphFrame.includes('关系图') && narrowGraphFrame.includes('…'),
+  linesOf(narrowGraphFrame).filter(line => line.includes('关系图') || line.includes('…')).join(' | ')
+);
+await narrowGraphMounted.setup.dispose();
+await narrowGraphCleanup();
 
 /* ------------------------------------------------------------------- 6. sidebar */
 

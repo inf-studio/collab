@@ -121,6 +121,13 @@ export interface SnapshotHandoff {
    * Optional, display only.
    */
   spawned?: string;
+  /**
+   * 0.8.0 (`board2-graph`): the chain head of a **forwarded** hand-off
+   * (`record.origin.sid`, 0.7.0). Absent on a single hop — `toHandoff` omits it
+   * when it equals `from` — and on every record written before 0.7.0. Display
+   * only: the graph draws it as the dashed `origin` edge.
+   */
+  origin?: string;
 }
 
 /**
@@ -236,7 +243,9 @@ export const CollabState = {
                 freeze: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason']),
                 // 0.6.0 (board): optional spawn relation — an older server omits both.
                 kind: str,
-                spawned: str
+                spawned: str,
+                // 0.8.0 (`board2-graph`): optional chain head of a forwarded record.
+                origin: str
               },
               ['bid', 'state', 'ageMs', 'from', 'title']
             )
