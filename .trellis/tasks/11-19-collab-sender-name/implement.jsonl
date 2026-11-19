@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "注入头与展示约定"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "宿主读取失败降级"}

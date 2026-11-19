@@ -7,6 +7,7 @@ import type {
   BroadcastDecision,
   BroadcastOrigin,
   BroadcastRecord,
+  CollabContext,
   DecisionSpec,
   JsonObject,
   SessionMessageLike
@@ -243,6 +244,68 @@ export function verdictFromTexts(texts: string[] | undefined, { bid }: { bid?: s
   const claim = last.replace(ANALYSIS_DONE_RE, '');
   if (DONE_VERDICT_RE.test(claim)) return { state: 'done', summary: verdictNote(last) };
   return undefined;
+}
+
+// ------------------------------------------- inbound header: sender name (0.8.0)
+
+/**
+ * 0.8.0 (`11-19-collab-sender-name`): the inbound header used to carry only a
+ * truncated id — `[collab:ses_e176…2HXy][reply:t_…]` — so a reader had to
+ * reverse-lookup who sent it. The sender's **session title** now goes in front:
+ *
+ *     [<标题>][collab:ses_…][<kind>:<threadID>] <body>
+ *
+ * The machine-read head keeps its position and shape (see `COLLAB_ENVELOPE_RE`);
+ * a title-less sender falls back to the pre-0.8.0 header byte for byte.
+ */
+export const SENDER_NAME_TTL_MS = 10 * 60_000;
+/** PRD R1: 20 字，超出以 `…` 收尾（与 `truncate` 的口径一致）。 */
+export const SENDER_NAME_CHARS = 20;
+
+/**
+ * Display-safe sender name: one line, capped to {@link SENDER_NAME_CHARS}.
+ * `]` is replaced by `）` — it would close the `[…]` segment early and shift the
+ * machine-read head (`[collab:…]`) out of group 2.
+ */
+export function senderNameOf(title: unknown): string {
+  const text = String(title ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\]/g, '）');
+  return text ? truncate(text, SENDER_NAME_CHARS) : '';
+}
+
+/** `sid → title`, one entry per sender; a reload (new module instance) resets it. */
+const senderNameCache = new Map<string, { name: string; at: number }>();
+
+/**
+ * The sender's session title, cached per sid for {@link SENDER_NAME_TTL_MS} — the
+ * injection runs on every request of every receiving session, so the host must
+ * not be asked each round (rename lags by at most the window, PRD R2).
+ *
+ * Only a **successful** read is cached: an unreachable host / deleted session
+ * returns `''` (the old header) and is retried on the next injection instead of
+ * pinning the sender anonymous for ten minutes.
+ */
+export async function senderName(
+  ctx: Pick<CollabContext, 'session'> | undefined,
+  sessionID: string | undefined,
+  now = Date.now()
+): Promise<string> {
+  const sid = String(sessionID ?? '').trim();
+  if (!sid) return '';
+  const hit = senderNameCache.get(sid);
+  if (hit && now - hit.at < SENDER_NAME_TTL_MS) return hit.name;
+  const get = ctx?.session?.get;
+  if (typeof get !== 'function') return '';
+  try {
+    const info = (await get.call(ctx?.session, { sessionID: sid })) as { title?: unknown } | undefined;
+    const name = senderNameOf(info?.title);
+    senderNameCache.set(sid, { name, at: now });
+    return name;
+  } catch {
+    return '';
+  }
 }
 
 /**

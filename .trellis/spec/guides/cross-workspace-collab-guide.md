@@ -421,3 +421,13 @@ opencode api get "/api/plugin?location%5Bdirectory%5D=/data/project/muke-interfa
 - 只写展示字段：不投递、不改 `state/claim/receipt/replies`；预览不写。
 - 展示：`collab_status` 最近 3 条；承接方注入只加一行计数；`collab_list` 行尾 `decisions=N`。
 - 已知低风险：id 若含天文面字符（emoji），「按码点校验 / 按 UTF-16 截断」不一致会让覆盖失效（既有 `truncate` 约定，非本功能引入）。
+
+## 入站注入头（0.8.0）
+
+`[<发出方会话标题>][collab:ses_…][<kind>:<threadID>] <正文>`
+
+- 名称在前；`[collab:ses_…]` 与 `[kind:thread]` 是**机读字段**，位置与内容不得变（`parseEnvelope().from` 仍取 sid）；
+- 标题 `truncate(20)`、`]` 替换为 `）`（裸 `]` 会让信封正则提前闭合）、空白折叠；
+- 取不到标题（宿主抛错/无标题/空串）→ **与无名称格式逐字一致**；失败**不缓存**，下轮重试；
+- 标题按 sid 缓存 10 分钟（同会话两轮只查一次宿主）；
+- 例外：`[ack]` 机器噪声与 `collab-report` 伪发送方不带名称。

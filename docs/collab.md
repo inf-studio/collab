@@ -466,10 +466,23 @@ collab/threads/<threadID> = {
 
 | 步骤 | 调用 | 结果 |
 | --- | --- | --- |
-| ① 请求 | `collab_send { target: see_b, text, kind: "request", confirm: true }` | 自动生成 `threadID`（`t_<base36ts>_<rand4>`），thread `open`，正文 `[collab:<from>][request:<threadID>] …` |
+| ① 请求 | `collab_send { target: see_b, text, kind: "request", confirm: true }` | 自动生成 `threadID`（`t_<base36ts>_<rand4>`），thread `open`，正文 `[<标题>][collab:<from>][request:<threadID>] …`（`<标题>` 见下） |
 | ② 处理 | see_b 收到 user turn；需要全文/状态时 `collab_inbox` | 它自己决定怎么处理，插件不代替执行 |
 | ③ 回执 | see_b：`collab_reply { threadID, text, confirm: true }` | thread → `answered`，投递给 thread 里的对端 |
 | ④ 等回执 | see_a：`collab_wait { threadID, timeoutMs }` | 只看**最后一次 request 之后**的 `kind:"reply"`（复用 thread 时不会返回上一轮旧回执）；超时抛错 |
+
+**入站注入头（0.8.0）**：每条投递在被投递会话里呈现为
+
+```
+[<发出方会话标题>][collab:<from>][<kind>:<threadID>] <正文>
+```
+
+- 标题来自 `ctx.session.get(发出方).title`：截断 20 字（超出以 `…` 收尾），`]` 替换为 `）`（否则会提前闭合名称段）；
+- 按 sid 缓存 **10 分钟**：同一会话连续投递只查一次宿主，「改名」最多滞后 10 分钟；
+- 取不到（宿主不可读 / 没有标题 / 空串）→ 只去掉名称段，与旧格式
+  `[collab:<from>][<kind>:<threadID>]` **逐字一致**，失败不缓存（下一次会重试）；
+- 只多这一段可读前缀：`[collab:…]` 与 `[kind:…]` 的位置/内容不变，现有解析（`COLLAB_ENVELOPE_RE`、
+  `extractInbound`、去重、注入预算、protected 规则）一律不受影响。
 
 **参与者与路由校验**（threadID 不是 bearer 凭据）：
 

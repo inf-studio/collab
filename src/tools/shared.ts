@@ -18,7 +18,7 @@ import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
 import { recordThread } from '../core/thread-index.ts';
 import { fmtTtl, touchWaiters } from '../core/locks.ts';
-import { takeoverBody } from '../core/verdict.ts';
+import { senderName, takeoverBody } from '../core/verdict.ts';
 import { envelope, newCorrelationID, normalizeKind } from '../ids.ts';
 import type { WakeSignal } from '../ids.ts';
 import { errText, log } from '../log.ts';
@@ -534,8 +534,12 @@ export function createToolKit(deps: ToolDeps): ToolKit {
 
     const { sessionID, alias, info } = target;
     const from = senderLabel(context?.sessionID);
+    // 0.8.0 (`sender-name`): the reading side gets the sender's title in front of
+    // the machine-read head. Cached (10 min) and silent on failure — see
+    // `senderName`.
+    const name = await senderName(ctx, context?.sessionID);
     const cid = newCorrelationID();
-    const text = envelope({ from, kind, threadID, body });
+    const text = envelope({ from, name, kind, threadID, body });
     const targetLine =
       `${sessionID}${alias ? ` (alias=${alias})` : ''}  agent=${info?.agent ?? '?'}  ` +
       `state=${sessionState(info)}  title="${truncate(info?.title ?? '(untitled)', 60)}"`;
@@ -875,6 +879,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     await touchWaiters(current.from?.sid);
     const requester = String(record?.from?.sid ?? '');
     const from = senderLabel(requester) || 'handoff';
+    // 0.8.0 (`sender-name`): the takeover request names its sender too.
+    const name = await senderName(ctx, requester);
     const previous = current.delivery ?? {};
     // Same message, same cid — a wake / spawn / resend is not a new message.
     const cid = previous.to === target && previous.cid ? String(previous.cid) : newCorrelationID();
@@ -892,6 +898,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         sessionID: target,
         text: envelope({
           from,
+          name,
           kind: 'request',
           threadID,
           body: takeoverBody({ record: current, wake, spawn })

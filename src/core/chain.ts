@@ -59,6 +59,7 @@ import {
   protocolHeader,
   receiptAllowed,
   receiptMatches,
+  senderName,
   takeoverBody,
   verdictFromTexts
 } from './verdict.ts';
@@ -619,10 +620,13 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     const guard = await createLineage(ctx).protectedAncestor(target, config.protect);
     if (guard) return { delivered: false, reason: `发起方 ${target} 在 protect 名单内，未回执` };
     const cid = newCorrelationID();
+    // 0.8.0 (`sender-name`): the note lands in the requester's inbound header, so
+    // the sender (the claimant, `claim.by`) is named there as well.
+    const name = await senderName(ctx, String(record.claim?.by ?? ''));
     try {
       const admitted = await ctx.session.prompt({
         sessionID: target,
-        text: envelope({ from: from ?? 'handoff', kind, threadID, body: text }),
+        text: envelope({ from: from ?? 'handoff', name, kind, threadID, body: text }),
         delivery: 'queue',
         metadata: {
           collab: {
@@ -783,11 +787,14 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     const cid = String(delivery.cid);
     const resends = (Number(delivery.resends) || 0) + 1;
     const from = shortID(String(record.from?.sid ?? 'handoff'));
+    // 0.8.0 (`sender-name`): the resend keeps the header readable too.
+    const name = await senderName(ctx, String(record.from?.sid ?? ''));
     try {
       const admitted = await ctx.session.prompt({
         sessionID: target,
         text: envelope({
           from,
+          name,
           kind: 'request',
           threadID: record.threadID,
           body: takeoverBody({ record, spawn: record.claim?.kind === 'spawn' })

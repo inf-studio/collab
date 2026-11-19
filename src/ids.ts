@@ -45,20 +45,31 @@ export function normalizeText(text: unknown): string {
 
 export function envelope({
   from,
+  name,
   kind,
   threadID,
   body
 }: {
   from: string;
+  /**
+   * 0.8.0 (`sender-name`): the sender's session title, rendered **in front** of
+   * the machine-read head (`[<title>][collab:<from>][<kind>:<threadID>]`), so a
+   * human reading the injected turn does not have to reverse-lookup a truncated
+   * id. Empty / missing → the header is byte for byte the pre-0.8.0 one.
+   */
+  name?: string;
   kind: string;
   threadID?: string;
   body: string;
 }): string {
   const tag = threadID ? `[${kind}:${threadID}]` : `[${kind}]`;
-  return `[collab:${from}]${tag} ${body}`;
+  const label = String(name ?? '').trim();
+  return `${label ? `[${label}]` : ''}[collab:${from}]${tag} ${body}`;
 }
 
 export interface ParsedEnvelope {
+  /** 0.8.0 (`sender-name`): the optional sender-title segment in front. */
+  name?: string;
   from?: string;
   kind?: string;
   threadID?: string;
@@ -69,11 +80,12 @@ export function parseEnvelope(text: unknown): ParsedEnvelope | undefined {
   const value = String(text ?? '');
   const match = COLLAB_ENVELOPE_RE.exec(value);
   if (!match) return undefined;
-  const kind = match[2] && KINDS.includes(match[2]) ? match[2] : undefined;
+  const kind = match[3] && KINDS.includes(match[3]) ? match[3] : undefined;
   return {
-    from: match[1] || undefined,
+    name: match[1] || undefined,
+    from: match[2] || undefined,
     kind,
-    threadID: match[3] || undefined,
+    threadID: match[4] || undefined,
     body: value.slice(match[0].length)
   };
 }

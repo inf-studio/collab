@@ -405,6 +405,8 @@ const internals = (await import(`file://${distEntry}`)).__internals;
 // ------------------------------------------------------------------ fake host
 const store = new Map();
 const prompts = [];
+/** 0.8.0 (`sender-name`): who `ctx.session.get` was asked about (title cache test). */
+const sessionGets = [];
 const tools = [];
 const hooks = {};
 const contexts = new Map();
@@ -636,6 +638,7 @@ const ctx = {
       return { dispose: async () => {} };
     },
     async get({ sessionID }) {
+      sessionGets.push(sessionID);
       if (!sessions[sessionID]) throw new Error(`Session not found: ${sessionID}`);
       return structuredClone(sessions[sessionID]);
     },
@@ -10916,7 +10919,7 @@ expect(
   JSON.stringify(s105aRecord.blocked?.[0] ?? null).slice(0, 160)
 );
 
-// --- S105b: 不传 blocked → 输出与旧版逐字一致（消息正文 = 信封 + 正文，零追加）。
+// --- S105b: 不传 blocked → 信封（0.8.0 起带发出方标题）+ 正文，零追加。
 const S105_PLAIN_THREAD = 't_s105plain';
 const s105b = await call(
   'collab_send',
@@ -10924,8 +10927,8 @@ const s105b = await call(
   as105(S105_ME)
 );
 expect(
-  'S105 不传 blocked：投递正文与旧版逐字一致（信封 + 正文，零追加行）',
-  lastPrompt() === `[collab:${shortOf(S105_ME)}][note:${S105_PLAIN_THREAD}] S105 无 blocked 的正文` &&
+  'S105 不传 blocked：投递正文 = 信封（标题 + 机器头）+ 正文，零追加行',
+  lastPrompt() === `[S105 发起方][collab:${shortOf(S105_ME)}][note:${S105_PLAIN_THREAD}] S105 无 blocked 的正文` &&
     s105b.startsWith('已投递'),
   lastPrompt()
 );
@@ -11657,6 +11660,268 @@ delete sessions[S106_ME];
 delete sessions[S106_TO];
 delete sessions[S106_THIRD];
 delete sessions[S106_L_CAND];
+
+// ================== S107 (0.8.0: `sender-name` — the inbound header names the sender)
+//   S107  入站注入头 = `[<发出方标题>][collab:ses_…][<kind>:<threadID>]`：
+//   四类 kind（request / reply / note / steer）+ 接管请求 + ACCEPT note；
+//   20 字截断、`]`→`）`、取不到标题逐字退化旧格式、同 sid 两轮只查一次宿主、
+//   带标题的信封仍被 `parseEnvelope` 正常解析（from / threadID / 正文不变）。
+const S107_ME = 'ses_s107me';
+const S107_TO = 'ses_s107to';
+const S107_LONG = 'ses_s107long';
+const S107_BRACKET = 'ses_s107brk';
+const S107_EMPTY = 'ses_s107empty';
+const S107_CACHE = 'ses_s107cache';
+const S107_GHOST = 'ses_s107ghost';
+const S107_TITLE = 'S107 发起方会话';
+const S107_TO_TITLE = 'S107 对端';
+const S107_LONG_TITLE = '一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅';
+// `truncate(title, 20)` = 前 19 字 + `…`（口径见 `src/util.ts`）。
+const S107_LONG_SHOWN = '一二三四五六七八九十甲乙丙丁戊己庚辛壬…';
+sessions[S107_ME] = {
+  id: S107_ME,
+  agent: 'build',
+  title: S107_TITLE,
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S107_TO] = {
+  id: S107_TO,
+  agent: 'build',
+  title: S107_TO_TITLE,
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S107_LONG] = {
+  id: S107_LONG,
+  agent: 'build',
+  title: S107_LONG_TITLE,
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S107_BRACKET] = {
+  id: S107_BRACKET,
+  agent: 'build',
+  title: 'S107 [WIP] 标题',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S107_EMPTY] = {
+  id: S107_EMPTY,
+  agent: 'build',
+  title: '',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+sessions[S107_CACHE] = {
+  id: S107_CACHE,
+  agent: 'build',
+  title: 'S107 缓存',
+  time: { updated: now, busy: 0 },
+  location: { directory: HARNESS_LOCATION }
+};
+const as107 = sid => ({ sessionID: sid, agent: 'build' });
+/** The head the reader sees: `[<title>][collab:<short>]` (empty title → no segment). */
+const head107 = (title, sid) => `${title ? `[${title}]` : ''}[collab:${shortOf(sid)}]`;
+const promptOf107 = () => String(prompts.at(-1)?.text ?? '');
+
+// --- S107a: 四类 kind 同一套头（request 先建 thread，reply / note 复用）。
+const s107Req = await call(
+  'collab_send',
+  { target: S107_TO, kind: 'request', text: 'S107 request 正文', confirm: true },
+  as107(S107_ME)
+);
+const S107_THREAD = /thread=(t_[a-z0-9_]+)/.exec(s107Req)?.[1];
+const s107ReqPrompt = promptOf107();
+expect(
+  'S107 request 头：`[标题][collab:ses_…][request:t_…]` 且正文逐字在后',
+  Boolean(S107_THREAD) &&
+    s107ReqPrompt ===
+      `${head107(S107_TITLE, S107_ME)}[request:${S107_THREAD}] S107 request 正文` &&
+    prompts.at(-1)?.metadata?.collab?.from === shortOf(S107_ME) &&
+    prompts.at(-1)?.metadata?.collab?.kind === 'request',
+  s107ReqPrompt.slice(0, 90)
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'reply', threadID: S107_THREAD, text: 'S107 reply 正文', confirm: true },
+  as107(S107_ME)
+);
+expect(
+  'S107 reply 头：名称仍在 `[collab:…]` 之前，`[reply:t_…]` 位置不变',
+  promptOf107() === `${head107(S107_TITLE, S107_ME)}[reply:${S107_THREAD}] S107 reply 正文`,
+  promptOf107().slice(0, 90)
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 note 正文', confirm: true },
+  as107(S107_ME)
+);
+expect(
+  'S107 note 头：同格式（note 也带标题）',
+  promptOf107() === `${head107(S107_TITLE, S107_ME)}[note:${S107_THREAD}] S107 note 正文`,
+  promptOf107().slice(0, 90)
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'request', mode: 'steer', text: 'S107 steer 正文', confirm: true },
+  as107(S107_ME)
+);
+expect(
+  'S107 steer 投递：头同格式，delivery 仍是 steer（只多一段可读前缀）',
+  /^\[S107 发起方会话\]\[collab:ses_s107…07me\]\[request:t_[a-z0-9_]+\] S107 steer 正文$/.test(promptOf107()) &&
+    prompts.at(-1)?.delivery === 'steer',
+  `${prompts.at(-1)?.delivery} / ${promptOf107().slice(0, 80)}`
+);
+expect(
+  'S107 四类 kind 共 4 次投递：发送方 session.get 只 1 次（缓存跨 kind / mode）',
+  sessionGets.filter(id => id === S107_ME).length === 1,
+  `gets=${sessionGets.filter(id => id === S107_ME).length}`
+);
+
+// --- S107b: 接管请求 + ACCEPT note 也带标题（另两个投递点）。
+const s107Handoff = await call(
+  'collab_handoff',
+  { target: S107_TO, text: 'S107 注入头交接', confirm: true },
+  as107(S107_ME)
+);
+const s107Bid = bidOf(s107Handoff);
+expect(
+  'S107 接管请求头：`[发起方标题][collab:…][request:t_…]`，协议头正文不变',
+  Boolean(s107Bid) &&
+    /^\[S107 发起方会话\]\[collab:ses_s107…07me\]\[request:t_[a-z0-9_]+] 你是承接方（bid=/.test(promptOf107()),
+  promptOf107().slice(0, 100)
+);
+// `collab_handoff {target}` writes state `acked` (nothing to claim), so the
+// ACCEPT note path is driven by a plainly asked record (same shape `collab_broadcast`
+// writes): the claimant's accept must name itself in the requester's header.
+const S107_ASK_BID = 'b_1070000000000001';
+writeFileSync(
+  bcFile(S107_ASK_BID),
+  JSON.stringify(
+    {
+      bid: S107_ASK_BID,
+      scope: 'local',
+      workspace: HARNESS_LOCATION,
+      title: 'S107 ACCEPT 头',
+      expected: 'implement',
+      state: 'open',
+      attempts: 0,
+      skipped: [],
+      seenBy: [],
+      reminded: [],
+      replies: [],
+      candidates: [{ sid: S107_TO, score: 90, why: ['title:s107'] }],
+      asked: { sid: S107_TO, at: Date.now() },
+      from: { sid: S107_ME, directory: HARNESS_LOCATION },
+      threadID: S107_THREAD,
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now() - 60_000
+    },
+    null,
+    2
+  )
+);
+const s107Accept = await call('collab_accept', { bid: S107_ASK_BID, confirm: true }, as107(S107_TO));
+expect(
+  'S107 ACCEPT note 头：`[承接方标题][collab:…][note] ACCEPT …`',
+  s107Accept.startsWith('已领取') &&
+    promptOf107() ===
+      `${head107(S107_TO_TITLE, S107_TO)}[note] ACCEPT ${S107_ASK_BID} —— ${shortOf(S107_TO)}` +
+        ` 已领取 ${S107_ASK_BID}（local，implement）。完成后回执 [handoff] DONE|BLOCKED ${S107_ASK_BID} <摘要>。`,
+  `${s107Accept.split('\n')[0]} / ${promptOf107().slice(0, 110)}`
+);
+
+// --- S107c: 20 字截断 + `]` → `）`。
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 长标题正文', confirm: true },
+  as107(S107_LONG)
+);
+expect(
+  'S107 标题 >20 字 → 前 19 字 + `…`',
+  promptOf107().startsWith(`[${S107_LONG_SHOWN}][collab:${shortOf(S107_LONG)}][note:`),
+  promptOf107().slice(0, 60)
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 括号标题正文', confirm: true },
+  as107(S107_BRACKET)
+);
+expect(
+  'S107 标题含 `]` → 替换为 `）`，机器头 `[collab:…]` 不受影响',
+  promptOf107() === `${head107('S107 [WIP） 标题', S107_BRACKET)}[note:${S107_THREAD}] S107 括号标题正文`,
+  promptOf107().slice(0, 80)
+);
+
+// --- S107d: 取不到标题 → 与旧格式逐字一致（无标题段）。
+const s107GhostBefore = sessionGets.length;
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 宿主读不到正文', confirm: true },
+  as107(S107_GHOST)
+);
+expect(
+  'S107 宿主读不到发送方 → 头与旧格式逐字一致（`[collab:…][note:t_…]`）',
+  promptOf107() === `[collab:${shortOf(S107_GHOST)}][note:${S107_THREAD}] S107 宿主读不到正文` &&
+    sessionGets.slice(s107GhostBefore).includes(S107_GHOST),
+  promptOf107()
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 空标题正文', confirm: true },
+  as107(S107_EMPTY)
+);
+expect(
+  'S107 标题为空串 → 头与旧格式逐字一致（只去掉名称段）',
+  promptOf107() === `[collab:${shortOf(S107_EMPTY)}][note:${S107_THREAD}] S107 空标题正文`,
+  promptOf107()
+);
+
+// --- S107e: 标题缓存 —— 同一 sid 连续两轮注入只查一次宿主。
+const s107CacheBefore = sessionGets.filter(id => id === S107_CACHE).length;
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 缓存第一轮', confirm: true },
+  as107(S107_CACHE)
+);
+await call(
+  'collab_send',
+  { target: S107_TO, kind: 'note', threadID: S107_THREAD, text: 'S107 缓存第二轮', confirm: true },
+  as107(S107_CACHE)
+);
+expect(
+  'S107 同一 sid 两轮注入：宿主 session.get 只调用一次（10 分钟缓存）',
+  s107CacheBefore === 0 && sessionGets.filter(id => id === S107_CACHE).length === 1 &&
+    promptOf107() === `[S107 缓存][collab:${shortOf(S107_CACHE)}][note:${S107_THREAD}] S107 缓存第二轮`,
+  `gets=${sessionGets.filter(id => id === S107_CACHE).length}`
+);
+
+// --- S107f: 解析兼容 —— 带标题的信封仍能取出 from / threadID / 正文。
+push(
+  inbound(
+    S107_ME,
+    `[${S107_TO_TITLE}][collab:${S107_TO}][reply:t_s107parse] S107 带回执`,
+    undefined,
+    'inbox_s107_parse'
+  )
+);
+await settle();
+const s107Context = contextEvent(S107_ME);
+await hooks.context(s107Context);
+const s107Injected = JSON.stringify(s107Context.system);
+expect(
+  'S107 带标题入站仍解析出 from / threadID / 正文（标题不进入注入行）',
+  s107Injected.includes('t_s107parse from=ses_s107to: S107 带回执') && !s107Injected.includes(S107_TO_TITLE),
+  String(s107Context.system.at(-1)?.text ?? '').slice(0, 160)
+);
+
+// Cleanup: S107 records / locks / sessions.
+if (s107Bid) rmSync(bcFile(s107Bid), { force: true });
+rmSync(bcFile(S107_ASK_BID), { force: true });
+rmSync(join(broadcastDir, `${S107_ASK_BID}.lock`), { force: true });
+contexts.delete(S107_ME);
+for (const sid of [S107_ME, S107_TO, S107_LONG, S107_BRACKET, S107_EMPTY, S107_CACHE]) delete sessions[sid];
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

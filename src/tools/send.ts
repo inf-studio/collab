@@ -27,7 +27,8 @@ export function sendTool(kit: ToolKit): ToolDefinition {
       'A message is part of a hand-off thread: kind request|reply|note (default request) plus a threadID ' +
       "(auto-generated when omitted). Default mode is `queue`, which waits for the target's next turn and never " +
       'interrupts the turn it is running; `steer` must be explicit and is forced back to `queue` for read-only ' +
-      'agents (explore/plan). Body is prefixed `[collab:<from>][<kind>:<threadID>] `. Requires confirm:true — ' +
+      'agents (explore/plan). Body is prefixed `[<sender title>][collab:<from>][<kind>:<threadID>] ` ' +
+      '(the title segment is omitted when the sender is unreadable / untitled). Requires confirm:true — ' +
       'with confirm:false it only previews. Targets in the `protect` list — and any descendant of one — are ' +
       "refused; a kind=reply must target the thread's counterpart and only a participant may send it. " +
       'One exception: a bounded receipt — kind=reply naming (in `bid` or the body) a hand-off that the ' +

@@ -11,10 +11,21 @@ export const STORAGE_DELIVERED = 'collab/delivered';
 export const inboxKey = (sessionID: string): string => `collab/inbox/${sessionID}`;
 export const threadKey = (threadID: string): string => `collab/threads/${threadID}`;
 
-/** Legacy sender prefix (`[collab:<from>] `), still matched for CLI-sent text. */
-export const COLLAB_PREFIX_RE = /^\[collab:([^\]]*)\]/;
-/** Full envelope: `[collab:<from>][<kind>:<threadID>] <body>` (thread optional). */
-export const COLLAB_ENVELOPE_RE = /^\[collab:([^\]]*)\](?:\[([a-z]+)(?::([^\]]*))?\])?\s*/;
+/**
+ * Legacy sender prefix (`[collab:<from>] `), still matched for CLI-sent text.
+ *
+ * 0.8.0 (`sender-name`): an inbound header may carry the sender's session title
+ * **in front** — `[<title>][collab:<from>][<kind>:<threadID>] <body>`. The
+ * optional leading `[…]` keeps every consumer (dedupe, `extractInbound`,
+ * `normalizeText`) reading the same `from`, and a title-less header still
+ * matches at position 0 exactly as before. `from` stays group 1.
+ */
+export const COLLAB_PREFIX_RE = /^(?:\[[^\]]*\])?\[collab:([^\]]*)\]/;
+/**
+ * Full envelope: `[<title>?][collab:<from>][<kind>:<threadID>] <body>`
+ * (title and thread optional). Groups: 1 title, 2 from, 3 kind, 4 threadID.
+ */
+export const COLLAB_ENVELOPE_RE = /^(?:\[([^\]]*)\])?\[collab:([^\]]*)\](?:\[([a-z]+)(?::([^\]]*))?\])?\s*/;
 
 export const DEFAULT_MAX_INJECT = 3;
 /**
