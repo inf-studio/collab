@@ -9294,8 +9294,8 @@ await expectFail(
 
 // --- S98n: registered exactly once; the description states the contract.
 expect(
-  'S98 collab_freeze is registered exactly once (… → 23 → 26 tools)',
-  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 26,
+  'S98 collab_freeze is registered exactly once (… → 23 → 27 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 27,
   `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
 );
 const s98Desc = String(tool('collab_freeze').description);
@@ -10865,7 +10865,7 @@ expect(
 // --- S102j: registered exactly once; the surface is 21 tools; description states the contract.
 expect(
   'S102 collab_threads is registered exactly once and the surface is 26 collab_* tools',
-  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 26,
+  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 27,
   `${tools.length} tools / ${tools.filter(definition => definition.name === 'collab_threads').length} collab_threads`
 );
 const s102Desc = String(tool('collab_threads').description);
@@ -11351,7 +11351,7 @@ expect(
     /≤20 条/.test(String(s105SendSchema.properties.excluded.description)) &&
     /≤10 条/.test(String(s105SendSchema.properties.need.description)) &&
     /≤200 字/.test(String(s105SendSchema.properties.minimalTest.description)) &&
-    tools.length === 26,
+    tools.length === 27,
   `${tools.length} tools / ${JSON.stringify(Object.keys(s105SendSchema?.properties ?? {}))}`
 );
 

@@ -98,6 +98,33 @@ import {
 } from './core/envelope.ts';
 import { appendMessage, messageFiles, messagesFile, readMessages } from './core/store.ts';
 import { staleClass } from './core/stale.ts';
+import {
+  activeFacts,
+  factsFile,
+  factInjection,
+  formatFact,
+  invalidateFacts,
+  isFactID,
+  listFacts,
+  metricsOf,
+  readFactSeen,
+  readLedger,
+  retractFact,
+  retractedLabel,
+  settleFact,
+  workspaceFacts,
+  workspaceOf,
+  writeLedger
+} from './core/facts.ts';
+import {
+  basedOnLabel,
+  compareBasedOn,
+  gitHead,
+  localSnapshot,
+  staleLine
+} from './core/tri-state.ts';
+import { defineTerm, glossaryLineFor, pairKey, readGlossary, recordConflict, termsFor, writeGlossary } from './core/glossary.ts';
+import { messageSemantics, normalizeFactIds, normalizeGrade, unlabeledPrefix } from './core/messages.ts';
 import { appendThreadMessage, createInboxStore, createThreadStore, extractInbound } from './core/storage.ts';
 import { createSignal } from './ids.ts';
 import { AWARENESS_LIST_LIMIT, AWARENESS_TTL_MS, BUILTIN_PROTECT, PLUGIN_VERSION } from './constants.ts';
@@ -632,5 +659,42 @@ export const __internals = {
   DRIFT_NO_ADVANCE_TURNS,
   DRIFT_PARKED_MS,
   SUSPEND_FALLBACK_MS,
-  WAKE_KINDS
+  WAKE_KINDS,
+  // 0.9.4 (`11-20-collab-facts`): the facts ledger, the three-state comparison
+  // and the pair glossary are pure enough to drive directly — the test needs the
+  // real read/write path (tmp+rename, epoch, derivation) and a clock-free
+  // `compare` it can feed explicit baselines to.
+  factsFile,
+  readLedger,
+  writeLedger,
+  workspaceFacts,
+  workspaceOf,
+  activeFacts,
+  listFacts,
+  settleFact,
+  retractFact,
+  invalidateFacts,
+  metricsOf,
+  formatFact,
+  retractedLabel,
+  factInjection,
+  readFactSeen,
+  isFactID,
+  compareBasedOn,
+  localSnapshot,
+  staleLine,
+  basedOnLabel,
+  gitHead,
+  pairKey,
+  readGlossary,
+  writeGlossary,
+  termsFor,
+  defineTerm,
+  recordConflict,
+  glossaryLineFor,
+  // 0.9.4: the message-side helpers (grade / factIds / `[未标注]`).
+  normalizeGrade,
+  normalizeFactIds,
+  messageSemantics,
+  unlabeledPrefix
 };

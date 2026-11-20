@@ -111,6 +111,38 @@ export function sendTool(kit: ToolKit): ToolDefinition {
             'Deliver even though the same body already reached this target (another thread) or this thread ' +
             'within `dedupeWindowMs`. Skips both de-dup levels, marks the result `dedupeOverridden` and (with a ' +
             '`bid`) stamps `dedupeOverriddenAt` on the record. Use it for a deliberate repeat only.'
+        },
+        grade: {
+          type: 'string',
+          enum: ['measured', 'inferred', 'relayed'],
+          description:
+            '0.9.4 证据等级（D5）：measured = 自己量到；inferred = 推断（未测但可推导）；relayed = 转述（对方不得引用为证据）。' +
+            '省略 → unknown：对方注入会标 `[未标注]`，并可以要求补 measured。'
+        },
+        factIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '0.9.4：本条消息引用的已登记事实（`F3` …）。写进信封 factIds / basedOn.factIds，' +
+            '`collab_fact invalidate` 会沿这些边传播（relayed/unknown 事实不得被引用）。'
+        },
+        glossary: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            '0.9.4 术语表（R6，每对会话 3–10 条）：`define:{term,meaning}` 定义/覆盖一个术语；' +
+            '`conflict:["状态"]` 声明本次消息在冲突上下文里用了该术语。同一术语第 2 次冲突且无更新定义 → 拒绝发送并要求先定义。',
+          properties: {
+            define: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                term: { type: 'string', description: '术语（≤40 字，如 "状态" / "已发版"）。' },
+                meaning: { type: 'string', description: '一句话定义（≤200 字）。' }
+              }
+            },
+            conflict: { type: 'array', items: { type: 'string' }, description: '本次冲突的术语列表（≤5 条）。' }
+          }
         }
       },
       required: ['target', 'text', 'confirm']

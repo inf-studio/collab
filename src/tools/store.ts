@@ -27,17 +27,18 @@ import type { ToolKit } from './shared.ts';
  * S8 (review): a `0` on a table no current version writes would read as
  * "nothing there" — label them instead of printing a bare zero.
  *
- * Actual ownership: `todos` / `progress` mirror the workspace task layer in
- * 0.9.3, `facts` in 0.9.4, `decisions` in 0.9.5, `metrics` in 0.9.6. **0.9.1
- * does not project the contract** (`collab-contract/<sid>.json` stays a separate
- * JSON truth; todos/progress there are not `collab.db` rows).
+ * Actual ownership: `facts` is the 0.9.4 workspace ledger, whose truth is
+ * `collab-facts.json` (**not projected here in 0.9.4**); `todos` / `progress`
+ * mirror the workspace task layer but 0.9.1 keeps the contract as a separate
+ * JSON truth; `decisions` arrives in 0.9.5, `metrics` in 0.9.6.
  */
+const EMPTY_LABEL: Record<string, string> = { facts: '真源在 collab-facts.json' };
 const EMPTY_BY_DESIGN = ['facts', 'todos', 'decisions', 'progress', 'metrics'];
 const tableLine = (counts: Record<string, number>, keys: string[]): string =>
   keys
     .map(key =>
       EMPTY_BY_DESIGN.includes(key)
-        ? `${key}=0（本版不写入）`
+        ? `${key}=0（${EMPTY_LABEL[key] ?? '本版不写入'}）`
         : `${key}=${counts[key] ?? 0}`
     )
     .join('  ');

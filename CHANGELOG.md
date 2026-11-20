@@ -3,6 +3,62 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.4] - 2026-11-20
+
+> **事实账本 + settle/invalidate**。624 条消息里 **117 条（19%）**后来被撤回或更正（环境干扰 39、工具误用 33、
+> 探针假象 26、口径不同 25）；撤回没有传播——00:45 的裁定到 00:59 才被对方看见，14 分钟里 67 条消息 / 85 KB
+> 都在同步一个已作废的事实。本版把「事实」做成可寻址的一等值（`F1`/`F2`…）：可 settle、可引用、可撤回、可作废，
+> 消息写明等级与基线，撤回沿引用**工作区级传播**。
+> 工具面 **26 → 27**（新增 `collab_fact`）；新增两个全局文件（均可 `COLLAB_*_FILE` 覆盖）。
+
+### Added
+
+- **事实账本（R1/D4）**：`src/core/facts.ts` — `~/.config/opencode/collab-facts.json`（`workspaces[dir]` 一本账/
+  工作区，设计文档的扁平形状仍可读入）。事实 `{id, claim, grade, evidence, state, basedOn, by, at, supersededBy,
+  scope}`；`seq` 单调发放（裁剪后 id 不复用）、上限 **2000**（非 active 先淘汰最旧）、`tmp + rename`、
+  坏文件/坏行降级不抛错。
+- **`collab_fact`（R3，26 → 27）**：`settle`（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行）·
+  `retract {id, reason}`（原因必填，按日计数 + 原因分类）· `invalidate {since}`（`F#` → 该事实及**显式引用**它的
+  传递派生；数字 → `basedOn.facts <= epoch` 的 active 事实；`epoch+1`；工作区级）· `list`（只读，默认 active）。
+  写动作需 `confirm:true`。
+- **证据等级（R2/D5）**：`measured` / `inferred` / `relayed` / `unknown`；`collab_send` / `collab_reply` 新增
+  `grade` / `factIds`，缺省 `unknown`。注入：`unknown` → 消息行前 **`[未标注]`**；`relayed` / `unknown` 事实
+  **不得**作为另一条事实的 `evidence`（正文 `F3` 与 `factIds` 两条路径都拒，附「补 measured」的写法）。
+- **三态判定（R4/D2）**：`src/core/tri-state.ts` — 本地基线 `{repo: HEAD, env: .env sha1 前 8 位, facts: epoch}`；
+  `facts` 缺失 → **`fresh` + `[基线未知]`**（不再把无标记消息当 stale）；落后 → `stale`（注入「只回增量
+  ≤30% 原文，不要重述已作废事实」）；两侧各有超前 → `conflict`（**本版只标记 + 注入，不自动开决策**）。
+- **注入（R3/R6，每段 ≤1 行）**：`[settled:F#]` / `[retracted:F#→F#]`（每会话只播一次，seen 集合在 push 成功后写）·
+  `[未标注]` / `[基线未知]` / `[stale]` / `[conflict]`（消息行 + 每轮各 ≤1 行指令）· `[glossary]`（一行摘要）。
+  四段 `[mission]/[todo]/[drift]/[progress]` 的 12 行预算不变。
+- **在途失效（R5）**：`invalidate` 后扫描契约，`todos[].ref.factId` 命中的 open 行标 `staleWork: true`，
+  `[todo]` 行尾 **`⚠失效`**、`collab_todo list` 显示 `依据 F#`；**不自动关闭**。`collab_todo add` 新增 `factId?`。
+- **glossary（R6）**：`src/core/glossary.ts` — `~/.config/opencode/collab-glossary.json`，按 `(from,to)` 排序对
+  维护 3–10 条术语；`collab_send` / `collab_reply` 新增 `glossary:{ define:{term,meaning}, conflict?:[term] }`；
+  同一术语第 **2** 次冲突且无「上次冲突之后」的新定义 → **拒绝发送**（0 写入）；定义 + 冲突同一条消息给齐则放行。
+- **`metrics.retract_count`**：retract 与 supersede 都计入当日计数（按本地日期分桶），原因分类在 `list` / 回执里可查。
+
+### Changed
+
+- `collab_send` / `collab_reply` 的投递元数据与信封新增 `grade` / `basedOn` / `factIds`（不影响工具输出契约；
+  `basedOn` 由发送方工作区的 `HEAD` / `.env` / ledger epoch 组成）。
+- 收端 inbox 记录保留 `grade` / `basedOn` / `factIds`，`context` 注入据此标 `[未标注]` / `[基线未知]` / `[stale]` /
+  `[conflict]`（无需回读 JSONL 归档）。
+- `collab_index stats` 的 `facts` 行显示 `facts=0（真源在 collab-facts.json）`：0.9.4 的账本是 JSON 真源，
+  不投影到 `collab.db`。
+
+### Tests / Docs
+
+- 新增 `test/facts.mjs`（**74 项**，已串进 `pnpm test`）：27 个工具 · settle/list（id 连续、grade 必填、
+  `unknown` 可见、同 claim 覆盖）· relayed/unknown 引用被拒（正文 + `factIds`）· retract（state / reason / 当日计数 /
+  不可重复）· invalidate F#（根 + 派生 superseded、epoch+1、幂等 no-op、`[retracted:F2→F6]` 工作区级传播）·
+  invalidate epoch · 三态 fresh/stale/conflict/无基线（D2）· `[未标注]` / `[stale]`（≤30% 文案）/ `[基线未知]` /
+  `[conflict]` 注入 · `[settled]` 每会话只播一次 · 在途 todo 标 `staleWork` + `⚠失效` 且不关闭 · glossary 四例 ·
+  发送元数据 `grade`/`factIds`/`basedOn`（缺省 `unknown`，信封同）。
+  **强制变异**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（实测，退出码 1）。
+- 版本断言与工具数升到 0.9.4 / 27（`contract-inject` / `drift` / `gate` / `store-rebuild` / `handoff-harness`）。
+- 文档：`docs/collab.md` 工具表 + §11.25（事实账本 / 证据等级 / 三态 / 在途失效 / glossary / 偏差）；
+  README 版本表；skill `collab`（工具表 + 「事实账本」小节）。
+
 ## [0.9.3] - 2026-11-20
 
 > **漂移三选一 + 挂起唤醒**。排钟会话 13:00 主线完结后没有下一项占位，空槽被 ws 集群填满，**10.8h 零提醒**；

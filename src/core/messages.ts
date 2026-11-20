@@ -1,6 +1,54 @@
 import { normalizeKind, normalizeText, normalizeThreadID, parseEnvelope } from '../ids.ts';
-import type { InboxMessage, JsonObject, SessionMessageLike } from '../types.ts';
-import { asObject } from '../util.ts';
+import type { EnvelopeGrade, InboxMessage, JsonObject, MessageEnvelope, SessionMessageLike } from '../types.ts';
+import { asObject, dedupe } from '../util.ts';
+
+/** 0.9.4 (D5): the four grades; anything unrecognised is an honest `unknown`. */
+const GRADES: EnvelopeGrade[] = ['measured', 'inferred', 'relayed', 'unknown'];
+
+/** The declared evidence grade of an outgoing message (`unknown` = not labelled). */
+export function normalizeGrade(value: unknown): EnvelopeGrade {
+  const grade = String(value ?? '').trim();
+  return (GRADES as string[]).includes(grade) ? (grade as EnvelopeGrade) : 'unknown';
+}
+
+/** The facts a message cites (`F3`, `F4`); junk is dropped, order preserved. */
+export function normalizeFactIds(value: unknown): string[] {
+  const list = Array.isArray(value) ? value : [];
+  return dedupe(list.map(item => String(item ?? '').trim()).filter(item => /^F\d+$/.test(item)));
+}
+
+/**
+ * 0.9.4 (R2): the semantics a delivered message carries. The inbox record keeps
+ * them next to the body so the injection can mark `[未标注]` / `[stale]` without
+ * re-reading the JSONL archive.
+ */
+export function messageSemantics(message: JsonObject | InboxMessage | undefined): {
+  grade: EnvelopeGrade;
+  basedOn?: MessageEnvelope['basedOn'];
+  factIds: string[];
+} {
+  const meta = asObject(message);
+  const basedOn = asObject(meta.basedOn);
+  const facts = Number(basedOn.facts);
+  return {
+    grade: normalizeGrade(meta.grade),
+    ...(Number.isFinite(facts)
+      ? {
+          basedOn: {
+            ...(basedOn.repo && typeof basedOn.repo === 'object' ? { repo: basedOn.repo as Record<string, string> } : {}),
+            ...(basedOn.env && typeof basedOn.env === 'object' ? { env: basedOn.env as Record<string, string> } : {}),
+            facts
+          }
+        }
+      : {}),
+    factIds: normalizeFactIds(meta.factIds)
+  };
+}
+
+/** The `[未标注] ` prefix R2 requires for a message with no declared grade. */
+export function unlabeledPrefix(message: JsonObject | InboxMessage | undefined): string {
+  return messageSemantics(message).grade === 'unknown' ? '[未标注] ' : '';
+}
 
 /** De-dup key used when message metadata is unavailable. */
 export function messageKey(message: JsonObject | InboxMessage | undefined): string {

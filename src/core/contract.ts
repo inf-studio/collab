@@ -113,6 +113,14 @@ export interface ContractTodo {
   deferredUntil?: number | null;
   /** Why it was deferred (one line, display only). */
   deferReason?: string | null;
+  /**
+   * 0.9.4 (R5): the facts this todo rests on. `invalidate` marks a todo whose
+   * `factId` was retracted with `staleWork: true` — the row stays open and the
+   * injection says `⚠失效` (auto-closing would decide for the human).
+   */
+  ref?: { factId?: string } | null;
+  /** Set by `core/facts.ts` when an open todo's cited fact is no longer active. */
+  staleWork?: boolean;
 }
 
 export interface ContractPeer {
@@ -285,6 +293,7 @@ function normalizeTodo(raw: unknown): ContractTodo | undefined {
     : 'open';
   const blocking = String(value.blockingOn ?? '').trim();
   const kind = TODO_KINDS.includes(String(value.kind) as TodoKind) ? (String(value.kind) as TodoKind) : 'mainline';
+  const factRef = String(asObject(value.ref).factId ?? '').trim();
   return {
     id,
     kind,
@@ -299,7 +308,9 @@ function normalizeTodo(raw: unknown): ContractTodo | undefined {
     evidence: value.evidence ? text(value.evidence, 300) : null,
     updatedAt: num(value.updatedAt) || num(value.since) || Date.now(),
     deferredUntil: num(value.deferredUntil) || null,
-    deferReason: value.deferReason ? text(value.deferReason, 200) : null
+    deferReason: value.deferReason ? text(value.deferReason, 200) : null,
+    ref: /^F\d+$/.test(factRef) ? { factId: factRef } : null,
+    staleWork: value.staleWork === true
   };
 }
 
@@ -701,7 +712,9 @@ function todoLines(contract: Contract, unfinished: Set<string>, now: number): st
   const sorted = [...open].sort((a, b) => rank(a) - rank(b) || a.since - b.since);
   const items = sorted.slice(0, INJECT_TODO_TOP).map(todo => {
     const mark = unfinished.has(todo.id) ? ' [未收尾]' : '';
-    return `  ${todo.id} ${truncate(todo.subject, 80)} → ${todoTarget(todo, now)}${mark}`;
+    // 0.9.4 (R5): a todo that cited a retracted fact is flagged, never closed.
+    const stale = todo.staleWork ? ' ⚠失效' : '';
+    return `  ${todo.id} ${truncate(todo.subject, 80)} → ${todoTarget(todo, now)}${mark}${stale}`;
   });
   return [header, ...items];
 }

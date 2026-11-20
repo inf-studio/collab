@@ -80,7 +80,9 @@ function renderTodos(contract: ReturnType<typeof readContract>, now: number): st
       todo =>
         `  ${todo.id} [${todo.kind}] ${truncate(todo.subject, 100)} → ${statusMark(todo)} / ${blockerMark(todo)}` +
         `${todo.deferReason ? ` · ${truncate(todo.deferReason, 40)}` : ''}` +
-        `${todo.deferredUntil && todo.deferredUntil > now ? `（推迟至 ${new Date(todo.deferredUntil).toISOString().slice(5, 16)}）` : ''}`
+        `${todo.deferredUntil && todo.deferredUntil > now ? `（推迟至 ${new Date(todo.deferredUntil).toISOString().slice(5, 16)}）` : ''}` +
+        `${todo.ref?.factId ? ` · 依据 ${todo.ref.factId}` : ''}` +
+        `${todo.staleWork ? ' ⚠失效' : ''}`
     );
   if (sorted.length > rows.length) rows.push(`  …还有 ${sorted.length - rows.length} 条（关闭几条再看）`);
   if (closed.length) {
@@ -154,6 +156,11 @@ export function todoTool(kit: ToolKit): ToolDefinition {
           type: 'number',
           description: 'defer 的推迟到（epoch ms）；省略 = 仅排在列表末尾。'
         },
+        factId: {
+          type: 'string',
+          description:
+            'add 可选：这条待办据以成立的事实（`F3`）。事实被 retract / invalidate 后，该待办保留但在注入里标 `⚠失效`（0.9.4）。'
+        },
         confirm: {
           type: 'boolean',
           description: '写动作必须为 true；false / 省略只预览。list 不需要。'
@@ -188,11 +195,13 @@ export function todoTool(kit: ToolKit): ToolDefinition {
           throw invalid('blockingOn 必须是 "me" 或一个 ses_… 会话 id');
         }
         const status: TodoStatus = String(input?.status ?? '') === 'doing' ? 'doing' : 'open';
+        const factRef = String(input?.factId ?? '').trim();
+        if (factRef && !/^F\d+$/.test(factRef)) throw invalid(`factId="${factRef}" 不合法（期望 F3 这样的 id）`);
         if (input?.confirm !== true) {
           return {
             content: [
               '未执行（confirm 不为 true，仅预览）。将新增待办:',
-              `${truncate(subject, 100)}  kind=${kind}  blockingOn=${blocking}  status=${status}`,
+              `${truncate(subject, 100)}  kind=${kind}  blockingOn=${blocking}  status=${status}${factRef ? `  fact=${factRef}` : ''}`,
               `契约文件: ${contractFile(sid)}`,
               '确认后在同样参数下传 confirm:true。'
             ].join('\n')
@@ -217,7 +226,8 @@ export function todoTool(kit: ToolKit): ToolDefinition {
             status,
             blockingOn: blocking,
             since: now,
-            updatedAt: now
+            updatedAt: now,
+            ...(factRef ? { ref: { factId: factRef } } : {})
           };
           // `todoSeq` is monotonic across closed-history trimming: an id is
           // never issued twice, even after the row itself is gone.

@@ -45,6 +45,30 @@ export function replyTool(kit: ToolKit): ToolDefinition {
           description:
             'Deliver even though the same body already reached the counterpart (another thread) or this thread ' +
             'within `dedupeWindowMs`. Skips both de-dup levels and marks the result `dedupeOverridden`.'
+        },
+        grade: {
+          type: 'string',
+          enum: ['measured', 'inferred', 'relayed'],
+          description:
+            '0.9.4 证据等级：measured = 自己量到；inferred = 推断；relayed = 转述。省略 → unknown（对方注入标 `[未标注]`）。'
+        },
+        factIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '本回执引用的已登记事实（`F3` …）：会写进信封 factIds，供 invalidate 传播。'
+        },
+        glossary: {
+          type: 'object',
+          additionalProperties: false,
+          description: '0.9.4 术语表（每对会话）：`define:{term,meaning}` 定义术语；`conflict:["状态"]` 声明本次冲突。',
+          properties: {
+            define: {
+              type: 'object',
+              additionalProperties: false,
+              properties: { term: { type: 'string' }, meaning: { type: 'string' } }
+            },
+            conflict: { type: 'array', items: { type: 'string' } }
+          }
         }
       },
       required: ['threadID', 'text', 'confirm']

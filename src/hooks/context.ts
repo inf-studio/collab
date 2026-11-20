@@ -11,8 +11,11 @@ import {
 } from '../core/contract.ts';
 import { isAckText } from '../core/ack.ts';
 import { evaluate as evaluateDrift, markDrifted } from '../core/drift.ts';
+import { factInjection, markFactSeen, readFactSeen, workspaceFacts, workspaceOf } from '../core/facts.ts';
+import { glossaryLineFor } from '../core/glossary.ts';
+import { compareBasedOn, localSnapshot } from '../core/tri-state.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
-import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
+import { collectRequestKeys, cursorFrom, messageIDs, messageKey, messageSemantics } from '../core/messages.ts';
 import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
@@ -118,6 +121,25 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
   }
 
   /**
+   * 0.9.4 (`11-20-collab-facts`, R3/R6): the semantics block — `[settled:F#]`,
+   * `[retracted:F#→F#]` and `[glossary]`, each at most one line.
+   *
+   * Computed from the workspace ledger **every** request (no `injected[]`, the
+   * same rule as the contract block), but announced once per fact: the
+   * per-session seen set is written only after the block is pushed.
+   */
+  async function injectFacts(event: ContextHookEvent): Promise<{ text?: string; keys: string[] }> {
+    const sessionID = event?.sessionID;
+    if (!sessionID) return { keys: [] };
+    const workspace = workspaceOf(deps.ctx);
+    const seen = await readFactSeen(deps.ctx, sessionID);
+    const injected = factInjection(workspace, seen);
+    const glossary = glossaryLineFor(sessionID);
+    const lines = [...injected.lines, ...(glossary ? [glossary] : [])];
+    return lines.length ? { text: lines.join('\n'), keys: injected.keys } : { keys: [] };
+  }
+
+  /**
    * Unread cross-session messages. Only messages that are neither already
    * injected nor part of this very request are surfaced, so a hand-off never
    * shows up twice (the body is already a user turn of its own).
@@ -220,6 +242,27 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       .filter(Boolean)
       .join(' / ');
 
+    // 0.9.4 (R4/D2): the receiver's baseline, computed once per request and only
+    // when a shown message actually carries one (no marker → D2's `[基线未知]`,
+    // which is *fresh* — not a reason to run git).
+    const workspace = workspaceOf(deps.ctx);
+    let local: ReturnType<typeof localSnapshot> | undefined;
+    const baseline = (): ReturnType<typeof localSnapshot> => {
+      if (!local) local = localSnapshot({ workspace, epoch: workspaceFacts(workspace).epoch });
+      return local;
+    };
+    let staleLine: string | undefined;
+    let conflictLine: string | undefined;
+    const verdictOf = (
+      semantics: ReturnType<typeof messageSemantics>
+    ): ReturnType<typeof compareBasedOn> | undefined => {
+      if (!semantics.basedOn) return undefined; // D2: no baseline = fresh + [基线未知]
+      const verdict = compareBasedOn(semantics.basedOn, baseline());
+      if (verdict.state === 'stale' && !staleLine) staleLine = verdict.line;
+      if (verdict.state === 'conflict' && !conflictLine) conflictLine = verdict.line;
+      return verdict;
+    };
+
     const lineOf = (message: InboxMessage): string => {
       const kind = normalizeKind(message.kind);
       // Legacy CLI messages (`[collab:<from>] <body>`) carry no thread; telling
@@ -236,7 +279,15 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
               ? ` → 用 collab_wait {threadID:"${threadID}"} 取全文`
               : ' → 无 thread 关联，无需等待回执'
             : '';
-      return `- ${kind.padEnd(7)} ${threadID ?? '-'} from=${message.from}: ${truncate(message.text)}${hint}`;
+      const semantics = messageSemantics(message);
+      const verdict = verdictOf(semantics);
+      const mark = verdict?.state === 'conflict' ? '[conflict] ' : verdict?.state === 'stale' ? '[stale] ' : '';
+      // R2: no declared grade is surfaced as `[未标注]`; D2: no baseline is
+      // surfaced as `[基线未知]` (still `fresh` — the marker is information, not
+      // a warning). The receiver can then ask for a measured fact.
+      const unlabeled = semantics.grade === 'unknown' ? '[未标注] ' : '';
+      const noBaseline = semantics.basedOn ? '' : '[基线未知] ';
+      return `- ${unlabeled}${noBaseline}${mark}${kind.padEnd(7)} ${threadID ?? '-'} from=${message.from}: ${truncate(message.text)}${hint}`;
     };
 
     await inbox.update(sessionID, current => {
@@ -252,6 +303,8 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       text: [
         `[collab] ${head}`,
         ...[...requests, ...replies, ...notes].map(lineOf),
+        ...(staleLine ? [staleLine] : []),
+        ...(conflictLine ? [conflictLine] : []),
         rest > 0 ? `…还有 ${rest} 条，调用 collab_inbox 查看全文。` : '全文/状态用 collab_inbox。'
       ].join('\n'),
       shown: shown.length,
@@ -332,6 +385,16 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         log('contract injection failed:', (error as Error)?.message ?? error);
       }
       if (contractText) blocks.push(contractText);
+      // 0.9.4: `[settled]` / `[retracted]` / `[glossary]` — the facts frame the
+      // request before the messages are read. Its own try/catch: a broken ledger
+      // must not cost the inbox lines.
+      let factPart: { text?: string; keys: string[] } = { keys: [] };
+      try {
+        factPart = await injectFacts(event);
+      } catch (error) {
+        log('facts injection failed:', (error as Error)?.message ?? error);
+      }
+      if (factPart.text) blocks.push(factPart.text);
       const inboxPart = await injectInbox(event);
       if (inboxPart.text) blocks.push(inboxPart.text);
       // Stale classes are computed *before* the chain refresh: that refresh
@@ -370,6 +433,9 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         // D1 (0.4.0): the same rule for the owner-queue lines — `seenAt` is
         // written after the push, so a failed injection shows them again.
         if (chainPart.ownerQueue.length) markQueueSeen(event.sessionID, chainPart.ownerQueue);
+        // 0.9.4: same after-push rule for the fact lines — a failed injection
+        // leaves them pending for the next request.
+        if (factPart.keys.length) await markFactSeen(deps.ctx, event.sessionID, factPart.keys);
         // Same rule for the awareness hint: stamp the 10-minute window only
         // once the line really reached the request.
         if (awarenessText) awareness.markShown(event.sessionID);

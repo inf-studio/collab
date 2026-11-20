@@ -607,5 +607,52 @@ export const GATE_TODO_LIMIT = 8;
 /** `collab.json` → `gate`; anything else falls back to `enforce`. */
 export const GATE_MODES: string[] = ['enforce', 'warn', 'off'];
 
+// ------------------------------- facts ledger + tri-state + glossary (0.9.4)
+
+/**
+ * 0.9.4 (`11-20-collab-facts`, R1/D4): the workspace-level **facts ledger** —
+ * one global file holding one ledger per workspace (`workspaces[dir]`), because
+ * a fact is true (or not) *for a workspace*, not for a session and not for the
+ * whole machine. `COLLAB_FACTS_FILE` overrides the path so tests never touch
+ * `~/.config/opencode/`.
+ *
+ * Read once at module load, like every other global path here.
+ */
+export const FACTS_FILE = process.env.COLLAB_FACTS_FILE || join(homedir(), '.config', 'opencode', 'collab-facts.json');
+/** The file shape this build writes; an unknown `v` is treated as empty + rewritten. */
+export const FACTS_VERSION = 1;
+/** A permanent ledger has a bound: the oldest non-active rows go first. */
+export const FACTS_LIMIT = 2000;
+/** D5: what a claim's evidence is worth. `unknown` = the sender did not label it. */
+export const FACT_GRADES: string[] = ['measured', 'inferred', 'relayed', 'unknown'];
+/** `settle` accepts all four (an explicit `unknown` is an honest "unlabeled"). */
+export const FACT_SETTLE_GRADES: string[] = FACT_GRADES;
+/** `relayed` / `unknown` may not be cited as another fact's evidence (R2/D5). */
+export const FACT_WEAK_GRADES: string[] = ['relayed', 'unknown'];
+export const FACT_STATES: string[] = ['active', 'superseded', 'retracted'];
+export const FACT_CLAIM_LIMIT = 300;
+export const FACT_EVIDENCE_LIMIT = 500;
+export const FACT_REASON_LIMIT = 200;
+/** `collab_fact list` renders at most this many rows, then "还有 N 条". */
+export const FACT_LIST_MAX = 30;
+/** The `[stale]` instruction (design §6): what a stale reply must (not) do. */
+export const STALE_REPLY_RATIO = 0.3;
+
+/**
+ * 0.9.4 (R6): the pair glossary — one file for all `(from, to)` pairs, keyed by
+ * the two session ids sorted. `COLLAB_GLOSSARY_FILE` overrides it (tests).
+ */
+export const GLOSSARY_FILE =
+  process.env.COLLAB_GLOSSARY_FILE || join(homedir(), '.config', 'opencode', 'collab-glossary.json');
+export const GLOSSARY_VERSION = 1;
+/** R6: 3–10 terms per pair; the injection line shows at most 5 of them. */
+export const GLOSSARY_TERMS_MIN = 3;
+export const GLOSSARY_TERMS_MAX = 10;
+export const GLOSSARY_LINE_TERMS = 5;
+export const GLOSSARY_TERM_CHARS = 40;
+export const GLOSSARY_MEANING_CHARS = 200;
+/** R6: the **second** conflict over the same term refuses until it is defined. */
+export const GLOSSARY_CONFLICT_LIMIT = 2;
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.3';
+export const PLUGIN_VERSION = '0.9.4';

@@ -23,6 +23,7 @@ import { statusTool } from './status.ts';
 import { threadsTool } from './threads.ts';
 import { waitTool } from './wait.ts';
 import { escalateTool } from './escalate.ts';
+import { factTool } from './fact.ts';
 import { freezeTool } from './freeze.ts';
 
 export { createToolKit } from './shared.ts';
@@ -69,7 +70,10 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     // `todo` = the list the `[todo]` injection renders.
     missionTool(kit),
     progressTool(kit),
-    todoTool(kit)
+    todoTool(kit),
+    // 0.9.4 (`11-20-collab-facts`): the workspace facts ledger, 26 → 27.
+    // `settle` / `retract` / `invalidate` / `list` — one tool, four verbs.
+    factTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

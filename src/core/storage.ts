@@ -7,6 +7,7 @@ import {
   threadKey
 } from '../constants.ts';
 import { normalizeKind, normalizeStatus, normalizeThreadID, parseEnvelope } from '../ids.ts';
+import { messageSemantics } from './messages.ts';
 import type { CollabContext, InboxEvent, InboxMessage, InboxValue, ThreadMessage, ThreadRecord } from '../types.ts';
 import { asObject, clamp, dedupe, truncateRaw } from '../util.ts';
 
@@ -180,6 +181,9 @@ export function extractInbound(event: InboxEvent | undefined): InboxMessage | un
   // may be judged by its `[handoff]` body) and an explicit `note` / `request`
   // (a deliberate non-receipt, never judged by the body).
   const declaredKind = String(meta.kind ?? parsed?.kind ?? '').trim();
+  // 0.9.4 (D5/R4): the evidence grade + baseline travel in the delivery metadata
+  // (the CLI path has neither → `unknown` / no baseline, which is exactly D2).
+  const semantics = messageSemantics(meta);
   return {
     // `id` stays the inbox id (de-dup key for repeated events); `cid` is our own
     // stable per-delivery correlation id, echoed back through message metadata.
@@ -193,6 +197,9 @@ export function extractInbound(event: InboxEvent | undefined): InboxMessage | un
     threadID: normalizeThreadID(meta.threadID) ?? normalizeThreadID(parsed?.threadID),
     text: truncateRaw(body, INBOX_TEXT_LIMIT),
     ts: Date.now(),
-    delivered: false
+    delivered: false,
+    grade: semantics.grade,
+    ...(semantics.basedOn ? { basedOn: semantics.basedOn } : {}),
+    ...(semantics.factIds.length ? { factIds: semantics.factIds } : {})
   };
 }

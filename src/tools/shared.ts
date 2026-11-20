@@ -14,6 +14,10 @@ import { allBroadcasts, mergeDelivery, readBroadcast, writeBroadcast } from '../
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
 import { recordMessage } from '../core/index-db.ts';
 import { makeEnvelope } from '../core/envelope.ts';
+import { normalizeFactIds, normalizeGrade } from '../core/messages.ts';
+import { conflictRefusal, defineTerm, pairKey, recordConflict } from '../core/glossary.ts';
+import { workspaceFacts, workspaceOf } from '../core/facts.ts';
+import { localSnapshot } from '../core/tri-state.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
@@ -548,6 +552,42 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const confirmed = input?.confirm === true;
     const dedupeWindowMs = Math.max(0, Number(config.dedupeWindowMs) || 0);
     const bid = String(input?.bid ?? '').trim();
+    // 0.9.4 (D5/R2): the evidence grade the sender is willing to claim. A missing
+    // grade is **not** guessed at — it is `unknown`, and the receiver's injection
+    // marks the message `[未标注]`.
+    const grade = normalizeGrade(input?.grade);
+    const factIds = normalizeFactIds(input?.factIds);
+    // 0.9.4 (R6): a pair glossary. Both halves are optional and validated up
+    // front: a second conflict over an undefined term refuses the whole send
+    // (nothing is delivered), so a definition and a conflict may travel in the
+    // same call (`define` is applied before the conflict check).
+    const glossary = asObject(input?.glossary);
+    if (confirmed && Object.keys(glossary).length) {
+      const me = String(context?.sessionID ?? '').trim();
+      const define = asObject(glossary.define);
+      if (Object.keys(define).length) {
+        const written = await defineTerm({
+          from: me,
+          to: sessionID,
+          term: define.term,
+          meaning: define.meaning,
+          by: me
+        });
+        notes.push(
+          `术语「${written.term.term}」已定义（pair=${pairKey(me, sessionID)}）` +
+            `${written.needMore ? `；还差 ${written.needMore} 条达到 3 条` : ''}`
+        );
+      }
+      const conflicts = Array.isArray(glossary.conflict) ? glossary.conflict : glossary.conflict ? [glossary.conflict] : [];
+      for (const term of conflicts.slice(0, 5)) {
+        const result = await recordConflict({ from: me, to: sessionID, term });
+        // The same call defining the term answers the conflict: an explicit
+        // definition is exactly what R6 asks for, so it unblocks this one.
+        const definedHere = Object.keys(define).length && String(define.term ?? '').trim() === result.term;
+        if (result.blocked && !definedHere) throw invalid(conflictRefusal(result, me, sessionID));
+        notes.push(`术语「${result.term}」冲突计数 ${result.count}${result.blocked ? '（已定义，放行）' : ''}`);
+      }
+    }
     // R3 (0.7.0): `force:true` means "I know it is a repeat, send it" — both de-dup
     // levels are skipped and the overridden write is *marked*, never silent.
     const dedupeForced = confirmed && force && dedupeWindowMs > 0;
@@ -693,6 +733,14 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     await touchWaiters(context?.sessionID);
 
     const admittedAt = Date.now();
+    // 0.9.4 (R4/D2): the sender's own baseline, stamped on the message. It is
+    // computed once here (after every guard / dedupe decision, before the
+    // delivery) and used both for the inbox metadata and the archive envelope.
+    const workspace = workspaceOf(ctx);
+    const basedOn = {
+      ...localSnapshot({ workspace, epoch: workspaceFacts(workspace).epoch }),
+      ...(factIds.length ? { factIds } : {})
+    };
     const admitted = await deliverPrompt({
       sessionID,
       text,
@@ -704,7 +752,10 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           cid,
           kind,
           threadID,
-          ts: admittedAt
+          ts: admittedAt,
+          grade,
+          basedOn,
+          ...(factIds.length ? { factIds } : {})
         }
       }
     });
@@ -723,7 +774,10 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         to: sessionID,
         sentAt: admittedAt,
         kind,
-        body
+        body,
+        basedOn,
+        grade,
+        ...(factIds.length ? { factIds } : {})
       }),
       { dbPath: config.dbPath, storage: config.storage }
     );

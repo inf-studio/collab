@@ -26,7 +26,7 @@
  *  13. a future `time` deadline outranks the 24h fallback
  *  14. mainline close / progress light → lastAdvancedAt moves, counter clears
  *  15. truncation branch: full sections + lowered budget → `[progress]` dropped
- *  16. surface: 26 tools, mission enum grew, legacy string wakeWhen still works
+ *  16. surface: 27 tools, mission enum grew, legacy string wakeWhen still works
  *  17. review A: advance once, then 5 quiet rounds → `[drift]` on the **5th**
  *      quiet round (the counter must not lag after an advance)
  *  18. review B: block → 25h → `[drift]` → resume → the next round is quiet
@@ -553,8 +553,8 @@ expect(
 );
 
 // ============================================ 16) surface + pure functions
-section('16) surface unchanged (26 tools) + pure wake/evaluate helpers');
-expect('26 tools are registered', tools.length === 26, `${tools.length} tools`);
+section('16) surface now 27 tools (facts ledger) + pure wake/evaluate helpers');
+expect('27 tools are registered', tools.length === 27, `${tools.length} tools`);
 expect(
   'collab_mission grew three actions, collab_todo kept its five',
   JSON.stringify(tool('collab_mission').input.properties.action.enum) ===
@@ -567,7 +567,7 @@ expect(
   !tools.some(definition => /drift|wake/.test(definition.name)),
   tools.map(definition => definition.name).join(',')
 );
-expect('PLUGIN_VERSION is 0.9.3', internals.PLUGIN_VERSION === '0.9.3' && pkg.version === '0.9.3', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION is 0.9.4', internals.PLUGIN_VERSION === '0.9.4' && pkg.version === '0.9.4', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect(
   'the drift threshold is 5 and the fallback 24h',
   internals.DRIFT_NO_ADVANCE_TURNS === 5 && internals.SUSPEND_FALLBACK_MS === 24 * 3_600_000,

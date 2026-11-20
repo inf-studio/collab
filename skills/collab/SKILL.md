@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十七个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -44,6 +44,29 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_mission` | `action`(`get`/`set`/`confirm`), `oneLine?`, `taskPath?`, `inScope?`, `outOfScope?`, `handoffTo?`, `state?`, `reconfirm?`, `by?` | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 唯一 `in_progress` 任务 → 空；不猜标题）；`set` 写主线/边界；`confirm` **必填 `by`**、一次固定，之后 `set` 必须 `reconfirm:true` + `by` | 写本地契约 |
 | `collab_progress` | `action`(`list`/`add`/`light`), `milestone`, `title?`, `evidence?`, `confirm` | **里程碑（0.9.1）**：`light` 必须给可校验 evidence（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`）；无 evidence 不点亮；点亮才推进 `lastAdvancedAt` | 写本地契约 |
 | `collab_todo` | `action`(`add`/`close`/`defer`/`suspend`/`list`), `id?`, `subject?`, `kind?`, `blockingOn?`, `status?`, `wakeWhen?`, `evidence?`, `reason?`, `until?`, `confirm` | **契约待办（0.9.1）**：`close` 必填 evidence；`suspend` 必填 `wakeWhen`；`add` 可 `status:"doing"`；注入只列 top3 + 计数，上一轮未动的 doing 标 `[未收尾]`；读侧保留全部 active、只裁最近 50 条关闭历史，id 不复用 | 写本地契约 |
+| `collab_fact` | `action`(`settle`/`retract`/`invalidate`/`list`), `claim?`, `evidence?`, `grade?`, `factIds?`, `id?`, `reason?`, `since?`, `includeAll?`, `limit?`, `confirm` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`…（claim/evidence/grade 必填；relayed/unknown 不得被引用为证据）；`retract` 需要 reason 并按日计数；`invalidate` 作废一条及其显式派生的引用或一个 epoch（epoch+1，工作区级传播，在途 todo 标 `staleWork` 且不关闭）；`list` 只读 | 写工作区账本 |
+
+
+### 事实账本（0.9.4）：撤回要能传播
+
+```text
+# 1) 先 settle（等级必填；转述不行）
+collab_fact { action:"settle", claim:"serverId 恒非空", evidence:"repo/era RedisClient.php:601", grade:"measured", confirm:true }
+
+# 2) 引用：消息 / 新事实都可以带 F#
+collab_send { target:"ses_peer", text:"按 F1 的结论…", grade:"measured", factIds:["F1"], confirm:true }
+collab_fact { action:"settle", claim:"…", evidence:"依据 F1", grade:"inferred", factIds:["F1"], confirm:true }
+
+# 3) 撤回 / 作废（工作区级：对端下一轮就看到 [retracted:F1→F4]）
+collab_fact { action:"retract", id:"F1", reason:"口径错误", confirm:true }
+collab_fact { action:"invalidate", since:"F1", confirm:true }
+```
+
+- `relayed` / `unknown` 事实**不能**作为证据：先补 `measured`，否则 settle 被拒。
+- `stale` 时只回增量（≤30% 原文），不要重述已作废事实；`conflict` 只标记，0.9.5 才开决策。
+- 未标注的消息行会带 `[未标注]`，没有基线的带 `[基线未知]`（D2，仍按 fresh 处理）。
+- 待办可写 `factId:F1`；事实被作废后该待办标 `⚠失效`，**不会自动关闭**。
+- 术语冲突：同一术语第 2 次冲突 → 用 `glossary:{ define:{term,meaning} }` 先定义再发。
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `expected` 三值：`implement`（默认，改代码）/ `review`（确认）/ **`research`**（只读排查 + 结论，对 `build` 也合法）。

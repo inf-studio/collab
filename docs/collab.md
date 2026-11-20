@@ -257,13 +257,13 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十六个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约各一组）
+### 11.2 二十七个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约/事实账本各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
 | `collab_list` | `{ limit?: number, directory?: string }` | 列会话 + `parent=<short>`、`loc=<项目名>`；本会话标 `[self]`，protect 名单标 `[protected]`，其子会话标 `[protected-child]`（后者同样不可投递），广播拉起的会话标 `[bootstrap]`；末尾列出未闭环交接（含 `admitted=/seen=/queue-age=/resend=/unacked=` 送达状态，见 §11.9；带 `origin` 的转发单行尾再加 ` via ses_…`，见 §11.16；有契约决策的单行尾再加 ` decisions=N`，见 §11.19）；本会话持有 / 排队中的资源租约（§11.10）；本会话**提交给受保护会话的队列项**（条数 + ≤3 行明细 + `queueId`，见 §11.12）。`directory` 只看一个工作区（省略 = 旧行为） |
-| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, force?, blocked?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16）。`force?`（0.7.0）：窗口内已有同文仍要投递时用，跳过两级判定、回执标注 `dedupeOverridden`（§11.9.4）。`blocked?`（0.7.0）：BLOCKED 结构化 `{ need?, excluded?, minimalTest? }`，三段追加在正文之后；有可解析 bid 且你是本单参与方时写进记录 `blocked[]`（保留最近 3 次），没有就只上正文、回执注明未落库；超限可读拒绝，不传时输出逐字不变（§11.18） |
-| `collab_reply` | `{ threadID, text, bid?, force?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定）；`force?` 同 `collab_send`（§11.9.4） |
+| `collab_send` | `{ target, text, kind?, threadID?, bid?, mode?, origin?, force?, blocked?, grade?, factIds?, glossary?, confirm: boolean }` | **`confirm` 必须 true**；否则只返回预览（目标 agent/state/title + kind/thread/mode + 将发送内容）。`kind:"reply"` 时 `target` 必须等于 thread 对端，且调用方必须是参与者（见 §11.7）。`bid?` 仅供**限界 reply** 用：声明本条消息闭合哪一单（缺省时从正文 `b_…` 取），决定了能否把回执投进受保护发起方（§11.4，**仅未闭环的单**）。`origin?`（0.7.0）：转发别人的活儿时这条链真正的起点（`ses_…`/别名），给了就在**正文首行**写 `对接人（非本单发起方）：ses_… @ <dir>`；不写记录、不继承，缺省正文逐字不变（§11.16）。`force?`（0.7.0）：窗口内已有同文仍要投递时用，跳过两级判定、回执标注 `dedupeOverridden`（§11.9.4）。`blocked?`（0.7.0）：BLOCKED 结构化 `{ need?, excluded?, minimalTest? }`，三段追加在正文之后；有可解析 bid 且你是本单参与方时写进记录 `blocked[]`（保留最近 3 次），没有就只上正文、回执注明未落库；超限可读拒绝，不传时输出逐字不变（§11.18）。`grade?`（0.9.4）：`measured` / `inferred` / `relayed`，缺省 `unknown`（收端注入标 `[未标注]`）；`factIds?` 引用已登记事实（写进信封与 `basedOn.factIds`）；`glossary?`（0.9.4）：`{ define:{term,meaning}, conflict?[term] }`——同一术语第 2 次冲突且无更新定义 → 拒绝发送（§11.25） |
+| `collab_reply` | `{ threadID, text, bid?, force?, grade?, factIds?, glossary?, confirm: boolean }` | 回执语法糖 = `collab_send{kind:"reply"}`；目标由 thread 里的对端自动解析，恒为 `queue`；非参与者调用会被拒绝。`bid?` 同上（限界 reply 归属判定）；`force?` 同 `collab_send`（§11.9.4）；`grade?` / `factIds?` / `glossary?` 同 `collab_send`（0.9.4） |
 | `collab_followup` | `{ bid, issuePath?, confirm: boolean }` | **闭环后追加（pull，0.1.6）**：只有该单 `claim.by` 可调、只有 `done`/`blocked` 可调；只往 `record.followUps[]` 追加 `{bid, issuePath, at, by}`（**不存正文**），**不投递、不改 state/receipt、不重开 bid**。`issuePath` 缺省取记录的提案，必须先规范化再要求 realpath 落在该记录 workspace 的 `docs/issues/*.md`（`.`/`./`/重复 `/` 会被合并，`./docs/issues/x.md` 等价；拒绝 `..`/绝对路径/软链）。每单上限 3 条。见 §11.9.3 |
 | `collab_decisions` | `{ bid, items, confirm }` | **契约决策记录（0.7.0）**：把「退出码 2→3 / `room:order` 纯事件型 / 断言只看末帧」这类**契约级决定**写进交接记录 `decisions[]`（**只有发起方 `from.sid` 或承接方 `claim.by` 能写**，第三方拒绝且 0 写入；比 `blocked` 更严：`asked` / `origin` 也不行）。`items` 1–10 条 `{ id, decision, rationale? }`（`id` ≤40、`decision` ≤200、`rationale` ≤400 字，控制字符剥成空格）；**同一 `id` 再写 = 覆盖**（不追加），每单上限 **20** 条，超出是**可读拒绝**（不静默淘汰）；`confirm:false` 零写入预览。**不投递、不改 state / claim / receipt / replies**；下游读：`collab_status { bid }`（最近 3 条）+ 承接方注入一行计数 + `collab_list` 行尾 `decisions=N`。见 §11.19 |
 | `collab_inbox` | `{ limit?: number }` | 本会话跨会话消息**全文**（单条上限 `INBOX_TEXT_LIMIT=4000` 字，超出以 `…` 截断）+ kind/thread/线程状态；只读，不推进游标。读到即视为「已见」→ 会回一条 `[ack]`（§11.9.1）；`[ack]` 本身标 `system-ack` |
@@ -286,7 +286,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
 | `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by?, next?, on?, reason? }` | **会话契约主线（0.9.1；0.9.3 三选一）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。**0.9.3**：`resume {next}` / `block {on,reason}` / `done` 是回答 `[drift]` 的唯一三个动作；`done` 要求已有 mainline next-up 待办。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 / §11.24 |
 | `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
-| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。见 §11.22 / §11.24 |
+| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, factId?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。`factId?`（0.9.4）：这条待办依据的事实（`F3`）；事实被作废后行保留并标 `⚠失效`（§11.25）。见 §11.22 / §11.24 |
+| `collab_fact` | `{ action, claim?, evidence?, grade?, factIds?, id?, reason?, since?, includeAll?, limit?, confirm }` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`/`F2`…（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行；`relayed`/`unknown` 事实**不得**被引用为证据，按正文 `F3` 或 `factIds` 都会被拒）；`retract {id, reason}` 撤回单条并写当日 `metrics.retract_count` + 原因分类；`invalidate {since}` 作废一条事实及其**显式引用**（`basedOn.factIds`）的派生，或 epoch 数字作废该 epoch 及之前 settled 的 active 事实，`epoch+1`，工作区级传播，并在途 todo 标 `staleWork`（**不关闭**）；`list` 只读（默认 active，`includeAll` 含历史）。写动作需 `confirm:true`。见 §11.25 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -2208,6 +2209,159 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
 24h 未醒 → `drifted` 且不关闭、下一轮 `[未处置]` · 未来截止不被 24h 兜底误伤 · legacy 字符串 wakeWhen ·
 `close` mainline / `light` 归零计数 · `block → 25h → [drift] → resume` 后下一轮无 `[drift]` · 截断分支（段落整段丢弃，被丢的是 `[progress]`）· 工具数 26。
 变异（强制）：`DRIFT_NO_ADVANCE_TURNS` 5 → 0 → 「1–4 轮不出现 `[drift]`」必红（实测，退出码 1）。
+
+### 11.25 事实账本、证据等级与三态（0.9.4）
+
+**为什么**：624 条消息里 **117 条（19%）**后来被撤回或更正——环境干扰 39、工具误用 33（`rg -rn` 把匹配替换成
+`n`，于是得出「签名头改名」的假结论）、探针假象 26、口径不同 25。撤回没有传播：00:45 owner 裁定「不做前缀隔离」，
+对方在途工作到 **00:59** 才停（14 分钟、67 条消息 / 85 KB 都在同步一个已作废的事实）。275 条消息带「你读的是
+旧快照 / 落后」，接收方却无法判断哪条结论仍然有效。
+
+0.9.4 把「事实」做成**可寻址的一等值**（`F1` / `F2` …）：可登记、可引用、可撤回、可作废；消息写明它据以成立的
+事实与基线，于是撤回能沿引用传播，而不是再发一条「上面那条不算」。
+
+#### 存储（工作区级，D4/D6）
+
+```jsonc
+// ~/.config/opencode/collab-facts.json   （COLLAB_FACTS_FILE 可覆盖；测试/沙箱用）
+{ "v": 1, "workspaces": { "/data/project/muke-interface": {
+    "epoch": 7, "seq": 9,
+    "facts": [{ "id": "F3", "claim": "serverId 恒非空", "grade": "measured",
+                "evidence": "repo/era RedisClient.php:601", "state": "active",
+                "basedOn": { "repo": { "/data/project/muke-interface": "20e35a51" },
+                             "env": { ".env": "a1b2c3d4" }, "facts": 5,
+                             "factIds": ["F2"] },
+                "by": "ses_…", "at": 0, "supersededBy": null, "scope": "workspace" }],
+    "metrics": { "2026-11-20": { "settled": 4, "retracted": 1,
+                                 "reasons": { "口径错误": 1 } } } } }
+```
+
+- **一个文件、每个工作区一本账**：事实对某个工作区成立，对会话/整机不成立（D4）。设计文档里的扁平形状
+  `{ v, epoch, workspace, facts }` 仍然是合法输入（读时迁进容器，写时落新形状）。
+- `epoch` **只在 `invalidate` 成功后 +1**（设计 §3）：它是「这条事实settle 时所处的世界版本」，不是写入计数器。
+  事实的 `basedOn.facts` 记录这个版本号；消息的 `basedOn.facts` 同样。
+- `seq` 是「发放过的最大 `F<n>`」，裁剪历史后 id 也**不会复用**。上限 **2000** 行：超出先淘汰最旧的
+  non-active，再淘汰最旧的 active。
+- 写：`tmp + rename`；读：坏文件/坏行只丢该行，不抛错（`error-handling` 的降级口径）。
+
+#### `collab_fact`（26 → 27 个工具）
+
+| action | 语义 | 校验 |
+| --- | --- | --- |
+| `settle` | 新事实，或覆盖同 `claim` 的旧 active 事实（旧的转 `superseded → 新 id`） | `claim` / `evidence` 非空、`grade` 必填；`relayed` / `unknown` 事实**不得**被引用为证据 |
+| `retract {id, reason}` | `state='retracted'`，记原因；当日 `metrics.retracted` +1、`reasons[原因]` +1 | `id` 存在且不是已撤回；`reason` 非空 |
+| `invalidate {since}` | `F#`：该事实 + 传递引用它的派生 → `superseded`；数字：`basedOn.facts <= epoch` 的 active 事实 → `superseded`；`epoch+1` | `since` 是合法 `F#` 或非负整数；已无 active 可作废 → 幂等 no-op（不涨 epoch） |
+| `list` | 只读；默认只列 `active`，`includeAll:true` 连历史；显示当日 `settled` / `retracted` 与原因分类 | — |
+
+- 写动作都要 `confirm:true`；否则只返回预览。
+- `settle` 允许显式 `grade:"unknown"`（诚实登记「未标注」），但这样的行同样不能被引用为证据——`list` 会显示
+  `F3 [unknown]`（PRD 验收：未标注消息 / 事实必须可见）。
+- **派生判定**：沿 `basedOn.factIds` 的**传递闭包**（`settle` 时按 `factIds` 或正文里的 `F3` token 建立边）。
+  设计 §4 的 `basedOn.facts <= sinceEpoch` 公式保留给 **epoch 形式**；把它套到单个 fact id 上会把同 epoch 的
+  无关事实一起作废（已记录为偏差，见下）。
+- 撤回可度量：`retract` 与 `invalidate` 都计入 `metrics.retract_count`（设计 §5），按本地日期分桶、按原因分类。
+
+#### 证据等级（D5/R2）
+
+- `measured` = 自己量到的；`inferred` = 由已知推出；`relayed` = 转述；缺省 = `unknown`。
+- **发送**：`collab_send` / `collab_reply` 可带 `grade` 与 `factIds`；未带 → 信封 `grade:"unknown"`。
+- **接收注入**：`grade === "unknown"` → 消息行前标 **`[未标注]`**；接收方可要求补 `measured`。
+- **引用**：`relayed` / `unknown` **不得**作为另一条事实的 `evidence`（正文 `F3` 或 `factIds` 两条路径都拒，
+  错误文案直接给「补 measured」的写法）。没有这一步，一条转述会变成一条「已 settle」的事实。
+
+#### 三态判定（R4/D2）
+
+```
+localState = { repo: HEAD(工作区), env: .env sha1 前 8 位, facts: ledger.epoch }
+compare(basedOn):
+  缺失                      → fresh + [基线未知]        （D2：不是 stale，不制造无法处置的告警）
+  repo/env/facts 都相同     → fresh
+  有一侧落后（值不同 / epoch 更小） → stale
+  两侧各有超前（如 facts 更新、repo 更旧） → conflict    （本版只标记；0.9.5 才开决策）
+```
+
+- **hash 无法排序**：值不同按「我这边更新」处理（保守读法），并且只有**同时**出现 ahead + behind 才算
+  `conflict`——两串不同 commit 不会单独变成冲突。
+- 收端不认识 key（没见过的仓库）**跳过**，不猜。
+- `stale` 注入附一句（每轮 ≤1 行）：
+
+```
+[stale] 本条基于 <commit>，你已到 <commit2>；只回增量（≤30% 原文），不要重述已作废事实
+```
+
+- `conflict` 只注入 `[conflict] 基线分叉（本条 …，本地 …）—— 先各自报增量，0.9.5 会开决策`，**不自动开决策**。
+- `[基线未知]` 标在消息行前（D2），与 `[未标注]` 可同时出现：一个说「不知道等级」，一个说「不知道基线」。
+
+#### 注入（每段 ≤1 行，四段预算不变）
+
+| 行 | 何时 | 内容 |
+| --- | --- | --- |
+| `[settled:F#]` | 本工作区新 settle 的事实，每会话只播一次（seen 集合） | `claim（grade · evidence）` |
+| `[retracted:F#→F#]` | retract / invalidate 后，每会话只播一次 | 根 → 派生（多条时附「另有 N 条作废」） |
+| `[未标注]` | 收到的消息 `grade=unknown` | 消息行前缀 |
+| `[基线未知]` | 收到的消息没有 `basedOn`（D2） | 消息行前缀 |
+| `[stale]` / `[conflict]` | `basedOn` 落后 / 分叉 | 消息行标记 + 每轮各 ≤1 行指令 |
+| `[glossary]` | 本会话参与的会话对已有术语 | 一行摘要（最多 5 条） |
+
+- 事实行**每轮重算**（不写 `injected[]`），只用每会话的 seen 集合去重；`markFactSeen` 在 block **push 成功之后**
+  才写（注入失败下轮重试）。
+- 四段 `[mission]/[todo]/[drift]/[progress]` 的 12 行预算**不变**；事实/术语行是同一 block 之外的独立段。
+
+#### 在途失效（R5）
+
+`invalidate` 成功后扫描契约文件：`todos[].ref.factId` 命中被作废事实的 **open** 行加 `staleWork: true`，
+`[todo]` 行尾标 **`⚠失效`**、`collab_todo list` 同时显示 `依据 F#`。**不自动关闭**——替人决定「这条不用做了」
+是另一种数据丢失。`ref.factId` 由 `collab_todo { action:"add", factId }` 写入。
+
+#### glossary（R6）
+
+每个会话对（`from+to` 排序后）维护 3–10 条术语（`~/.config/opencode/collab-glossary.json`，
+`COLLAB_GLOSSARY_FILE` 可覆盖）：
+
+```
+collab_send { target, text, glossary:{ define:{ term:"状态", meaning:"读后立即" } }, confirm:true }
+collab_send { target, text, glossary:{ conflict:["状态"] }, confirm:true }
+```
+
+- 同一术语第 **2** 次冲突且没有「上一次冲突之后」的新定义 → **拒绝发送**（0 写入），要求先定义；
+  `define` 与 `conflict` 同一条消息里给齐则放行（一次定义 = 正是 R6 要的动作）。
+- 定义会覆盖旧定义；每对上限 10 条；注入只取最新活动的会话对，1 行。
+
+#### 偏差与边界（如实记录）
+
+| # | 事项 | 现状 |
+| --- | --- | --- |
+| 1 | 设计 §4 的派生公式 `basedOn.facts <= sinceEpoch` | 只用于 `invalidate {since: epoch}`；`since: F#` 用**显式引用闭包**。套用公式到单个 id 会作废同 epoch 的全部无关事实（过度撤回会让真事实也被标死） |
+| 2 | `facts` 表（SQLite） | **0.9.4 不投影**：真源是 `collab-facts.json`；`collab_index stats` 显示 `facts=0（真源在 collab-facts.json）` |
+| 3 | repo / env 的先后 | 没有任意 commit 的祖先判定：值不同按「落后」；只有同时 ahead+behind 才 `conflict` |
+| 4 | 契约没有 workspace 字段 | `staleWork` 扫描按 **factId** 匹配所有契约文件（不按工作区过滤），只动机命中 `ref.factId` 的行 |
+| 5 | `[未标注]` / `[基线未知]` 的噪声 | 这是**故意可见的债**：旧消息 / CLI 消息没有元数据，标记它们正是 R2 的验收项 |
+| 6 | `conflict` 不开决策 | 本版只标记 + 注入；0.9.5 的 `collab_decide` 负责开单 |
+
+#### 配置 / 回滚
+
+```ts
+FACTS_FILE      = ~/.config/opencode/collab-facts.json   // COLLAB_FACTS_FILE
+GLOSSARY_FILE   = ~/.config/opencode/collab-glossary.json // COLLAB_GLOSSARY_FILE
+FACTS_LIMIT     = 2000      // 永久账本上限（非 active 先淘汰）
+STALE_REPLY_RATIO = 0.3     // stale 回复的增量预算（只写进注入文案）
+```
+
+回滚：`git restore -- src/core/messages.ts src/core/storage.ts src/core/contract.ts src/hooks/context.ts src/tools/{index,send,reply,todo,store,shared}.ts`、
+`rm -f src/core/facts.ts src/core/tri-state.ts src/core/glossary.ts src/tools/fact.ts test/facts.mjs`、
+`rm -f ~/.config/opencode/collab-facts.json ~/.config/opencode/collab-glossary.json`；
+从 `package.json` 的 `test` 链里移除 `node test/facts.mjs`。
+
+#### 验收
+
+`test/facts.mjs`（74 项）：27 个工具 · settle/list（id 连续、grade 必填、`unknown` 可见、同 claim 覆盖）·
+relayed/unknown 引用被拒（正文与 `factIds` 两条路径）· retract（state / reason / 当日计数 / 不可重复）·
+invalidate F#（根 + 派生 superseded、epoch+1、幂等 no-op、`[retracted:F2→F6]` 工作区级传播）·
+invalidate epoch（`basedOn.facts <= epoch`）· 三态 fresh/stale/conflict/无基线（D2）· `[未标注]` / `[stale]`（≤30% 文案）/
+`[基线未知]` / `[conflict]` 注入 · `[settled]` 每会话只播一次 · 在途 todo 标 `staleWork` + `⚠失效` 且不关闭 ·
+glossary（定义、第 2 次冲突拒绝、define+conflict 放行、一行注入）· 发送元数据 `grade` / `factIds` / `basedOn`
+（缺省 `unknown`，信封同）。
+**变异（强制）**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（实测退出码 1）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

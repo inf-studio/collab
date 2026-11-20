@@ -651,6 +651,14 @@ export interface InboxMessage {
   text: string;
   ts: number;
   delivered?: boolean;
+  /**
+   * 0.9.4 (D5/R4): the sender's declared evidence grade and baseline. Kept next
+   * to the body so the injection can mark `[未标注]` / `[stale]` without
+   * re-reading the JSONL archive; absent = unknown / no baseline (D2).
+   */
+  grade?: string;
+  basedOn?: { repo?: Record<string, string>; env?: Record<string, string>; facts: number };
+  factIds?: string[];
   [key: string]: any;
 }
 
