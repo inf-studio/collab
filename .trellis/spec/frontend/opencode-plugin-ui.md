@@ -168,6 +168,46 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   `run()` 在任何 `await` **之前**捕获目标 sid——否则对话框开着时切换，动作会落到新会话。
 - `boardActions:false` 只隐藏按钮，RPC 仍可用（文档写清）。
 
+## 2.13 会话契约 / 五段注入 / 闸门 / 漂移（0.9.x）
+
+### 契约真源
+- `~/.config/opencode/collab-contract/<sid>.json`，五面 `mission / plan / todos / peers`（+ `turn` 计数位）。
+- `mission.confirmedBy` 一旦写入，`set` 必须带 `--reconfirm` 且 `by` 非空，否则拒绝——**自动推断永不覆盖人工确认**。
+- 主线锚解析顺序：会话指针 → 同工作区唯一 `in_progress` 任务 → 空（标 `[未确认]`）。**不要**用会话标题猜。
+
+### 五段注入（硬上限 12 行）
+固定顺序累加，超限即停，被截断的段落**不出现**：
+
+```
+[mission] ≤3  [todo] ≤4  [drift] ≤2  [scope] ≤2  [progress] ≤2
+```
+
+- **每轮重算、不注销**：绝不写 `injected[]`（这是 0.5.x 一次性注入的教训——展示过就永久消失）。
+- `[todo]`：`N open · M 需要你 · K 等对方` + top3（`blockingOn=me` 优先，其次最老 `since`）。
+- `[scope]`：仅当本条消息命中 `mission.outOfScope` 时出现，必须给出「转交/拒绝/问 owner」三条路。
+- `[drift]`：仅触发时出现（连续 5 轮无 evidence，或挂起 >2h，或 suspended 超 24h）。
+- 插件**没有 idle 钩子**：`[未收尾]` 靠下一轮回溯判定，不要在文档里承诺 idle 写入。
+
+### 闸门（只拦协作层）
+- 拦 `accept`（越界/溢出）与 `broadcast|handoff`（溢出）；**`reply|send` 永不校验 scope**（回复不扩大边界）。
+- `outOfScope` 为空 = 永不越界（误伤 0）；`gate:'warn'|'off'` 是回滚开关。
+- override 必须 `{reason, approvedBy}`，`approvedBy` 不得以 `ses_` 开头，通过后写 `collab-audit.jsonl`。
+- **诚实边界**：拦不住 bash 层跨仓写；文档不得暗示能拦。
+
+### 漂移三选一
+- `resume`（给下一步）/ `block`（给 on+reason，转 suspended）/ `done`（**必须已有 mainline next-up todo**）。
+- 未处置 → 下一轮 `[drift]` 加 `[未处置]`；挂起必须 `wakeWhen`，`kind:'time'` 必须 `at > now`。
+
+### 投递节奏
+- 非紧急消息进 2min 窗口合并；`escalate` / `blocked` / protected 直通（<10s）。
+- 无增量（无新事实、无状态变化、非回答）→ **不产生消息**，只写 `collab_status`。
+- 时效承诺 ≤5min；超时记 `metrics.late_count`，不重发。
+
+### 存储
+- JSON 是唯一真源（`collab-messages.jsonl` 存全文，超 1MB 分片）；`collab.db` 是**可重建投影**，删了不影响协作。
+- 索引失败只记日志，**不得阻断投递**；`rebuild` 必须幂等（两次 checksum 相同）。
+- `node:sqlite` / `bun:sqlite` 动态 import + 探测；`storage:'json'` 时**一次也不得 import**。
+
 ## 3. 只读是硬约束
 
 状态面板/计数条/侧栏**不得**出现写动作（释放锁、归档、改权限）。点击只允许

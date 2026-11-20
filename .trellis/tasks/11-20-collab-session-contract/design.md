@@ -106,6 +106,17 @@ CREATE TABLE metrics     (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count IN
 - **任何 DB 异常 → 降级纯 JSON**：工具仍可用，看板显示 `[索引不可用]`；
 - GUI 入口不 import 存储模块（`--conditions=browser` 下不得触发）。
 
+**spike 结论（2026-11-20，/tmp/opencode/sqlite-spike）**：
+
+| 检查 | 结果 |
+|---|---|
+| `vp pack` 打包 | ✅ 成功，`import("bun:sqlite")` / `import("node:sqlite")` **原样保留**，无 external 报错 |
+| node 运行时 | ✅ 建库 / 写入 / 查询 / FTS5 MATCH 命中 |
+| bun 运行时 | ✅ 同上 |
+| JSON 模式 | ✅ `sqliteImported:false`，懒加载，从不 import |
+
+→ 走推荐路径（双后端）；`bun-only+Node 降级` 作为失败退路保留未启用。`engines.node >= 22.18` 下 `node:sqlite` 无需 `--experimental-sqlite`（22.13+ 已解除 flag）。
+
 ### 2.5 回填（D 轮决策：状态级）
 
 - 24 条 handoff → `handoffs`；49 条 thread 索引 → `threads`；
