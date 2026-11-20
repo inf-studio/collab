@@ -228,6 +228,16 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - 评估 / 写入都在 `context` hook：读 → `evaluate` → 渲染 → 串行 `stampTurn` + `markDrifted`（一次写）。
 - `[drift]` ≤2 行；四段上限之和 11，生产预算 12 下截断分支不可达（测试用 `renderInjection {maxLines}` 驱动）。
 
+### 事实账本（0.9.4）
+- 存储：`collab-facts.json` 是**全机单文件**、按 `workspaces[dir]` 分区；读改写必须外套 `<file>.lock`（`wx` + 60s 陈旧 + pid 存活检查）。`tmp+rename` 只保证原子性，**不保证互斥**——不加锁的双进程并发会静默丢对方整本账（实测 `lost=20~25/50`，两边 exit 0）。
+- 锁预算：`attempts = delays.length + 1`（与 `withRetry` 同约定），并且**每个退避必须真的被消费**；正常竞争靠事件驱动等待（`fs.watch` + 25ms 兜底轮询），不要靠"多试几次"硬抢。
+- 基线快照（`git rev-parse` / `.env` sha1）必须在**锁外**计算并按目录缓存（5s）：放在锁内会把持锁时间拉到几十毫秒，锁几乎不空闲，突发写会饿死。
+- `release()` 只删「可读且 token 完全匹配」的锁；读不到内容 → 不删（交给陈旧回收），否则会误删被接管者的锁。
+- 派生作废：`invalidate {since:F#}` 走 `factIds` **显式引用闭包**；只有 `since:<epoch>` 才用 `basedOn.facts <= epoch`。两者混用会把同 epoch 的无关事实一起作废。
+- `staleWork` 必须按 `workspace` 过滤：`F#` 在每个工作区从 `F1` 重新编号，跨区同名是必然而不是巧合。
+- `metrics.retracted` 要计 `settle` 覆盖（design 口径是 retract + supersede）；`retract` 不得清空已有 `supersededBy`。
+- 「stale 回复 ≤30% 原文」是**行为约定，不是闸门**（插件不生成模型回复，无法机器判定）：只保证注入逐字带指令，并把每次 stale 投递记入 `metrics.staleDeliveries` 供人工抽检。
+
 ### 投递节奏
 - 非紧急消息进 2min 窗口合并；`escalate` / `blocked` / protected 直通（<10s）。
 - 无增量（无新事实、无状态变化、非回答）→ **不产生消息**，只写 `collab_status`。
