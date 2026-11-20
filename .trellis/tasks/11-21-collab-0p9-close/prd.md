@@ -16,6 +16,8 @@
 - **R2 覆盖范围可见**：`collab_index stats` 输出「metrics 覆盖 <首日>–<末日>」；无数据时写 `无`，不伪造。
 - **R3 mac 机验清单**：重启 Desktop → `collab:active:v0.9.6` → `collab_index stats` 可用 → 看板出现契约徽标（有契约的会话）。
 - **R4 24h 对比表**：拉 `metrics` 当日数据，与 11-20 基线并排，≥3 项指标；不足 24h 必须标「不足」。
+- **R5 测试健壮性（本批顺带）**：`test/pacing.mjs` 的「不创建真实 `collab-pacing.json`」断言在**插件运行中**会误红
+  （文件本来就存在）。改为**前后快照比较**（size+mtime 不变），与 0.9.0 的 B1 隔离断言同一写法。
 
 ## 验收
 
