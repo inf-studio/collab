@@ -22,8 +22,8 @@
  * Runs in its own process with temp broadcast/grant dirs, so it never touches
  * `~/.config/opencode/collab-*`.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'collab-readonly-'));
@@ -40,6 +40,26 @@ process.env.COLLAB_LOCK_DIR = join(dir, 'locks');
 process.env.COLLAB_THREAD_INDEX_FILE = join(dir, 'collab-threads.json');
 // 0.6.0: the freeze file is global too — never write the operator's real one.
 process.env.COLLAB_FREEZE_FILE = join(dir, 'freeze.json');
+// B1 (0.9.0 review): the message log / projection are global too. Without these
+// two, any prompt in this suite lands in the operator's real history.
+const realMessagesFile = join(homedir(), '.config', 'opencode', 'collab-messages.jsonl');
+const realDbFile = join(homedir(), '.config', 'opencode', 'collab.db');
+const realStamp = () => {
+  const statOf = path => {
+    try {
+      const stat = statSync(path);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return 'absent';
+    }
+  };
+  return `${statOf(realMessagesFile)}|${statOf(realDbFile)}`;
+};
+const realStampBefore = realStamp();
+process.env.COLLAB_MESSAGES_FILE = join(dir, 'collab-messages.jsonl');
+process.env.COLLAB_DB_FILE = join(dir, 'collab.db');
+process.env.COLLAB_OWNER_QUEUE_DIR = join(dir, 'owner-queue');
+process.env.COLLAB_AUDIT_FILE = join(dir, 'collab-audit.jsonl');
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const plugin = (await import(`file://${entry}`)).default;
@@ -147,7 +167,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the twenty-two collab_* tools + collab_report',
+  'R8 the package registers the twenty-three collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -171,7 +191,8 @@ expect(
       'collab_lock',
       'collab_unlock',
       'collab_locks',
-      'collab_archive'
+      'collab_archive',
+      'collab_index'
     ].join(','),
   readonlyHost.tools.map(definition => definition.name).join(',')
 );
@@ -284,6 +305,12 @@ expect(
   'R8 an empty readonlyAgents list cannot un-force queue for explore',
   forcedQueue.includes('queue(forced)'),
   forcedQueue.split('\n')[0]
+);
+
+expect(
+  'B1 this suite never writes the real ~/.config collab-messages.jsonl / collab.db (mtime + size unchanged)',
+  realStamp() === realStampBefore,
+  `${realStampBefore} → ${realStamp()}`
 );
 
 const failed = checks.filter(check => !check.ok);

@@ -25,6 +25,7 @@
 import { BCAST_DONE_STATES, STORAGE_ALIASES, THREAD_STATUS_MESSAGES, THREAD_SUMMARY_CHARS } from '../constants.ts';
 import { deliveryOf, unackedDue } from '../core/ack.ts';
 import { allBroadcasts, isValidBid, leaseVerdict, readBroadcast } from '../core/claim.ts';
+import { preferredBroadcasts, preferredHandoff } from '../core/index-sync.ts';
 import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
 import { fmtTtl } from '../core/locks.ts';
@@ -420,7 +421,10 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       // (`collab.json` + the stored one `resolveTarget` uses).
       const session = sessionInput ? await resolveSession(ctx, config.aliases, sessionInput) : '';
 
-      const records = allBroadcasts();
+      // R5: the projection when it is current, the JSON truth otherwise. The
+      // record objects are identical (the projection keeps `record_json`), so
+      // this view cannot tell which path answered.
+      const records = (await preferredBroadcasts()) ?? allBroadcasts();
       const lineage = createLineage(ctx);
       const mineCache = new Map<string, OwnerQueueItem[]>();
       const mineOf = (sid: string): OwnerQueueItem[] => {
@@ -450,7 +454,7 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       let picks: Pick[];
 
       if (bid) {
-        const record = readBroadcast(bid);
+        const record = (await preferredHandoff(bid)) ?? readBroadcast(bid);
         if (!record) {
           throw invalid(
             `没有交接单 ${bid}：bid 可能拼错，或该单已闭环且过了 7 天保留期被回收。可用 collab_list 看全量。`
@@ -466,7 +470,9 @@ export function statusTool(kit: ToolKit): ToolDefinition {
           const entry = threadEntry(threadID);
           const thread = await deps.threads.read(threadID);
           if (entry || thread) {
-            const related = entry?.bid ? readBroadcast(entry.bid) : undefined;
+            const related = entry?.bid
+              ? ((await preferredHandoff(entry.bid)) ?? readBroadcast(entry.bid))
+              : undefined;
             return {
               content: [
                 messageThreadBlock({ threadID, entry, thread, record: related, me }),

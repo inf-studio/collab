@@ -13,6 +13,7 @@ import { requestOwnerTool } from './owner-queue.ts';
 import { promoteTool } from './promote.ts';
 import { replyTool } from './reply.ts';
 import { reportTool } from './report.ts';
+import { indexTool } from './store.ts';
 import { sendTool } from './send.ts';
 import type { ToolKit } from './shared.ts';
 import { statusTool } from './status.ts';
@@ -57,7 +58,9 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     lockTool(kit),
     unlockTool(kit),
     locksTool(kit),
-    archiveTool(kit)
+    archiveTool(kit),
+    // 0.9.0 (`11-20-collab-store`): the storage/projection commands, 22 → 23.
+    indexTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

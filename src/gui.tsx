@@ -85,7 +85,7 @@ const PANEL_TAB = 'main';
  * where neither exists. It appears in exactly one place (the probe toast's
  * description); `test/gui-entry.mjs` asserts all three agree.
  */
-const PLUGIN_VERSION = '0.8.2';
+const PLUGIN_VERSION = '0.9.0';
 
 /** What the probe calls the app's own server: there is no `ServerRef.id` to show. */
 const LOCAL_SERVER = 'this computer';
@@ -1541,6 +1541,14 @@ function PanelView(props: { session: { id: string } }) {
           <span class="collab-mono">{store.state.error}</span>
         </div>
       </Show>
+      {/* 0.9.0 (`11-20-collab-store`, R4): the projection is a cache. A bad or
+          missing `collab.db` degrades only this marker — every row above still
+          comes from the JSON truth, so nothing is hidden by a broken index. */}
+      <Show when={store.state.data?.index && store.state.data.index.available === false}>
+        <div class="collab-source collab-mono collab-muted" title={store.state.data?.index?.reason ?? ''}>
+          {ctx.t('panel.indexUnavailable')} {store.state.data?.index?.reason ?? ''}
+        </div>
+      </Show>
       <Show
         when={store.state.data}
         fallback={
@@ -1720,6 +1728,7 @@ export default Plugin.define({
       'panel.empty': 'No collaboration activity.',
       'panel.loading': 'Loading…',
       'panel.unreachable': 'server unreachable',
+      'panel.indexUnavailable': '[index unavailable]',
       'panel.remaining': 'left {{ttl}}',
       'panel.updated': 'updated {{time}}',
       'panel.readonly': 'read-only views · actions ask first',
@@ -1812,6 +1821,7 @@ export default Plugin.define({
       'panel.empty': '没有协作活动。',
       'panel.loading': '加载中…',
       'panel.unreachable': 'server 不可达',
+      'panel.indexUnavailable': '[索引不可用]',
       'panel.remaining': '剩余 {{ttl}}',
       'panel.updated': '更新于 {{time}}',
       'panel.readonly': '视图只读 · 动作需确认',

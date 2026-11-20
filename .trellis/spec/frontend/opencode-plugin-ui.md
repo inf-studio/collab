@@ -207,6 +207,13 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - JSON 是唯一真源（`collab-messages.jsonl` 存全文，超 1MB 分片）；`collab.db` 是**可重建投影**，删了不影响协作。
 - 索引失败只记日志，**不得阻断投递**；`rebuild` 必须幂等（两次 checksum 相同）。
 - `node:sqlite` / `bun:sqlite` 动态 import + 探测；`storage:'json'` 时**一次也不得 import**。
+- **`rebuild` 必须写 `meta.schema='1'`**：就绪判据 `hasSchema()` = `schema` 标记 **或** 任一表有真实行；`stats.available` 与 `readable()` 必须同口径（实测过「rebuild 后看板永远回落、stats 却报可用」）。
+- **只读路径不得建库**：`readable()` 先 `existsSync`；`openDb` 一开就会建库，漏了这道守卫会让一次 `collab_status` 产出 `collab.db` + `-shm`/`-wal`，并让后续每次写刷 mirror 错误。
+- **水位按源分开**（`synced_broadcasts / synced_locks / synced_queue / synced_threads`）。全局 `synced_at` 会让「他人写 A + 本地 mirror B」把 A 的陈旧行当新鲜供出（实测看板丢掉仍生效的 lease）。
+- **mirror 在写路径之外**（入队 + 0ms 合并）：写广播不得等 `busy_timeout`；等待期间读者按 mtime 回落 JSON。
+- `messages.resend_of` 标记重发行（`_r<n>`）；统计消息数时必须排除，否则重发会被重复计数。
+- `messages_fts` 截的是 **8192 字符**（CJK ≈ 24KB），不是 8KB 字节；文档不要写成字节。
+- `backfill` 只写 `meta.backfilled`，**不造 `messages` 行**（历史正文不可得；造空行会污染计数与 FTS）。
 
 ## 3. 只读是硬约束
 

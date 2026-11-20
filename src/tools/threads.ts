@@ -30,6 +30,7 @@ import {
   THREADS_MAX
 } from '../constants.ts';
 import { allBroadcasts } from '../core/claim.ts';
+import { preferredBroadcasts } from '../core/index-sync.ts';
 import { invalid } from '../core/errors.ts';
 import { threadsFor } from '../core/thread-index.ts';
 import { normalizeThreadID } from '../ids.ts';
@@ -168,7 +169,7 @@ export function threadsTool(kit: ToolKit): ToolDefinition {
       }
       // ② every hand-off record that names this counterpart — an index entry is
       // only written from 0.7.0 on, so old/foreign threads must still show up.
-      const records = allBroadcasts().filter(record => {
+      const records = ((await preferredBroadcasts()) ?? allBroadcasts()).filter(record => {
         const threadID = normalizeThreadID(record.threadID);
         if (!threadID) return false;
         return String(record.from?.sid ?? '') === sid || String(record.claim?.by ?? '') === sid;

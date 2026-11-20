@@ -64,6 +64,8 @@ import {
 import { createLineage } from './lineage.ts';
 import { fmtTtl } from './locks.ts';
 import { enqueue, listFor, queueDir, queueID } from './owner-queue.ts';
+import { recordMessage } from './index-db.ts';
+import { makeEnvelope } from './envelope.ts';
 
 /* ----------------------------------------------------------------- contract */
 
@@ -477,6 +479,19 @@ export async function escalateAction(actions: ActionContext, input: EscalateInpu
     // never a generic `Error` (the wrapper in `tools/shared.ts` did this before).
     throw deliveryFailure(error);
   }
+  // 0.9.0 (R1): every admitted delivery is a message too (`kind:"notify"`), so
+  // the history is complete without changing this action's result. Best-effort.
+  await recordMessage(
+    makeEnvelope({
+      id: `msg_${cid}`,
+      ...(record?.threadID ? { threadId: record.threadID } : {}),
+      from: me,
+      to: targetSid,
+      sentAt: now,
+      kind: 'notify',
+      body: urgentBody
+    })
+  );
   // R3: what the host really did — `steer` on an idle target degrades to `queue`.
   const actual = String(admitted?.delivery ?? mode);
   const marked = markUrgent(record, { at: Date.now(), reason, by: me });
@@ -631,6 +646,10 @@ export async function freezeAction(actions: ActionContext, input: FreezeInput): 
             }
           }
         });
+        // 0.9.0 (R1): the freeze notice is a delivered message (`notify`).
+        await recordMessage(
+          makeEnvelope({ id: `msg_${cid}`, from: me, to: sid, sentAt: at, kind: 'notify', body })
+        );
         receipts.push({ to: sid, cid, ...(admitted?.id ? { messageId: String(admitted.id) } : {}), at });
       } catch (error) {
         receipts.push({ to: sid, cid, at, error: errText(error) });

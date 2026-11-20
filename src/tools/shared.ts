@@ -12,6 +12,8 @@ import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
 import { allBroadcasts, mergeDelivery, readBroadcast, writeBroadcast } from '../core/claim.ts';
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
+import { recordMessage } from '../core/index-db.ts';
+import { makeEnvelope } from '../core/envelope.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
@@ -707,6 +709,25 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       }
     });
 
+    // 0.9.0 (`11-20-collab-store`, R1/R2): the message history — JSONL first
+    // (the truth, full body), then the rebuildable SQLite projection. Both are
+    // side paths: the host already admitted the message, so a history failure is
+    // logged and can never turn a successful delivery into an error (R7). The
+    // `id` derives from the delivery `cid`, so a repeat of the same delivery
+    // (a re-sent `deliverAsk`) is one row, not two.
+    await recordMessage(
+      makeEnvelope({
+        id: `msg_${cid}`,
+        threadId: threadID,
+        from: context?.sessionID ?? from,
+        to: sessionID,
+        sentAt: admittedAt,
+        kind,
+        body
+      }),
+      { dbPath: config.dbPath, storage: config.storage }
+    );
+
     const thread = threadID
       ? await threads.update(threadID, current =>
           appendThreadMessage(current, {
@@ -885,6 +906,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     // Same message, same cid — a wake / spawn / resend is not a new message.
     const cid = previous.to === target && previous.cid ? String(previous.cid) : newCorrelationID();
     const at = Date.now();
+    const askBody = takeoverBody({ record: current, wake, spawn });
     const base = {
       ...previous,
       cid,
@@ -901,7 +923,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           name,
           kind: 'request',
           threadID,
-          body: takeoverBody({ record: current, wake, spawn })
+          body: askBody
         }),
         delivery: 'queue',
         metadata: {
@@ -915,6 +937,21 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           }
         }
       });
+      // 0.9.0 (`11-20-collab-store`, R1): the takeover request is a message too
+      // — one envelope per `cid`, so a wake / resend of the same hand-off does
+      // not grow the history (the `id` is derived from that reused `cid`).
+      await recordMessage(
+        makeEnvelope({
+          id: `msg_${cid}`,
+          threadId: threadID,
+          from: requester || from,
+          to: target,
+          sentAt: at,
+          kind: 'request',
+          body: askBody
+        }),
+        { dbPath: config.dbPath, storage: config.storage }
+      );
       // F1 (review): merge into the *current* record — this write happens after
       // an `await`, so a concurrent `seenAt` (the receiver's `[ack]`) must not
       // be overwritten by the pre-await snapshot.

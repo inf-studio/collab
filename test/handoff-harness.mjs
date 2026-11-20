@@ -241,7 +241,7 @@ import {
   writeFileSync
 } from 'node:fs';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 // The repo root (for the docs assertions of S38/S43). The published package
 // may live outside a Trellis checkout, in which case those two documentation
@@ -250,6 +250,30 @@ const repo = resolve(import.meta.dirname, '../..');
 const hasRepoDocs = existsSync(join(repo, 'docs/collab.md'));
 const dir = mkdtempSync(join(tmpdir(), 'collab-harness-'));
 const distEntry = resolve(import.meta.dirname, '../dist/index.js');
+
+// B1 (0.9.0 review): the harness used to write the **real** message log and
+// projection (`~/.config/opencode/collab-messages.jsonl` / `collab.db`) because
+// 0.9.0 introduced two new global paths and this file was not updated — one
+// `pnpm test` left 616 fixture messages behind. Both are now temp paths, like
+// every other global store here, and the real pair is asserted unchanged at the
+// end of the run (see "B1" below).
+const realMessagesFile = join(homedir(), '.config', 'opencode', 'collab-messages.jsonl');
+const realDbFile = join(homedir(), '.config', 'opencode', 'collab.db');
+const realStampBefore = (() => {
+  const statOf = path => {
+    try {
+      const stat = statSync(path);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return 'absent';
+    }
+  };
+  return `${statOf(realMessagesFile)}|${statOf(realDbFile)}`;
+})();
+const messagesFile = join(dir, 'collab-messages.jsonl');
+process.env.COLLAB_MESSAGES_FILE = messagesFile;
+const dbFile = join(dir, 'collab.db');
+process.env.COLLAB_DB_FILE = dbFile;
 
 // The broadcast store is a global directory; point it at a temp dir so the
 // harness never touches ~/.config/opencode/collab-broadcast/.
@@ -9268,8 +9292,8 @@ await expectFail(
 
 // --- S98n: registered exactly once; the description states the contract.
 expect(
-  'S98 collab_freeze is registered exactly once (19 → 20 → 21 → 22 tools)',
-  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 22,
+  'S98 collab_freeze is registered exactly once (19 → 20 → 21 → 22 → 23 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 23,
   `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
 );
 const s98Desc = String(tool('collab_freeze').description);
@@ -10838,8 +10862,8 @@ expect(
 
 // --- S102j: registered exactly once; the surface is 21 tools; description states the contract.
 expect(
-  'S102 collab_threads is registered exactly once and the surface is 22 collab_* tools',
-  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 22,
+  'S102 collab_threads is registered exactly once and the surface is 23 collab_* tools',
+  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 23,
   `${tools.length} tools / ${tools.filter(definition => definition.name === 'collab_threads').length} collab_threads`
 );
 const s102Desc = String(tool('collab_threads').description);
@@ -11318,14 +11342,14 @@ expect(
 const s105SendSchema = tool('collab_send').input.properties.blocked;
 const s105HandoffSchema = tool('collab_handoff').input.properties.blocked;
 expect(
-  'S105 collab_send / collab_handoff 都声明了 blocked（need/excluded/minimalTest），工具面 22 个',
+  'S105 collab_send / collab_handoff 都声明了 blocked（need/excluded/minimalTest），工具面 23 个',
   Boolean(s105SendSchema) &&
     Boolean(s105HandoffSchema) &&
     s105SendSchema.properties.excluded.items.type === 'string' &&
     /≤20 条/.test(String(s105SendSchema.properties.excluded.description)) &&
     /≤10 条/.test(String(s105SendSchema.properties.need.description)) &&
     /≤200 字/.test(String(s105SendSchema.properties.minimalTest.description)) &&
-    tools.length === 22,
+    tools.length === 23,
   `${tools.length} tools / ${JSON.stringify(Object.keys(s105SendSchema?.properties ?? {}))}`
 );
 
@@ -12159,6 +12183,25 @@ expect(
 // Cleanup: S108 fixtures (records / freeze / archive state / sessions).
 rmSync(join(ownerQueueDir, S108_PROT), { recursive: true, force: true });
 for (const sid of [S108_ME, S108_PEER, S108_RO]) delete sessions[sid];
+
+// B1: a full suite run must never create or touch the operator's real message
+// log / projection (the 0.9.0 regression: 616 fixture messages in ~/.config).
+const realStampAfter = (() => {
+  const statOf = path => {
+    try {
+      const stat = statSync(path);
+      return `${stat.size}:${stat.mtimeMs}`;
+    } catch {
+      return 'absent';
+    }
+  };
+  return `${statOf(realMessagesFile)}|${statOf(realDbFile)}`;
+})();
+expect(
+  'B1 the harness never writes the real ~/.config collab-messages.jsonl / collab.db (mtime + size unchanged)',
+  realStampAfter === realStampBefore,
+  `${realStampBefore} → ${realStampAfter}`
+);
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

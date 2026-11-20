@@ -11,6 +11,7 @@ import {
   LOCK_WAITER_TTL_MAX_MS,
   LOCK_WAITER_TTL_MIN_MS
 } from './constants.ts';
+import { homedir } from 'node:os';
 import type { CollabConfig } from './types.ts';
 import { asObject, clamp, dedupe, mtime, readJsonFile } from './util.ts';
 
@@ -124,6 +125,19 @@ export function loadConfig(options: unknown): CollabConfig {
   const rawBoardActions = file.boardActions ?? fromOptions.boardActions;
   const boardActions = typeof rawBoardActions === 'boolean' ? rawBoardActions : DEFAULTS.boardActions;
 
+  // 0.9.0 (`11-20-collab-store`, R4): the storage mode. Only the exact string
+  // `json` turns the projection off — a typo (`"jsom"`, `false`, `0`) falls back
+  // to `sqlite` instead of silently changing where the truth lives. `dbPath`
+  // must be a non-empty string for the same reason (a bad path would degrade
+  // every write to "index unavailable" without saying why).
+  const rawStorage = file.storage ?? fromOptions.storage;
+  const storage: 'sqlite' | 'json' = rawStorage === 'json' ? 'json' : DEFAULTS.storage;
+  const rawDbPath = file.dbPath ?? fromOptions.dbPath;
+  const dbPath =
+    typeof rawDbPath === 'string' && rawDbPath.trim()
+      ? rawDbPath.trim().replace(/^~(?=\/|$)/, homedir())
+      : DEFAULTS.dbPath;
+
   return {
     aliases,
     autoDeliver,
@@ -138,6 +152,8 @@ export function loadConfig(options: unknown): CollabConfig {
     dedupeWindowMs,
     awareness,
     boardActions,
+    storage,
+    dbPath,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

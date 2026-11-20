@@ -40,6 +40,12 @@
 | `collab_unlock`    | 释放**自己**持有的租约（`shared` 组只移除自己；无 force 抢占）             | 写本地租约        |
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
 | `collab_archive`   | 归档/恢复某个会话（**不是删除**）：`PATCH { archived }`，会话与消息保留；spawn 会话在交接终态 10 分钟后自动归档（可 `archiveSpawned:false` 关闭） | 写会话归档位      |
+| `collab_index`     | **消息历史 / 可重建索引（0.9.0）**：`stats` 只读看投影（12 表 + FTS5，行数/backend/大小/`backfilled`，不可用回 `[索引不可用]`）；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建（锁 + tmp → fsync → 原子 rename，**幂等**，失败保留旧库）；`backfill` 只补状态级历史（不伪造正文）。快照 / `collab_status` / `collab_threads` 在投影**新鲜**时优先读它，否则回落 JSON | 读/写本地投影     |
+
+0.9.0 起每条投递（`send` / `reply` / 接管请求 / 加急 / 冻结通知 / 回执通知 / ack / 受限重发 / 缺陷上报）
+都会在 `~/.config/opencode/collab-messages.jsonl` 留一行全文信封，并投影到可随时删除重建的 `collab.db`。
+投影只是缓存：读路径只在其 `synced_at` 不落后于任何源文件时使用，否则回落 JSON；删库不影响任何协作。
+另有 `collab_index { action:"rebuild"|"backfill"|"stats" }` 维护它。
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
@@ -252,6 +258,8 @@ opencode plugin remove @inf-studio/collab     # 包安装
   "dedupeWindowMs": 60000,
   "awareness": "line",
   "boardActions": true,
+  "storage": "sqlite",
+  "dbPath": "~/.config/opencode/collab.db",
   "report": { "to": "collab-maintainer" }
 }
 ```
@@ -270,6 +278,8 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `dedupeWindowMs` | `60000`            | 正文去重窗口：同一 **target**（或同一 thread）+ 归一化后同文在窗口内只投递一次（`force:true` 强制并标 `dedupeOverridden`）；**`0` 关闭**（回滚开关） |
 | `awareness`      | `"line"`           | **自动感知**提示：`context` 里每 10 分钟最多一行「本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）」；`"off"` = 0 行。只读、不写记录、不投递 |
 | `boardActions`   | `true`             | Desktop 面板右详情的动作行（加急/冻结/解冻/归档）。`false` **只隐藏按钮**（`snapshot.actions=false`），`collab.state.escalate\|freeze\|unfreeze\|archive` 仍可调；每次写动作追加一行 `~/.config/opencode/collab-audit.jsonl` |
+| `storage`        | `"sqlite"`         | 消息投影 `collab.db` 的开关。`"json"` = **一次也不 import** `node:sqlite` / `bun:sqlite`，全部工具与看板只读 JSON（看板显示 `[索引不可用]`，回滚开关）。写错的值回落 `"sqlite"` |
+| `dbPath`         | `~/.config/opencode/collab.db` | 投影路径（也可用 `COLLAB_DB_FILE`）。删掉它不影响协作，`collab_index {action:"rebuild",confirm:true}` 可重建 |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |
@@ -281,6 +291,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
+| `0.9.x` | `2.3.x`  | `>=22.18` | **0.9.0** 新增消息历史 + 可重建索引：每条投递写一行 `Envelope` 到 `collab-messages.jsonl`（全文，>1MB 分片），并投影到 `collab.db`（8 表 + FTS5，WAL）；新增 `collab_index`（`stats`/`rebuild`/`backfill`，22 → 23 个工具）；`storage:"json"` 回滚开关不 import sqlite；现有工具输出契约不变（读路径仍以 JSON 为真源，看板只多一个 `[索引不可用]` 标记） |
 | `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.3** 快照改为按「会话所属服务器」取 client（远端会话读远端 `server.client`，跨服务器切换不串台、迟到回包丢弃）+ 探针/面板标出数据源服务器 + 文档写明 Desktop 必须装在本机；**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
 | `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |

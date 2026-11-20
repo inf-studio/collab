@@ -34,6 +34,8 @@ import { isValidBid, readBroadcast } from './claim.ts';
 import { classify, metaOf } from './errors.ts';
 import type { DefectClass } from './errors.ts';
 import { createLineage } from './lineage.ts';
+import { recordMessage } from './index-db.ts';
+import { makeEnvelope } from './envelope.ts';
 
 export const REPORT_FROM = 'collab-report';
 
@@ -445,6 +447,7 @@ export function createReporter({ ctx, readConfig }: ReporterDeps): Reporter {
       const body =
         `[defect] ${evidence.signature} ${evidence.tool}/${evidence.class}: ` +
         `${evidence.error.message.split('\n')[0].slice(0, 160)} → ${files.md}`;
+      const cid = `c_${evidence.signature.slice(2, 10)}_${randToken()}`;
       await ctx.session.prompt({
         sessionID: sid,
         text: envelope({ from: REPORT_FROM, kind: 'note', body }),
@@ -455,12 +458,17 @@ export function createReporter({ ctx, readConfig }: ReporterDeps): Reporter {
             // The evidence keeps the short id (R2); the delivery carries the
             // full `ses_…` so the maintainer can reply with it directly.
             fromSessionID: reporterSessionID ?? evidence.context.from,
-            cid: `c_${evidence.signature.slice(2, 10)}_${randToken()}`,
+            cid,
             kind: 'note',
             ts: evidence.at
           }
         }
       });
+      // 0.9.0 (R1): the defect note is a delivered message (`kind:"note"`); the
+      // evidence file stays the primary artefact, this is only the history.
+      await recordMessage(
+        makeEnvelope({ id: `msg_${cid}`, from: REPORT_FROM, to: sid, sentAt: evidence.at, kind: 'note', body })
+      );
       return { signature: evidence.signature, files, delivered: true, reason: 'note 已投递' };
     } catch (error) {
       log(`report delivery failed (${sid}): ${errText(error)}`);

@@ -14,7 +14,15 @@
  */
 import { BCAST_DONE_STATES, MAX_LINEAGE_DEPTH } from '../constants.ts';
 import type { BroadcastRecord, FreezeEntry, LockRecord, OwnerQueueItem, SessionInfoLike } from '../types.ts';
-import type { Snapshot, SnapshotFreeze, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from '../rpc.ts';
+import type {
+  Snapshot,
+  SnapshotFreeze,
+  SnapshotHandoff,
+  SnapshotIndex,
+  SnapshotLock,
+  SnapshotQueueItem,
+  SnapshotSession
+} from '../rpc.ts';
 import { asObject, sessionState, truncate, withTimeout } from '../util.ts';
 import { freezeFor } from './freeze.ts';
 import { stateOf } from './locks.ts';
@@ -25,22 +33,32 @@ const SESSIONS_TIMEOUT_MS = 3000;
 export interface SnapshotSource {
   /** Sessions of one workspace (the chain's `listSessions`). */
   sessions(input: { directory?: string; limit?: number }): Promise<SessionInfoLike[]>;
-  /** Every lease on disk (`allLocks`, read-only). */
-  locks(): LockRecord[];
-  /** Every hand-off record on disk (`allBroadcasts`, read-only). */
-  handoffs(): BroadcastRecord[];
+  /**
+   * Every lease (read-only). 0.9.0 (R5): may be async — the index-preferred
+   * reader falls back to `allLocks()` when the projection is stale/absent.
+   */
+  locks(): Promise<LockRecord[]> | LockRecord[];
+  /** Every hand-off record (read-only; async for the same reason). */
+  handoffs(): Promise<BroadcastRecord[]> | BroadcastRecord[];
   /**
    * Owner-queue items one session submitted (`mineFor`, read-only). Optional:
    * a host / test that does not need the `queue` block simply omits it, and the
    * block stays empty — it is never an error.
    */
-  queue?(from: string): OwnerQueueItem[];
+  queue?(from: string): Promise<OwnerQueueItem[]> | OwnerQueueItem[];
   /**
    * Every **live** freeze (`readFreezes`, read-only). Optional for the same
    * reason as `queue`: omitted = no `frozen` / `freeze` markers at all, never an
    * error (an older server answers without them).
    */
   freezes?(): FreezeEntry[];
+  /**
+   * 0.9.0 (R4): can the projection be read? Optional and awaited once per
+   * snapshot: a host / test without the reader omits the marker entirely (an
+   * older server is not "degraded"). Read-only — the check must never create the
+   * database.
+   */
+  index?(): Promise<SnapshotIndex> | SnapshotIndex;
 }
 
 export interface SnapshotReader {
@@ -249,14 +267,12 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
         left.sid.localeCompare(right.sid)
     );
 
-  const leases = source
-    .locks()
+  const leases = (await source.locks())
     .map(record => toLock(record, now))
     .filter((lock): lock is SnapshotLock => Boolean(lock))
     .sort((left, right) => left.resource.localeCompare(right.resource));
 
-  const handoffs = source
-    .handoffs()
+  const handoffs = (await source.handoffs())
     .map(record => {
       const hit = freezes.length
         ? freezeFor(freezes, { bid: record.bid, workspace: record.workspace })
@@ -267,18 +283,28 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
     .filter(handoff => (workspace ? handoff.workspace === workspace : true))
     .sort((left, right) => right.ageMs - left.ageMs || left.bid.localeCompare(right.bid));
 
+  // 0.9.0 (R4): the projection verdict, display only. A throwing reader is
+  // "unavailable", never a failed snapshot — the board keeps every JSON row.
+  let index: SnapshotIndex | undefined;
+  if (typeof source.index === 'function') {
+    try {
+      index = await source.index();
+    } catch {
+      index = { available: false, reason: 'index status unavailable' };
+    }
+  }
+
   // The queue is *the caller's own*: no session named → no scan of every
   // target's directory, and no row that belongs to somebody else.
   const from = readSession(input);
   const queue = from && typeof source.queue === 'function'
-    ? source
-        .queue(from)
+    ? (await source.queue(from))
         .map(item => toQueueItem(item, now))
         .filter((item): item is SnapshotQueueItem => Boolean(item))
         .sort((left, right) => right.ageMs - left.ageMs || left.queueId.localeCompare(right.queueId))
     : [];
 
-  return { at: now, sessions, locks: leases, handoffs, queue, reachable: true };
+  return { at: now, sessions, locks: leases, handoffs, queue, ...(index ? { index } : {}), reachable: true };
 }
 
 export function createSnapshotReader(source: SnapshotSource): SnapshotReader {

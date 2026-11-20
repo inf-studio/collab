@@ -3,6 +3,60 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.0] - 2026-11-20
+
+> 消息终于存下来了：每条投递写一行 `Envelope`（全文），旁边维护一份**可删可重建**的 SQLite 投影；
+> 看板/状态优先读投影，投影不新鲜就回落 JSON。22 个工具的输出逐字不变，只多一个 `collab_index`。
+
+### Added
+
+- **`collab-messages.jsonl`（R1）**：append-only 真源，一行一个 `Envelope`。`body` 存**全文**；
+  单行按**编码后**（`JSON.stringify` 之后）≤1MB 分片——引号 / 换行 / CJK 的转义都算进去；
+  同 `id` + `part` 连续写、读时合并；每行带 `sha256`；超过 256MB 轮转为 `…-1.jsonl` / `-2` …。
+  坏行（非法 JSON / 半行 / 哈希不符）跳过并计数，绝不抛。
+- **`collab.db` 投影（R2/R5）**：12 张表 + `messages_fts`（FTS5，外部内容表）；`WAL` + `busy_timeout=5000`；
+  typed 列 + `*_json` 原始对象（`handoffs.record_json` / `locks.record_json` / `queue.item_json`）；
+  `messages.body` 全文、**FTS 只索引前 8192 字符**（CJK ≈ 24KB）；`messages.resend_of` 标记重发行；
+  CHECK 约束落地（grade / handoffs.state / threads.state /
+  facts.state / todos.status / decisions.status）；旧库用 `ALTER TABLE ADD COLUMN` 增量迁移。
+- **`collab_index` 工具（R3/R6）**：`stats`（只读）/ `rebuild`（tmp → checkpoint → `fsync` → 原子 rename；
+  幂等；失败保留旧库；默认最近 180 天）/ `backfill`（24 handoff / 49 thread + 当前 locks / queue；
+  正文不可得 → **不伪造 messages 行**，`meta.backfilled=1` 标记）。工具面 **22 → 23**。
+- **读路径切换（R5）**：快照的 locks / handoffs / queue、`collab_status`、`collab_threads` 先读投影；
+  需 `meta.full_sync_at` 存在且**该源自己的水位**（`synced_broadcasts/locks/queue/threads`）≥ 源文件 mtime，
+  否则回落 JSON。读路径不建库：库不存在时直接回落，磁盘上不会多出 `collab.db` / `-shm`。
+  `writeBroadcast` / `writeLock` / owner-queue 写穿镜像；索引 reader 与 JSON reader 逐字段相等（有变异证明）。
+- **消息覆盖**：`collab_escalate` / `collab_freeze` 通知（notify）· `notifyRequester`（note）· `[ack]`（ack，
+  同 cid 只写一次）· 受限重发（request，`_r<n>`）· 缺陷上报（note）六处投递补进历史。
+- **降级（R4）**：`storage:"json"` **一次也不 import** sqlite；库损坏 / 驱动异常 → 进程级熔断；
+  懒建库与 `rebuild` 都写 `meta.schema`（`stats.available` 与读者同一口径）；快照 `index:{available,reason?}` →
+  GUI / TUI 显示 `[索引不可用]`，不隐藏任何行。
+- **配置**：`storage`（默认 `"sqlite"`）/ `dbPath`（默认 `~/.config/opencode/collab.db`，支持 `~`，
+  也可用 `COLLAB_DB_FILE`）。
+
+### Changed
+
+- 投递成功后写历史（JSONL 先、索引后）；**索引失败不阻断投递**，真源写失败则跳过索引（S2）。
+- **mirror 异步**：写广播/租约/队列只入队，0ms 合并后由 `flushMirrors()` 应用——写路径不等 SQLite（S11）。
+- mirror 不清零 `frozen`（S9）；`rebuild` 在事务内补 `meta.schema`（P1-1）；只读路径绝不建库（P1-2）。
+- `rebuild` 持 `<dbPath>.lock`（60s 判陈旧），写方短暂等待；`openDb` 用 `stat(path).ino` 检测换库，
+  rename 后自动重开——否则写入会落到被 unlink 的旧 inode（实测 40 条丢 16 条）。rename 后再做一次
+  jsonl 增量回放。
+- `collab_index stats` 对 `facts` / `todos` / `decisions` / `progress` / `metrics` 标注「本版不写入」，
+  不再只打印 0。
+
+### Tests
+
+- 新增 `test/store-rebuild.mjs`（30）与 `test/delivery-history.mjs`（9）。
+- **测试隔离（B1）**：所有导入 server 模块的套件都固定 `COLLAB_MESSAGES_FILE` / `COLLAB_DB_FILE` 到临时目录，
+  并断言真实 `~/.config/opencode/collab-messages.jsonl` / `collab.db` 的 mtime+size 不变
+  （0.9.0 首版曾把 616 条 fixture 消息写进真实目录）。
+- 变异实测：`sent_at` 写 `Date.now()` → 幂等 + `sent_at` 断言红；索引 reader 丢 `priority` → R5 等价红；
+  去掉 rebuild 锁等待 / inode 校验 → 并发用例 40 行掉到 24 行；rebuild 不写 `meta.schema` → P1-1 红；
+  mirror 推进无关水位 → P1-3 红。
+- 回归：**900 + 13 + 20 + 53 + 54 + 30 + 9 + 60 + 47 + 82 = 1268**；工具数 23。
+- 回填实测：handoffs **24** / threads **50**（宿主；fixture 断言 49）。
+
 ## [0.8.2] - 2026-11-19
 
 > 关系图能看清了：画布放大一倍，节点分层排布，标签截断，滚轮/双指可缩放、可拖拽平移。

@@ -48,6 +48,8 @@ import {
 import { createGrants } from './grants.ts';
 import type { Grants } from './grants.ts';
 import { createLineage } from './lineage.ts';
+import { recordMessage } from './index-db.ts';
+import { makeEnvelope } from './envelope.ts';
 import { unseenCandidates } from './owner-queue.ts';
 import { pathsFromMessages, scoreCandidate } from './score.ts';
 import {
@@ -638,6 +640,18 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           }
         }
       });
+      // 0.9.0 (R1): the requester note is a delivered message too.
+      await recordMessage(
+        makeEnvelope({
+          id: `msg_${cid}`,
+          ...(threadID ? { threadId: threadID } : {}),
+          from: String(record.claim?.by ?? from ?? 'handoff'),
+          to: target,
+          sentAt: Date.now(),
+          kind,
+          body: text
+        })
+      );
       return { delivered: true, message: admitted?.id };
     } catch (error) {
       // `error` (not just its text) is returned so the calling tool can file a
@@ -708,24 +722,38 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
         continue;
       }
       const cid = String(delivery.cid);
+      // Fresh correlation id for *this* note; the acknowledged one is carried
+      // separately (`ack`) so it is never confused with it.
+      const noteCid = newCorrelationID();
+      const noteText = buildAck(cid);
       try {
         await ctx.session.prompt({
           sessionID: requester,
-          text: envelope({ from: shortID(me), kind: 'note', body: buildAck(cid) }),
+          text: envelope({ from: shortID(me), kind: 'note', body: noteText }),
           delivery: 'queue',
           metadata: {
             collab: {
               from: shortID(me),
               fromSessionID: me,
-              // Fresh correlation id for *this* note; the acknowledged one is
-              // carried separately (`ack`) so it is never confused with it.
-              cid: newCorrelationID(),
+              cid: noteCid,
               ack: cid,
               kind: 'note',
               ts: Date.now()
             }
           }
         });
+        // 0.9.0 (R1): the ack is a message (`kind:"ack"`). The `seenAt` guard
+        // above means one ack per delivery, so this is one line per ack.
+        await recordMessage(
+          makeEnvelope({
+            id: `msg_${noteCid}`,
+            from: me,
+            to: requester,
+            sentAt: Date.now(),
+            kind: 'ack',
+            body: noteText
+          })
+        );
         // F1: merge into the *current* record. The requester's `applyAck` may
         // have stamped `seenAt` while this prompt was being admitted; writing
         // back the pre-await snapshot would drop it (→ an extra resend 2h
@@ -789,6 +817,7 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
     const from = shortID(String(record.from?.sid ?? 'handoff'));
     // 0.8.0 (`sender-name`): the resend keeps the header readable too.
     const name = await senderName(ctx, String(record.from?.sid ?? ''));
+    const resendBody = takeoverBody({ record, spawn: record.claim?.kind === 'spawn' });
     try {
       const admitted = await ctx.session.prompt({
         sessionID: target,
@@ -797,7 +826,7 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           name,
           kind: 'request',
           threadID: record.threadID,
-          body: takeoverBody({ record, spawn: record.claim?.kind === 'spawn' })
+          body: resendBody
         }),
         delivery: 'queue',
         metadata: {
@@ -812,6 +841,20 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           }
         }
       });
+      // 0.9.0 (R1): a resend is a real delivery, so it gets its own row
+      // (`_r<n>`): the original message id is kept for the receiver's de-dup,
+      // which is exactly why the history needs the suffix to tell them apart.
+      await recordMessage(
+        makeEnvelope({
+          id: `msg_${cid}_r${resends}`,
+          ...(record.threadID ? { threadId: record.threadID } : {}),
+          from: String(record.from?.sid ?? 'handoff'),
+          to: target,
+          sentAt: now,
+          kind: 'request',
+          body: resendBody
+        })
+      );
       // F1: merge into the current record. An `[ack]` for the very cid can land
       // while this prompt is being admitted — that `seenAt` must survive, or the
       // resend itself creates the false "unacked" it was meant to avoid.

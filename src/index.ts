@@ -12,7 +12,7 @@ import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason, to
 import { countsOf, pendingCountOf } from './core/counts.ts';
 import { freezeFor, freezeNotice, freezeNoticeText, markFreezeNotified, mergeFreezes, readFreezes } from './core/freeze.ts';
 import { createLineage } from './core/lineage.ts';
-import { mineFor } from './core/owner-queue.ts';
+import { allQueueItems, mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
 import { buildGraph } from './core/graph.ts';
@@ -38,6 +38,41 @@ import {
   classify
 } from './core/errors.ts';
 import { createReporter, reportDir, signature } from './core/report.ts';
+import { writeBroadcast } from './core/claim.ts';
+import {
+  backfill as backfillIndex,
+  indexInsert,
+  indexStats,
+  indexStatus,
+  readMessagesFromIndex,
+  rebuild as rebuildIndex,
+  recordMessage,
+  resetIndexStatus,
+  tableChecksums
+} from './core/index-db.ts';
+import { closeDb, dbRuntimeState, detectBackend, openDb, resetDbRuntime } from './core/db-runtime.ts';
+import {
+  configureIndexStore,
+  flushMirrors,
+  hasSchema,
+  sourceStamp,
+  preferredBroadcasts,
+  preferredHandoff,
+  preferredLocks,
+  preferredQueue
+} from './core/index-sync.ts';
+import { acquireRebuildLock, indexSync } from './core/index-db.ts';
+import {
+  envelopeHead,
+  envelopeLines,
+  makeEnvelope,
+  mergeEnvelopeParts,
+  newMessageID,
+  parseEnvelopeLine,
+  sha256,
+  splitBody
+} from './core/envelope.ts';
+import { appendMessage, messageFiles, messagesFile, readMessages } from './core/store.ts';
 import { staleClass } from './core/stale.ts';
 import { appendThreadMessage, createInboxStore, createThreadStore, extractInbound } from './core/storage.ts';
 import { createSignal } from './ids.ts';
@@ -69,6 +104,14 @@ const plugin: Plugin.Plugin = {
     }
 
     const readConfig = createConfigReader(ctx.options);
+    // 0.9.0 (R5): the index-preferred readers need the configured projection
+    // path, but they are called from sync tool code that has no `ctx`. One
+    // provider, registered here, like the config reader itself.
+    const indexStoreOptions = () => {
+      const config = readConfig();
+      return { dbPath: config.dbPath, storage: config.storage };
+    };
+    configureIndexStore(indexStoreOptions);
     const inbox = createInboxStore(ctx);
     const threads = createThreadStore(ctx);
     const signal = createSignal();
@@ -303,11 +346,20 @@ const plugin: Plugin.Plugin = {
 
     const snapshotter = createSnapshotReader({
       sessions: input => chain.listSessions(input),
-      locks: allLocks,
-      handoffs: allBroadcasts,
+      // R5: the projection is preferred when it can prove itself current
+      // (`synced_at` ≥ every source mtime); otherwise the JSON readers below.
+      locks: async () => (await preferredLocks(indexStoreOptions())) ?? allLocks(),
+      handoffs: async () => (await preferredBroadcasts(indexStoreOptions())) ?? allBroadcasts(),
       // 0.4.2: the requester's own owner-queue items, for the TUI panel's third
       // block. Read-only, and only for the session the caller names.
-      queue: from => mineFor(from),
+      queue: async from => (await preferredQueue(from, indexStoreOptions())) ?? mineFor(from),
+      // 0.9.0 (`11-20-collab-store`, R4): the projection verdict behind the
+      // board's `[索引不可用]` marker. Read-only, cached (30s), and it never
+      // imports sqlite when `storage:"json"` (openDb returns null first).
+      index: () => {
+        const config = readConfig();
+        return indexStatus({ dbPath: config.dbPath, storage: config.storage });
+      },
       // 0.6.0 (`collab_freeze`): live freezes → the optional `frozen` / `freeze`
       // markers. Read-only; an empty file is simply "nothing is frozen".
       freezes: () => readFreezes()
@@ -458,5 +510,58 @@ export const __internals = {
   escalateAction,
   freezeAction,
   archiveAction,
-  appendAudit
+  appendAudit,
+  // 0.9.0 (`11-20-collab-store`): the message log + the rebuildable projection.
+  // The harness drives these directly (no host, temp paths): the envelope line
+  // format, the encoded 1MB split, the rebuild idempotency, the 8192-char FTS body, the
+  // circuit breaker and the 3-process write race all need the real functions.
+  ENVELOPE_VERSION: 1,
+  sha256,
+  newMessageID,
+  splitBody,
+  makeEnvelope,
+  envelopeLines,
+  envelopeHead,
+  parseEnvelopeLine,
+  mergeEnvelopeParts,
+  appendMessage,
+  readMessages,
+  messageFiles,
+  messagesFile,
+  openDb,
+  closeDb,
+  resetDbRuntime,
+  dbRuntimeState,
+  detectBackend,
+  resetIndexStatus,
+  indexInsert,
+  indexStatus,
+  indexStats,
+  readMessagesFromIndex,
+  recordMessage,
+  tableChecksums,
+  rebuildIndex,
+  backfillIndex,
+  // 0.9.0 R5 (review): the index-preferred readers + the sync entry point. The
+  // harness proves the index path and the JSON path are byte-identical, and
+  // that a stale projection falls back instead of serving old rows.
+  indexSync,
+  acquireRebuildLock,
+  preferredBroadcasts,
+  preferredHandoff,
+  preferredLocks,
+  preferredQueue,
+  allBroadcasts,
+  allLocks,
+  mineFor,
+  allQueueItems,
+  // 0.9.0 review: mirror flush (deterministic in tests) + freshness introspection.
+  flushMirrors,
+  hasSchema,
+  sourceStamp,
+  // 0.9.0 review: the six extra delivery points and their writer APIs — the
+  // delivery-history test drives the real functions (no second implementation).
+  createHandoffChain,
+  createReporter,
+  writeBroadcast
 };

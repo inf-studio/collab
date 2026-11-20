@@ -33,6 +33,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// B1 (0.9.0 review): the built server module computes the global message log /
+// projection paths at import time. This suite never opens a host, but it must
+// still pin them to a temp path so a future change cannot start writing the
+// operator's real ~/.config files during `pnpm test`.
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+process.env.COLLAB_MESSAGES_FILE = join(tmpdir(), 'collab-test-messages.jsonl');
+process.env.COLLAB_DB_FILE = join(tmpdir(), 'collab-test.db');
+
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const built = await import(`file://${entry}`);
 const { buildSnapshot, CollabState } = built.__internals ?? {};

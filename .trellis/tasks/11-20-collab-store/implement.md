@@ -6,17 +6,18 @@ spike 通过：`vp pack` 保留 `import("node:sqlite")` / `import("bun:sqlite")`
 
 ## 顺序清单
 
-- [ ] 1. `src/core/envelope.ts`：类型 + 序列化 + 1MB 分片 + `sha256`
-- [ ] 2. `src/core/db-runtime.ts`：运行时探测、懒加载、单写者队列、3 次退避、熔断
-- [ ] 3. `src/core/store.ts`：`appendMessage` / `readMessages`（坏行跳过、轮转拼接）
-- [ ] 4. `src/core/index-db.ts`：DDL（父 design §2.2 逐字）、`indexInsert`、查询、`rebuild`、`backfill`
-- [ ] 5. 写点接入：`src/tools/shared.ts` 的 dispatch 成功后写 jsonl + 索引（顺序：jsonl 先）
-- [ ] 6. 读点接入：`src/core/snapshot.ts` / `board.ts` 走 `readFromIndex()`，失败回落
-- [ ] 7. `src/tools/index.ts` 注册 `collab_index`（`rebuild` / `backfill` / `stats`）；22 → 23
-- [ ] 8. `src/config.ts`：`storage: 'sqlite' | 'json'`（默认 sqlite）、`dbPath`
-- [ ] 9. 测试 `test/store-rebuild.mjs`：design §10 八例 + 3 组变异
-- [ ] 10. 文档：`docs/collab.md` 新增「存储与索引」节、README、CHANGELOG
-- [ ] 11. 门禁 + 复核
+- [x] 1. `src/core/envelope.ts`：类型 + 序列化 + **编码后** 1MB 分片 + `sha256`
+- [x] 2. `src/core/db-runtime.ts`：运行时探测、懒加载、单写者队列、3 次退避、熔断、**inode 重开**
+- [x] 3. `src/core/store.ts`：`appendMessage` / `readMessages`（坏行跳过、轮转拼接）
+- [x] 4. `src/core/index-db.ts` + `index-sync.ts`：DDL/迁移、`indexInsert`、`rebuild`（锁 + 原子 rename + 增量回放）、
+      `backfill`、`indexSync`、`preferred*` 读路径
+- [x] 5. 写点接入：dispatch / deliverAsk + 六个补充投递点（escalate / freeze / notifyRequester / ack / resend / report）
+- [x] 6. 读点接入：`snapshot.ts`（locks/handoffs/queue）、`status.ts`、`threads.ts` 走索引，不新鲜即回落
+- [x] 7. `src/tools/index.ts` 注册 `collab_index`（`rebuild` / `backfill` / `stats`）；22 → 23
+- [x] 8. `src/config.ts`：`storage: 'sqlite' | 'json'`（默认 sqlite）、`dbPath`（支持 `~`）
+- [x] 9. 测试：`test/store-rebuild.mjs`（30）+ `test/delivery-history.mjs`（9）+ 3 组变异
+- [x] 10. 文档：`docs/collab.md` §11.21、README、CHANGELOG、PRD/design/父 design §2.2
+- [x] 11. 门禁 + 复核（review 轮已修 B1/B2/R5/并发/消息覆盖）
 
 ## 门禁
 
@@ -25,6 +26,9 @@ pnpm build && pnpm typecheck && pnpm test && node scripts/check-skill.mjs
 ```
 
 必须报数：工具数 23、测试计数、`rebuild` 耗时、`messages` 行数。
+
+**实测（2026-11-20 第三轮复核）**：工具数 **23**；测试 **900 + 13 + 20 + 53 + 54 + 30 + 9 + 60 + 47 + 82 = 1268**；
+`rebuild` 300 条消息：**43ms / 31ms**（checksum 相同）；`backfill`：handoffs **24** / threads **49**（宿主实测 50）。
 
 ## 复核门
 

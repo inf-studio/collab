@@ -162,6 +162,17 @@ export interface SnapshotQueueItem {
   priority?: 'urgent';
 }
 
+/**
+ * 0.9.0 (`11-20-collab-store`, R4): the storage verdict the board renders as
+ * `[索引不可用]` when the projection cannot be read. Optional so an older
+ * server's snapshot stays valid (absence = no marker).
+ */
+export interface SnapshotIndex {
+  available: boolean;
+  /** Why the projection is unavailable (shown next to the marker). */
+  reason?: string;
+}
+
 /** The whole read-only picture. */
 export interface Snapshot {
   at: number;
@@ -180,6 +191,12 @@ export interface Snapshot {
    * methods themselves are registered either way, so `false` only hides the row.
    */
   actions?: boolean;
+  /**
+   * 0.9.0 (R4): whether `collab.db` can be read. `available:false` is a
+   * display-only marker — every number above still comes from the JSON files,
+   * so a degraded index never hides a lease or a hand-off.
+   */
+  index?: SnapshotIndex;
   /** The server answered. A rejected call never produces a snapshot at all. */
   reachable: true;
 }
@@ -302,7 +319,9 @@ export const CollabState = {
               },
               ['queueId', 'target', 'ageMs', 'summary', 'seen']
             )
-          }
+          },
+          // 0.9.0 (R4): optional — an older server omits it (no marker).
+          index: obj({ available: bool, reason: str }, ['available'])
         },
         ['at', 'reachable', 'sessions', 'locks', 'handoffs', 'queue']
       )

@@ -4,6 +4,11 @@ import { join } from 'node:path';
 // ------------------------------------------------------------------- storage
 
 export const CONFIG_PATH = process.env.COLLAB_CONFIG || join(homedir(), '.config', 'opencode', 'collab.json');
+/**
+ * 0.9.0 (R2): the SQLite projection. `storage:'json'` in `collab.json` makes the
+ * plugin **never** import `node:sqlite` / `bun:sqlite` at all (rollback switch).
+ */
+export const DB_FILE = process.env.COLLAB_DB_FILE || join(homedir(), '.config', 'opencode', 'collab.db');
 export const LEGACY_ALIAS_PATH = join(homedir(), '.config', 'opencode', 'collab-aliases.json');
 
 export const STORAGE_ALIASES = 'collab/aliases';
@@ -99,7 +104,16 @@ export const DEFAULTS = {
    * 解冻 / 归档). `false` hides the row in the panel; the RPC methods stay
    * callable (the same rollback switch the PRD asks for, design §5).
    */
-  boardActions: true
+  boardActions: true,
+  /**
+   * 0.9.0 (`11-20-collab-store`, R4): `sqlite` (default) keeps the rebuildable
+   * projection next to the JSON truth; `json` is the rollback switch — the
+   * plugin then **never imports** `node:sqlite` / `bun:sqlite` and every tool
+   * keeps working from the JSON files alone.
+   */
+  storage: 'sqlite' as 'sqlite' | 'json',
+  /** 0.9.0 (R2): where the projection lives (`dbPath` in `collab.json`). */
+  dbPath: DB_FILE
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -437,6 +451,42 @@ export const ARCHIVE_GRACE_MS = 10 * 60 * 1000;
 export const ARCHIVE_GRACE_MIN_MS = 60 * 1000;
 export const ARCHIVE_GRACE_MAX_MS = 60 * 60 * 1000;
 
+// ------------------------------------------- message history + projection (0.9.0)
+
+/**
+ * 0.9.0 (`11-20-collab-store`, R1): the **append-only** message log, one
+ * `Envelope` per line — the only place a message body is kept. The SQLite
+ * projection (`collab.db`) can be deleted and rebuilt from this file at any
+ * time, which is why the JSON file is written **before** the index row and why
+ * an index failure never blocks a delivery.
+ *
+ * `COLLAB_MESSAGES_FILE` overrides the path (harness / sandbox runs). Read once
+ * at module load, like every other global path here.
+ */
+export const MESSAGES_FILE =
+  process.env.COLLAB_MESSAGES_FILE || join(homedir(), '.config', 'opencode', 'collab-messages.jsonl');
+/** One JSONL line is at most this many UTF-8 bytes; a longer body is split. */
+export const MESSAGE_PART_BYTES = 1024 * 1024;
+/**
+ * The active log rotates at this size: `collab-messages.jsonl` is renamed to
+ * `collab-messages-<n>.jsonl` (n ascending = oldest → newest) and reads
+ * concatenate the rotated files, then the active one.
+ */
+export const MESSAGES_ROTATE_BYTES = 256 * 1024 * 1024;
+/**
+ * R2: `messages.body` keeps the **full** body; only the FTS index body is cut
+ * to this many characters (a search index, not a second copy of the archive).
+ */
+export const FTS_BODY_LIMIT = 8192;
+/** R2: a second writer waits this long for the WAL lock instead of failing. */
+export const DB_BUSY_TIMEOUT_MS = 5000;
+/** R2: three attempts, exponential — the cross-process contention budget. */
+export const DB_RETRY_DELAYS_MS = [50, 200, 800];
+/** R3: `rebuild` keeps the last N days by default (a bounded permanent archive). */
+export const REBUILD_SINCE_DAYS = 180;
+/** The two storage modes (`collab.json` → `storage`); anything else = `sqlite`. */
+export const STORAGE_MODES: string[] = ['sqlite', 'json'];
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.8.2';
+export const PLUGIN_VERSION = '0.9.0';
 

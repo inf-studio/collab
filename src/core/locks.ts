@@ -68,6 +68,7 @@ import type {
   LockWaiter
 } from '../types.ts';
 import { asObject, clamp, hash16, randToken, readJsonFile } from '../util.ts';
+import { mirrorLocks } from './index-sync.ts';
 
 // ------------------------------------------------------------ normalisation
 
@@ -332,6 +333,8 @@ export function writeLock(record: LockRecord): LockRecord {
   const tmp = `${file}.${randToken()}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(tmp, file);
+  // 0.9.0 (R5): mirror the record when the projection is open in this process.
+  mirrorLocks([next]);
   return next;
 }
 

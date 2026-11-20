@@ -49,6 +49,7 @@ import {
 } from '../constants.ts';
 import type { OwnerQueueItem } from '../types.ts';
 import { asObject, randToken, readJsonFile, shortID } from '../util.ts';
+import { mirrorQueue } from './index-sync.ts';
 import { invalid } from './errors.ts';
 
 /**
@@ -195,6 +196,23 @@ export function mineFor(fromSid: string): OwnerQueueItem[] {
   return out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
 }
 
+/**
+ * 0.9.0 (R5): every queue item of every target — the projection's `queue` table
+ * source. Read-only (`listFor` already refuses a missing directory), ordered
+ * oldest first so a rebuild is deterministic.
+ */
+export function allQueueItems(): OwnerQueueItem[] {
+  let targets: string[];
+  try {
+    targets = readdirSync(OWNER_QUEUE_DIR);
+  } catch {
+    return [];
+  }
+  const out: OwnerQueueItem[] = [];
+  for (const target of targets) out.push(...listFor(target));
+  return out.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+}
+
 export interface EnqueueInput {
   target: string;
   from: string;
@@ -289,6 +307,9 @@ export function enqueue({ target, from, text, issuePath, bid, priority, now = Da
   const tmp = `${file}.${randToken()}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(item, null, 2)}\n`);
   renameSync(tmp, file);
+  // 0.9.0 (R5): the `queue` table is a snapshot of every item, so a write mirrors
+  // the whole list (it is small and bounded by the owner-queue limits).
+  mirrorQueue(allQueueItems());
   return item;
 }
 
@@ -306,6 +327,7 @@ export function revoke(targetSid: string, id: string, by: string): OwnerQueueIte
   } catch {
     return undefined;
   }
+  mirrorQueue(allQueueItems());
   return item;
 }
 

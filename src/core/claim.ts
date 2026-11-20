@@ -15,6 +15,7 @@ import { errCode, errText, log } from '../log.ts';
 import type { BroadcastOrigin, BroadcastRecord, CollabContext, JsonObject } from '../types.ts';
 import { asObject, dedupe, randToken, readJsonFile } from '../util.ts';
 import { sanitizePathText } from './followup.ts';
+import { mirrorHandoff } from './index-sync.ts';
 
 /** The three display-only roles a chain head may claim (`origin.role`). */
 const ORIGIN_ROLES: BroadcastOrigin['role'][] = ['requester', 'implementer', 'observer'];
@@ -327,6 +328,10 @@ export function writeBroadcast(record: JsonObject): BroadcastRecord {
   writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(tmp, bcastFile(next.bid));
   pruneBroadcasts(next.updatedAt);
+  // 0.9.0 (R5): write-through into the projection when this process has it
+  // open. If it is not open the file mtime now exceeds `meta.synced_at`, which
+  // is exactly the signal that makes every reader fall back to JSON.
+  mirrorHandoff(next);
   return next;
 }
 

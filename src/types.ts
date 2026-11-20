@@ -723,6 +723,84 @@ export interface ThreadRecord {
   [key: string]: any;
 }
 
+/* ---------------------------------------------- message history (0.9.0, R1/R2) */
+
+/** The five envelope kinds the transport layer understands (design §3). */
+export type EnvelopeKind = 'request' | 'reply' | 'note' | 'notify' | 'ack';
+/** How the message's claims were obtained — never guessed (`unknown` = absent). */
+export type EnvelopeGrade = 'measured' | 'inferred' | 'relayed' | 'unknown';
+
+/**
+ * 0.9.0 (R1): one line of `collab-messages.jsonl` — the only place a message
+ * body is kept in full. `part` is present only when the body exceeded
+ * `MESSAGE_PART_BYTES` and was split into consecutive lines sharing the same
+ * `id`; the reader concatenates them back before handing the envelope out.
+ * `sha256` is the hash of this line's `body` chunk (a corrupt line is dropped
+ * with a warning instead of being half-read).
+ */
+export interface MessageEnvelope {
+  v: 1;
+  /** `msg_…` (derived from the delivery `cid`, so a resend does not duplicate). */
+  id: string;
+  threadId?: string;
+  /** Sender session id (the display alias only when no session id exists). */
+  from: string;
+  /** Target session id. */
+  to: string;
+  sentAt: number;
+  kind: EnvelopeKind;
+  /** The full body (never truncated, never the rendered `[collab:…]` header). */
+  body: string;
+  /** Version marker for the receiver-side freshness rules (0.9.4). */
+  basedOn: { repo?: Record<string, string>; env?: Record<string, string>; facts: number };
+  grade: EnvelopeGrade;
+  factIds?: string[];
+  deltaOnly?: boolean;
+  /** sha256 of this line's body chunk (hex). */
+  sha256?: string;
+  /** 0-based part index + total, only for a split body. */
+  part?: { i: number; n: number };
+}
+
+/** One durable row of `collab.db`'s `messages` table (read-back shape). */
+export interface IndexedMessage {
+  id: string;
+  threadId?: string;
+  from: string;
+  to: string;
+  sentAt: number;
+  deliveredAt?: number;
+  kind: string;
+  body: string;
+  grade: string;
+  factIds?: string[];
+  /** S10: for a `_r<n>` resend row, the original message id (metrics exclude it). */
+  resendOf?: string;
+}
+
+/** `collab_index stats` — counts per table plus the storage verdict. */
+export interface IndexStats {
+  available: boolean;
+  dbPath: string;
+  backend?: string;
+  reason?: string;
+  bytes?: number;
+  counts: Record<string, number>;
+  backfilled: boolean;
+  rebuiltAt?: number;
+}
+
+/** The messages a `rebuild` / `backfill` actually produced. */
+export interface RebuildResult {
+  ok: boolean;
+  dbPath: string;
+  reason?: string;
+  ms: number;
+  counts: Record<string, number>;
+  warnCount: number;
+  checksums?: Record<string, string>;
+}
+
 /** The lazily re-read config (`collab.json` + `ctx.options` + built-in defaults). */
 export interface ReportConfig {
   /** `alias|ses_…` of the maintainer session; a `note` is queued there (R5). */
@@ -770,6 +848,14 @@ export interface CollabConfig {
    * working (rollback switch, design §5).
    */
   boardActions: boolean;
+  /**
+   * 0.9.0 (`11-20-collab-store`, R4): `sqlite` (default) maintains the
+   * rebuildable projection; `json` is the rollback switch — the plugin then
+   * never imports a SQLite module and every tool reads the JSON files only.
+   */
+  storage: 'sqlite' | 'json';
+  /** 0.9.0 (R2): the projection path (`dbPath` in `collab.json`). */
+  dbPath: string;
   report?: ReportConfig;
 }
 

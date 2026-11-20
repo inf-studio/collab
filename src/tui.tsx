@@ -167,12 +167,22 @@ function arrayOf<T>(value: unknown): T[] {
 function normalize(reply: unknown, now: number): Snapshot {
   const value = (reply ?? {}) as Partial<Snapshot>;
   if (!value || typeof value !== 'object') throw new Error('empty snapshot');
+  // 0.9.0 (`11-20-collab-store`, R4): the storage verdict is passed through so
+  // the panel can say `[索引不可用]`. Absent (an older server) = no marker.
+  const index =
+    value.index && typeof value.index === 'object'
+      ? {
+          available: value.index.available !== false,
+          ...(value.index.reason ? { reason: String(value.index.reason) } : {})
+        }
+      : undefined;
   return {
     at: Number(value.at) || now,
     sessions: arrayOf<SnapshotSession>(value.sessions),
     locks: arrayOf<SnapshotLock>(value.locks),
     handoffs: arrayOf<SnapshotHandoff>(value.handoffs),
     queue: arrayOf<SnapshotQueueItem>(value.queue),
+    ...(index ? { index } : {}),
     reachable: true
   };
 }
@@ -703,6 +713,11 @@ function panelLines(
   if (state.error) {
     push(`RPC 不可达：${state.error}`, 'danger');
     push(data ? '（显示上一份快照）' : '（仅显示本地会话列表）', 'muted');
+  }
+  // 0.9.0 (`11-20-collab-store`, R4): a degraded projection is a marker, not a
+  // blank pane — every row below is still built from the JSON truth.
+  if (data?.index && data.index.available === false) {
+    push(`[索引不可用] ${data.index.reason ?? ''}`.trim(), 'muted');
   }
 
   if (data) {

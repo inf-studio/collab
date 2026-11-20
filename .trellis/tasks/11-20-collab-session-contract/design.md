@@ -33,63 +33,90 @@
   collab.db                    # 投影（可删可重建）
 ```
 
-### 2.2 SQLite schema
+### 2.2 SQLite schema（0.9.0 实际落地）
+
+0.9.0 的 `collab.db` 是**可删除重建的投影**：typed 列供查询，`*_json` 列保存原始对象，
+读路径据此重建出与 JSON 完全相同的对象（与 `messages.envelope` 同一做法）。
 
 ```sql
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
 
-CREATE TABLE meta        (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+--  meta: schema / rebuilt_at / rebuilt_ms / source_messages / backfilled /
+--        backfilled_at / full_sync_at / synced_broadcasts / synced_locks /
+--        synced_queue / synced_threads
+--  full_sync_at       = 最近一次**全量** sync（rebuild / backfill / indexSync）；
+--                       只有它存在才允许读索引（镜像只证明单表新鲜，不证明完整）
+--  synced_<source>    = 该源自己的水位；读者只跟自己那一源比。一个源的写入
+--                       不会让另一个源的陈旧行看起来新鲜（0.9.0 review P1-3）
 
-CREATE TABLE sessions    (id TEXT PRIMARY KEY, title TEXT, directory TEXT,
-                          agent TEXT, first_at INTEGER, last_at INTEGER);
+CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, directory TEXT, agent TEXT,
+                       first_at INTEGER, last_at INTEGER, archived_at INTEGER);
 
-CREATE TABLE threads     (id TEXT PRIMARY KEY, from_sid TEXT, target_sid TEXT,
-                          kind TEXT, opened_at INTEGER, state TEXT, close_reason TEXT);
+CREATE TABLE threads (id TEXT PRIMARY KEY, from_sid TEXT, target_sid TEXT, kind TEXT,
+                      opened_at INTEGER,
+                      state TEXT CHECK (state IN ('open','answered','closed')),
+                      close_reason TEXT, preview TEXT, last_at INTEGER, bid TEXT);
 
-CREATE TABLE messages    (id TEXT PRIMARY KEY, thread_id TEXT,
-                          from_sid TEXT, to_sid TEXT,
-                          sent_at INTEGER, delivered_at INTEGER,
-                          kind TEXT, body TEXT, body_len INTEGER,  -- body=全文；FTS 仅索引前 8KB
-                          based_on TEXT,            -- JSON {repo,env,facts}
-                          grade TEXT,               -- measured|inferred|relayed|unknown
-                          fact_ids TEXT,            -- JSON array of F#
-                          envelope TEXT);           -- 原始信封（截断前的 hash + 头）
+CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT, from_sid TEXT, to_sid TEXT,
+                       sent_at INTEGER, delivered_at INTEGER, kind TEXT,
+                       body TEXT, body_len INTEGER,            -- body=全文；FTS 仅索引前 8KB
+                       based_on TEXT,                          -- JSON {repo,env,facts}
+                       grade TEXT CHECK (grade IN ('measured','inferred','relayed','unknown')),
+                       fact_ids TEXT,
+                       resend_of TEXT,                         -- _r<n> 重发行的原 id（指标可排除）
+                       envelope TEXT);
 CREATE INDEX idx_msg_thread ON messages(thread_id, sent_at);
 CREATE INDEX idx_msg_to     ON messages(to_sid, delivered_at);
 CREATE INDEX idx_msg_from   ON messages(from_sid, sent_at);
-
 CREATE VIRTUAL TABLE messages_fts USING fts5(body, content='messages', content_rowid='rowid');
 
-CREATE TABLE facts       (id TEXT PRIMARY KEY, claim TEXT, grade TEXT, evidence TEXT,
-                          state TEXT,                -- active|superseded|retracted
-                          based_on TEXT, by_sid TEXT, at INTEGER, superseded_by TEXT,
-                          scope TEXT);               -- workspace（D4）
+CREATE TABLE facts (id TEXT PRIMARY KEY, claim TEXT, grade TEXT, evidence TEXT,
+                    state TEXT CHECK (state IN ('active','superseded','retracted')),
+                    based_on TEXT, by_sid TEXT, at INTEGER, superseded_by TEXT, scope TEXT);
 
-CREATE TABLE todos       (id TEXT PRIMARY KEY, sid TEXT, kind TEXT,  -- mainline|collab
-                          subject TEXT, status TEXT,               -- open|doing|blocked|suspended|closed|dropped
-                          blocking_on TEXT, parked_by TEXT, parked_at INTEGER,
-                          wake_when TEXT,           -- JSON {kind,ref,at}（D16 必填于 suspended）
-                          since INTEGER, closed_at INTEGER, evidence TEXT);
+CREATE TABLE todos (id TEXT PRIMARY KEY, sid TEXT, kind TEXT, subject TEXT,
+                    status TEXT CHECK (status IN ('open','doing','blocked','suspended','closed','dropped')),
+                    blocking_on TEXT, parked_by TEXT, parked_at INTEGER, wake_when TEXT,
+                    since INTEGER, closed_at INTEGER, evidence TEXT);
 
-CREATE TABLE decisions   (id TEXT PRIMARY KEY, thread_id TEXT, bid TEXT,
-                          question TEXT, options TEXT, owner TEXT,
-                          status TEXT,              -- open|answered|superseded
-                          answer TEXT, by_sid TEXT, at INTEGER);
+CREATE TABLE decisions (id TEXT PRIMARY KEY, thread_id TEXT, bid TEXT, question TEXT,
+                        options TEXT, owner TEXT,
+                        status TEXT CHECK (status IN ('open','answered','superseded')),
+                        answer TEXT, by_sid TEXT, at INTEGER);
 
-CREATE TABLE handoffs    (bid TEXT PRIMARY KEY, from_sid TEXT, claim_by TEXT,
-                          state TEXT, title TEXT, created_at INTEGER,
-                          updated_at INTEGER, thread_id TEXT);
+CREATE TABLE handoffs (bid TEXT PRIMARY KEY, from_sid TEXT, claim_by TEXT,
+                       state TEXT CHECK (state IN ('open','claimed','acked','done','blocked','expired')),
+                       title TEXT, created_at INTEGER, updated_at INTEGER, thread_id TEXT,
+                       origin_sid TEXT, workspace TEXT, priority TEXT, frozen INTEGER,
+                       claim_kind TEXT, preview TEXT, archived_at INTEGER,
+                       claim_json TEXT, expired_claim_json TEXT, record_json TEXT);
 
-CREATE TABLE progress    (sid TEXT, milestone TEXT, title TEXT, done INTEGER,
-                          evidence TEXT, at INTEGER, PRIMARY KEY(sid, milestone));
+CREATE TABLE locks (id TEXT PRIMARY KEY, scope TEXT, sid TEXT, mode TEXT,
+                    at INTEGER, expires_at INTEGER, reason TEXT, record_json TEXT);
 
-CREATE TABLE metrics     (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count INTEGER,
-                          retract_count INTEGER, idle_count INTEGER,
-                          drift_ms INTEGER, median_gap_ms INTEGER);
+CREATE TABLE queue (id TEXT PRIMARY KEY, target_sid TEXT, from_sid TEXT, at INTEGER,
+                    priority TEXT, summary TEXT, seen INTEGER, issue_path TEXT,
+                    bid TEXT, revoked_at INTEGER, item_json TEXT);
+
+CREATE TABLE progress (sid TEXT, milestone TEXT, title TEXT, done INTEGER, evidence TEXT,
+                       at INTEGER, PRIMARY KEY(sid, milestone));
+
+CREATE TABLE metrics (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count INTEGER,
+                      retract_count INTEGER, idle_count INTEGER, drift_ms INTEGER,
+                      median_gap_ms INTEGER);
 ```
 
-`grade` 与 `state` 用 CHECK 约束；`todos.wake_when` 对 `status='suspended'` 非空（应用层校验）。
+- **CHECK 已落地**：`messages.grade`、`handoffs.state`、`threads.state`、`facts.state`、
+  `todos.status`、`decisions.status`。`todos.wake_when` 的「suspended 必填」仍是应用层校验（0.9.1 写这张表时补）。
+- **增量列迁移**：`CREATE TABLE IF NOT EXISTS` 不会给旧库加列，`ensureSchema()` 按
+  `PRAGMA table_info` 逐列 `ALTER TABLE … ADD COLUMN`（`sessions.archived_at` / `threads.preview,last_at,bid` /
+  `handoffs.*` / `locks.reason,record_json` / `queue.seen,issue_path,bid,revoked_at,item_json`）。
+- **0.9.0 不写的表**：`facts` / `todos` / `decisions` / `progress` / `metrics`（0.9.1+），
+  `collab_index stats` 明确标注「本版不写入」而不是只打印 0。
+- `sessions` 由 `rebuild` / `indexSync({sessions})` 填充，**不参与看板**：看板的会话块来自宿主的
+  实时 `session.list`（索引只会更旧）；它供后续查询/指标使用。
 
 ### 2.3 重建
 
@@ -102,6 +129,12 @@ CREATE TABLE metrics     (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count IN
 ### 2.4 并发与降级
 
 - 写入串行化：单进程内一个 Promise 队列；跨进程靠 WAL + busy_timeout + 3 次指数退避；
+- **mirror 异步**：写穿只排队（0ms 合并），由写路径之外应用 —— 写广播/租约/队列不等 SQLite；
+- **只读不建库**：`preferred*` 在 `collab.db` 不存在时返回 `undefined`，`openDb` 不会被读路径触发建库；
+- **rebuild 互斥**：`<dbPath>.lock`（`open("wx")`，含 pid/时间，60s 判陈旧）；写方在锁存在时短暂等待
+  （≤3s）再写，避免 rename 与写入交错；
+- **换库检测**：`openDb` 的缓存记住 `stat(path).ino`，rename 后 inode 变化即关闭重开——
+  否则写入会落到已被 unlink 的旧 inode（实测 40 条丢 16 条）；rebuild 结束后再做一次 jsonl 增量回放；
 - 运行时探测：`typeof Bun !== 'undefined' ? bun:sqlite : node:sqlite`（动态 import）；
 - **任何 DB 异常 → 降级纯 JSON**：工具仍可用，看板显示 `[索引不可用]`；
 - GUI 入口不 import 存储模块（`--conditions=browser` 下不得触发）。
@@ -119,8 +152,9 @@ CREATE TABLE metrics     (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count IN
 
 ### 2.5 回填（D 轮决策：状态级）
 
-- 24 条 handoff → `handoffs`；49 条 thread 索引 → `threads`；
-- 正文不可得（插件历史上未存），`messages.body` 留空并标 `backfilled=1`；
+- 24 条 handoff → `handoffs`；thread 索引 → `threads`（宿主实测 **50**，fixture 49）；locks / queue 当前状态一并入表；
+- 正文不可得（插件历史上未存）：**不写 `messages` 行**（不伪造），`meta.backfilled=1` +
+  `meta.backfilled_at` 标记「历史不完整」；
 - 指标从回填日重新起算基线（不伪造历史）。
 
 ## 3. 消息信封（传输层）

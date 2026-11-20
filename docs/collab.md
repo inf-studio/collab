@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十二个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结各一组）
+### 11.2 二十三个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -283,6 +283,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_locks` | `{ resource? }` | **只读**列出租约：`resource / free 或 held / mode / holders / 剩余 / ttl / waiters / 我的位置`。不改状态、不回收、不叫醒排队者；过期租约直接显示 `free`。`collab_list` 会额外追加本会话「持有 / 排队中」 |
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 | `collab_archive` | `{ bid?, session?, restore?, confirm }` | **归档 spawn 会话（0.5.0，归档 ≠ 删除）**：`PATCH /api/session/{id} { archived:true }`（宿主无 `session.update` 时走 `COLLAB_SERVER_URL` HTTP），会话与消息保留、记录 `state/receipt` 不变，`restore:true` → `archived:false` 并清 `archivedAt`。`bid` 只认得**本插件拉起的**会话（`claim.by`；spawn 租约过期后才被领取的取 `expiredClaim.by`），别的单一律报错并提示改用 `session` 直指；`confirm:false` 只预览。自动路径还有 10 分钟防抖（默认）/idle/未决引用/未读队列等门（见 §11.13），**手动工具跳过这些门**，但 `[protected*]` 一律拒绝 |
+| `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -321,9 +322,16 @@ opencode plugin add @inf-studio/collab@0.1.0
   "dedupeWindowMs": 60000,
   "awareness": "line",
   "boardActions": true,
+  "storage": "sqlite",
+  "dbPath": "~/.config/opencode/collab.db",
   "report": { "to": "collab-maintainer" }
 }
 ```
+
+`storage`（默认 **`"sqlite"`**）决定是否维护消息投影 `collab.db`；设成 **`"json"`** 时插件
+**一次也不 import** `node:sqlite` / `bun:sqlite`，所有工具与看板只读 JSON 文件（看板显示 `[索引不可用]`，
+见 §11.21）。`dbPath` 覆盖投影路径（也可用 `COLLAB_DB_FILE`）。写错的值（`"jsom"`、`0`）回落默认，
+不会悄悄换掉真源。
 
 `archiveSpawned`（默认 `true`）控制**自动归档** spawn 会话（§11.13）；`false` 只关自动路径，
 手动 `collab_archive` 仍然可用（回滚开关）。`archiveGraceMs` 是终态后的防抖窗口，默认
@@ -1838,6 +1846,87 @@ interface ActionReceipt { ok: boolean; action: string; target: string; detail: s
 
 **回滚**：`collab.json` 设 `boardActions:false`（只隐藏动作行，RPC 保留）；
 彻底回退 `git restore -- src/rpc.ts src/index.ts src/core/actions.ts src/tools/{escalate,freeze,archive}.ts src/gui.tsx`。
+
+### 11.21 存储与索引（`collab-messages.jsonl` + `collab.db`，0.9.0）
+
+**为什么**：插件过去不存正文（inbox 只有未读、thread 索引只有 80 字 preview、广播只有状态），复盘只能去
+`opencode api` 分页拉消息。0.9.0 只做**存储**，不改任何协作语义（R7）：每条投递成功写一行信封，
+再维护一份**可删可重建**的 SQLite 投影。
+
+#### 真源与投影
+
+| 文件 | 角色 | 说明 |
+| --- | --- | --- |
+| `~/.config/opencode/collab-messages.jsonl` | **唯一真源** | append-only，一行一个 `Envelope`；`body` 是**全文**；单行 ≤1MB（超出按 1MB 分片，同 `id` + `part` 连续写，读时合并）；每行带 `sha256`；256MB 轮转为 `…-1.jsonl` / `-2` …（读时按序拼接） |
+| `~/.config/opencode/collab.db` | **可重建投影** | 12 张表 + `messages_fts`（FTS5，外部内容表）；`WAL` + `busy_timeout=5000`；`messages.body` 存全文，**FTS 只索引前 8192 字符（CJK ≈ 24KB）**；typed 列 + `*_json` 原始对象（`handoffs.record_json` / `locks.record_json` / `queue.item_json`）供读路径逐字段还原；删掉它不影响任何协作 |
+| `collab-broadcast/*.json` / `collab-threads.json` | 现状不变 | `rebuild` / `backfill` 的输入之一；`backfill` 只补状态级历史（24 单 / 49 thread 的参考量级） |
+
+信封字段（父 design §3）：`v/id/threadId?/from/to/sentAt/kind/body/basedOn/grade/factIds?/deltaOnly?/sha256?/part?`。
+`from` / `to` 是**会话 id**（`from` 只在拿不到 id 时用显示别名）；`id` 由投递的 `cid` 派生（`msg_<cid>`），
+所以同一次投递的唤醒 / 重发不会在历史里长出新行。
+
+#### 写入顺序（不可颠倒）
+
+```
+投递成功（宿主已 admitted）
+  ├─ appendMessage(jsonl)   // 真源，先写
+  ├─ indexInsert(row)       // 投影，失败只记日志 + 熔断
+  └─ 返回工具结果（逐字不变）
+```
+
+- **索引失败不得阻断投递**：投影坏了看板陈旧是可接受的，消息丢了不可接受。
+- 历史是**旁路**：`recordMessage` 从不抛错、从不改工具返回（R7）。极端情况下写盘失败只留一条日志。
+- 预览 / 被护栏拒绝 / 去重命中 → **0 行**（只有真的 admitted 才写）。
+
+#### `collab_index`
+
+```bash
+collab_index { action:"stats" }                              # 只读
+collab_index { action:"rebuild", confirm:true }              # 全量重建（幂等）
+collab_index { action:"rebuild", sinceDays:30, confirm:true }# 只保留最近 30 天
+collab_index { action:"backfill", confirm:true }             # 回填历史状态（不伪造正文）
+```
+
+| 规则 | 说明 |
+| --- | --- |
+| 幂等 | 同一输入两次 rebuild：行数 + 每表 checksum 完全相同（`meta` 的 `rebuilt_at` / `rebuilt_ms` 等易变键不计入） |
+| 原子 | 建在 `<dbPath>.tmp` → `PRAGMA wal_checkpoint(TRUNCATE)` → 关闭 → `fsync` → rename；**失败保留旧库**并返回可读错误 |
+| 坏行 | jsonl 里一行非法 JSON / 半行 / 哈希不符 → 跳过并计入 `warnCount`，rebuild 仍然成功 |
+| 回填 | 只写 `handoffs` / `threads`；正文历史上没存过 → **不写 messages 行**，`meta.backfilled=1` 标记「历史不完整」 |
+| 降级 | `storage:"json"` 不 import sqlite；库损坏 / 驱动异常 → 进程级熔断，后续调用直接走 JSON；看板显示 `[索引不可用]` |
+| 并发 | 写入单进程串行（Promise 队列）+ 跨进程 WAL / `busy_timeout` / 3 次指数退避（50/200/800ms）；`rebuild` 持 `<dbPath>.lock`（60s 判陈旧），写方短暂等待；**rename 后按 inode 重开**，否则会写进被 unlink 的旧文件 |
+| 消息覆盖 | 除 `send`/`reply`/接管请求外，`collab_escalate` / `collab_freeze` 通知（notify）· `notifyRequester`（note）· `[ack]`（ack，同 cid 只写一次）· 受限重发（request，`_r<n>`，带 `resend_of`，指标可排除）· 缺陷上报（note）都各写一行 |
+
+#### 读路径（0.9.0 review 后）
+
+- `snapshot` 的 locks / handoffs / queue、`collab_status`、`collab_threads` 都**先问投影**：
+  `preferredLocks()` / `preferredBroadcasts()` / `preferredHandoff(bid)` / `preferredQueue(from)`。
+- **新鲜度门槛（按源）**：`meta.full_sync_at` 存在（做过一次完整 sync），且**该源自己的水位**
+  `synced_broadcasts / synced_locks / synced_queue / synced_threads ≥ 该源文件 mtime`。
+  另一个进程写 locks 只会让 locks 读者回落，不会因为本进程镜像了一条 handoff 就把陈旧 lease 当新鲜供出。
+- **写穿（异步）**：`writeBroadcast` / `writeLock` / owner-queue 写只把变更排进一个 0ms 合并队列，
+  由 `flushMirrors()` 在写路径之外应用（不会让写等 `busy_timeout`）；句柄不在（另一进程拥有/降级中）
+  就只留 mtime 变化，让读路径回落。
+- **只读不建库**：`preferred*` 在 `collab.db` 不存在时直接返回 `undefined`；mirror 在库还没有 schema 时
+  **静默跳过**，不会每次写刷一条错误日志。
+- **等价性**：投影保存原始对象，索引读出的 locks / handoffs / queue 与 JSON 路径**逐字段相同**；
+  `test/store-rebuild.mjs` 对此做深度相等断言，并用「reader 丢掉 `priority`」的变异证明断言会红。
+- **边界**：`sessions` 表只供查询/后续指标，**不参与看板**（宿主的实时 `session.list` 更准）；
+  `index: { available, reason? }` 仍是 additive 标记，`available:false` 时 GUI / TUI 显示 `[索引不可用]`，
+  **不隐藏任何行**。
+
+#### 验收
+
+`test/store-rebuild.mjs`（30 项）：工具面 22 → 23 · `storage:"json"` 不 import · 1.5MB 分片 + 引号/CJK/换行三种
+**编码后** 1MB 边界 · 重建幂等（行数 + checksum + `sent_at` 值）· 坏行容错 · 新装 `stats.available=true` ·
+坏库降级 · 熔断只触发一次 · 读路径命中 / 等价 / 陈旧回落 · 单 rebuild 锁 · 子进程连续写 + 6 次并发 rebuild 零丢失 ·
+回填 24 / 49（宿主实测 50）且不伪造 messages；真源写失败时跳过索引（S2）；
+只跑 rebuild 读者命中（P1-1）· 冷启动只读不建库 / 0 条 mirror 日志（P1-2）· 按源水位（P1-3）· frozen 不被清零（S9）。
+`test/delivery-history.mjs`（9 项）：六个补充投递点各 1 行、kind 正确、ack 同 cid 不重复；
+重发行 `resend_of` 可用于排除指标（S10）。
+
+回滚：`rm -f ~/.config/opencode/collab.db* ~/.config/opencode/collab-messages*.jsonl`，或把
+`collab.json` 的 `storage` 设为 `"json"`（不删任何文件，纯 JSON 运行）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 
