@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/concurrency-locks.md", "reason": "WAL/多写者/重试"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "表结构与索引约定"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "DB 不可用降级"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新模块落位"}

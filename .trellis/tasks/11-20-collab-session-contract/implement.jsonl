@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/guides/cross-workspace-collab-guide.md", "reason": "协作协议：handoff/回执/protected 与跨仓边界"}
+{"file": ".trellis/spec/frontend/opencode-plugin-ui.md", "reason": "注入头/看板/动作的 UI 约定"}
+{"file": ".trellis/spec/backend/concurrency-locks.md", "reason": "多进程写与租约约定"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "门禁与复核要求"}

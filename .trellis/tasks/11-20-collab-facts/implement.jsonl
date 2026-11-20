@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/guides/cross-workspace-collab-guide.md", "reason": "settle/invalidate 传播边界"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "facts 表与索引"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "降级与容错"}
