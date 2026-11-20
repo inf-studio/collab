@@ -44,6 +44,7 @@ import {
   PACING_MAX_ITEMS,
   PACING_METRICS_TTL_MS,
   PACING_SLA_MS,
+  PACING_VERSION,
   PACING_WINDOW_MS
 } from '../constants.ts';
 import { errText, log } from '../log.ts';
@@ -58,9 +59,15 @@ import type {
 import { fmtTime } from '../util.ts';
 import { withFileLock } from './file-lock.ts';
 import { upsertMetrics } from './index-db.ts';
+import { aggregateDay, dayKey, normalizeCounters, timesByDay } from './metrics.ts';
+import type { DayMetricsRow } from './metrics.ts';
 import { readMessages } from './store.ts';
 
-export const PACING_VERSION = 1;
+// 0.9.7: the pacing path and `rebuild` share one aggregation (`./metrics.ts`).
+// Re-exported so the public surface (`__internals`) and the tests keep working.
+export { dayKey, isResendID, medianGapMs } from './metrics.ts';
+export type { DayMetricsRow as PacingMetricsRow } from './metrics.ts';
+export { PACING_VERSION };
 
 export interface PacingOptions {
   /** Override the state file (harness / sandbox runs). */
@@ -84,14 +91,7 @@ export function normalizePacingState(raw: unknown): PacingState {
     const window = normalizeWindow(entry);
     if (window) windows.push(window);
   }
-  const counters: Record<string, PacingDayCounters> = {};
-  for (const [day, countersRaw] of Object.entries(value.counters && typeof value.counters === 'object' ? value.counters : {})) {
-    const countersValue = countersRaw as Record<string, unknown>;
-    counters[day] = {
-      noop: Math.max(0, Number(countersValue.noop) || 0),
-      late: Math.max(0, Number(countersValue.late) || 0)
-    };
-  }
+  const counters = normalizeCounters(value.counters);
   const lastSent: Record<string, DeltaSnapshot> = {};
   for (const [sid, snapshotRaw] of Object.entries(value.lastSent && typeof value.lastSent === 'object' ? value.lastSent : {})) {
     const snapshot = snapshotRaw as Record<string, unknown>;
@@ -273,13 +273,6 @@ export async function updatePacing<T>(
 }
 
 /* -------------------------------------------------------------- window rules */
-
-/** Local calendar day, the same "day" the facts metrics use. */
-export function dayKey(now = Date.now()): string {
-  const date = new Date(now);
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
-}
 
 /** The normalised body the window-dedup uses (whitespace is layout, not content). */
 export function pacingBodyKey(text: unknown): string {
@@ -470,56 +463,15 @@ export function bumpCounter(state: PacingState, key: keyof PacingDayCounters, no
 
 /* ---------------------------------------------------------------- metrics */
 
-/** Median of the **positive** gaps between consecutive timestamps (`0` < 2 rows). */
-export function medianGapMs(times: number[]): number {
-  const sorted = times.filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
-  if (sorted.length < 2) return 0;
-  const gaps: number[] = [];
-  for (let index = 1; index < sorted.length; index += 1) {
-    const gap = sorted[index] - sorted[index - 1];
-    if (gap > 0) gaps.push(gap);
-  }
-  if (!gaps.length) return 0;
-  gaps.sort((a, b) => a - b);
-  const middle = gaps.length >> 1;
-  return gaps.length % 2 ? gaps[middle] : Math.round((gaps[middle - 1] + gaps[middle]) / 2);
-}
-
-/** A resend row (`msg_…_r1`) is a real delivery but **never** a metric unit (S10). */
-export function isResendID(id: string): boolean {
-  return /^msg_.+_r\d+$/.test(String(id ?? ''));
-}
-
 /** Every message timestamp of one local day, from the JSONL truth (resends excluded). */
 export function dayMessageTimes(day: string, options: { file?: string } = {}): number[] {
   const { messages } = readMessages(options.file ? { file: options.file } : {});
-  const out: number[] = [];
-  for (const message of messages) {
-    if (isResendID(message.id)) continue;
-    if (dayKey(message.sentAt) !== day) continue;
-    out.push(message.sentAt);
-  }
-  return out;
-}
-
-export interface PacingMetricsRow {
-  day: string;
-  msg_count: number;
-  noop_count: number;
-  late_count: number;
-  median_gap_ms: number;
+  return timesByDay(messages).get(day) ?? [];
 }
 
 /** Compute one day's row from the log + the counters (pure except the file read). */
-export function pacingMetrics(day: string, counters: PacingDayCounters, options: { file?: string } = {}): PacingMetricsRow {
-  const times = dayMessageTimes(day, options);
-  return {
-    day,
-    msg_count: times.length,
-    noop_count: counters.noop,
-    late_count: counters.late,
-    median_gap_ms: medianGapMs(times)
-  };
+export function pacingMetrics(day: string, counters: PacingDayCounters, options: { file?: string } = {}): DayMetricsRow {
+  return aggregateDay(day, dayMessageTimes(day, options), counters);
 }
 
 /**
@@ -537,7 +489,7 @@ export async function refreshMetrics(
     now?: number;
     force?: boolean;
   } = {}
-): Promise<PacingMetricsRow | undefined> {
+): Promise<DayMetricsRow | undefined> {
   const now = Number(options.now) || Date.now();
   const day = String(options.day ?? dayKey(now));
   const state = readPacing(options.file ? { file: options.file } : {});

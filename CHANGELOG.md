@@ -46,6 +46,50 @@
 `git restore -- src/rpc.ts src/core/snapshot.ts src/core/board.ts src/core/contract.ts src/gui.tsx src/tui.tsx`；
 删未跟踪文件 `rm src/core/contract-view.ts src/core/age.ts`（回滚后看板与 0.9.6 一致，契约文件本身不受影响）。
 
+> **收尾：`rebuild` 重算 `metrics`**（`11-21-collab-0p9-close`）。实测缺陷：`collab_index rebuild` 之后
+> `metrics` 从 1 行变 0 行 —— 在「全局单库永久保留」的策略下，历史指标不可追溯。本批让重建**重算**派生指标
+> 并显示覆盖范围；顺带修掉 `test/pacing.mjs` 里「真实 `collab-pacing.json` 不存在」这条在**插件运行时必然误红**的断言。
+> 工具面 **28 不增**，投递语义与四字段口径不变。
+
+### Fixed
+
+- **`rebuild` 重算 `metrics`（R1）**：新增 `src/core/metrics.ts` 作为**唯一聚合实现** `aggregateDay(day, times, counters)`
+  —— `msg_count`（排除 `msg_…_r<n>` 重发行）/ `median_gap_ms` / `noop_count` / `late_count`。投递侧
+  （`pacing.pacingMetrics`）与重建侧（`index-db.rebuild`）都调它，两套口径不可能漂移。重建结束时按同一
+  `--sinceDays` 窗口（默认 180，`0` 不限）对**日志里存在的每一天** `UPSERT`；`noop/late` 取
+  `collab-pacing.json` 的 `counters[day]`（缺失 / 坏文件 / 外来 `v` → 0，不伪造）。**幂等**：两次 rebuild 的
+  `metrics` checksum 相同（实机 `1d5a6ed30110ec60` ×2）。
+- **`sinceDays:0` 真的不限（F1，复核）**：`collab_index` 过去只在 `sinceDays > 0` 时下传，`{sinceDays:0}`
+  实跑仍落回 180 天（而 schema / 文档 / 预览三处都写「0 = 不限」）。现在 `>= 0` 原样下传到 `rebuild`，
+  预览文案随之切换（参数 0 写「不按时间过滤，全量重建」，默认写「保留最近 180 天」）。
+- **投影窗口一致（F2，复核）**：`rebuild` 的 delta pass 过去不按 `cutoff` 过滤，窗口外的老消息可能被重新插入
+  `messages`，而 `metrics` 是按 cutoff 重算的 → 出现「`messages` 有更早的行、覆盖范围却没有」。现在初始遍历 /
+  delta pass / 重算三处共用同一个 `cutoff`；`stats` 的 `metrics 覆盖` 与 `messages` 的日期跨度（按指标口径）
+  **必须一致**，测试断言两组（`sinceDays:3` / `sinceDays:0`）。窗口外的旧 `metrics` 行在新库里不存在是**预期**
+  （投影可裁剪；JSONL 永久保留，`sinceDays:0` 随时重建全量）。
+- **测试隔离（R5）**：`test/pacing.mjs` 的「不创建真实 `collab-pacing.json`」改为**前后快照**（size + mtime），
+  与 0.9.0 的 B1 同一写法 —— 本机该文件本来就存在（978B），旧断言在任何健康安装上都会误红。
+
+### Added
+
+- **覆盖范围（R2）**：`collab_index stats` 多一行 `metrics 覆盖 <首日>–<末日>（N 天）`；无数据写
+  `metrics 覆盖 无`（不推断、不补造）。`IndexStats.metricsRange = { first, last, days }` 为 additive 字段。
+
+### Changed
+
+- `StoreOptions.pacingFile`（harness）：重建时可注入 pacing 文件，测试不再依赖进程级 env。
+- `PACING_VERSION` 移入 `constants.ts`（`pacing.ts` 继续导出），供计数器读取方校验文件版本。
+- 回归基线 `1788 → 1801`：`test/store-rebuild.mjs` **43 项**（30 → 43：重算一致 / 重发行排除 / 计数器来源 / 两次 checksum /
+  `sinceDays` 窗口 / 覆盖范围 / 无数据「无」/ `sinceDays:0` 全量 / `messages` 与 `metrics` 跨度一致 ×2 /
+  工具层 0 下传 + 预览文案）；`test/pacing.mjs` 仍 89（该条断言换写法）。工具数仍 **28**。
+- 变异实测：重算不排除 `_r\d+$` → `msg_count 5≠3` 1 条红；不读 pacing 计数 → `noop/late` 2 条红；
+  `stats` 不输出覆盖范围 → 2 条红；工具层退回 `sinceDays > 0` → F1 2 条红。
+
+### 回滚
+
+`git restore -- src/core/index-db.ts src/core/pacing.ts src/tools/store.ts src/constants.ts src/types.ts src/index.ts test/pacing.mjs test/store-rebuild.mjs README.md docs/collab.md`；
+删未跟踪文件 `rm src/core/metrics.ts`（回滚后 `rebuild` 再次清空 `metrics`，投递侧行为不变）。
+
 ## [0.9.6] - 2026-11-20
 
 > **2min 批量投递 + 无增量不发**。消息间隔 p10 **6.6s** / p50 **20s** / p90 **90s**，最长连续 **151 条**

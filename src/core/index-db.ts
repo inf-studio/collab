@@ -45,6 +45,8 @@ import { envelopeHead } from './envelope.ts';
 import { readFreezes } from './freeze.ts';
 import { freezeFor } from './freeze-pure.ts';
 import { allLocks } from './locks.ts';
+import { aggregateDay, readPacingCounters, timesByDay } from './metrics.ts';
+import type { DayMetricsRow } from './metrics.ts';
 import { allQueueItems } from './owner-queue.ts';
 import { appendMessage, readMessages } from './store.ts';
 import { readThreadIndex } from './thread-index.ts';
@@ -103,6 +105,8 @@ export interface StoreOptions {
   storage?: 'sqlite' | 'json';
   /** Override the message log (harness). */
   messagesFile?: string;
+  /** Override the pacing state file whose `counters[day]` feed `metrics` (harness). */
+  pacingFile?: string;
   /** Override the hand-off source (harness). */
   broadcasts?: BroadcastRecord[];
   /** Override the thread index (harness). */
@@ -133,6 +137,24 @@ function cutoffOf(options: StoreOptions): number {
   const days = Number(options.sinceDays ?? REBUILD_SINCE_DAYS);
   if (!Number.isFinite(days) || days <= 0) return 0;
   return now - days * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * R1 (`11-21-collab-0p9-close`): rebuild recomputes `metrics` for **every day
+ * the message log covers** — never a fabricated day, never a missing one.
+ *
+ * The measured defect this closes: `rebuild` dropped the whole `metrics` table
+ * (`metrics=1` → `metrics=0`), so under the "one global database, kept forever"
+ * policy the history was untraceable. `msg_count` / `median_gap_ms` come from
+ * the log (resends excluded), `noop_count` / `late_count` from the pacing
+ * file's `counters[day]` — the only place they are accumulated.
+ */
+function metricsRowsOf(messages: MessageEnvelope[], options: StoreOptions): DayMetricsRow[] {
+  const counters = readPacingCounters(options.pacingFile);
+  const byDay = timesByDay(messages);
+  return [...byDay.keys()]
+    .sort((left, right) => left.localeCompare(right))
+    .map(day => aggregateDay(day, byDay.get(day) ?? [], counters[day] ?? { noop: 0, late: 0 }));
 }
 
 /** Which hand-off bids a freeze covers right now (`handoffs.frozen`, display only). */
@@ -343,6 +365,29 @@ const METRIC_FIELDS = [
   'late_count'
 ] as const;
 
+/**
+ * The one `metrics` UPSERT statement: the delivery path (`upsertMetrics`) and
+ * the rebuild's recompute (`writeMetricsRow`) must not drift apart.
+ */
+const METRICS_UPSERT = `INSERT INTO metrics (${['day', ...METRIC_FIELDS].join(', ')})
+   VALUES (${['?', ...METRIC_FIELDS.map(() => '?')].join(', ')})
+   ON CONFLICT(day) DO UPDATE SET ${METRIC_FIELDS.map(field => `${field} = COALESCE(excluded.${field}, metrics.${field})`).join(', ')}`;
+
+function metricsValues(row: MetricsRowInput): (number | null)[] {
+  return METRIC_FIELDS.map(field => {
+    const value = row[field];
+    return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+  });
+}
+
+/** Write one row on a handle the caller already owns (inside its transaction). */
+function writeMetricsRow(handle: DbHandle, row: MetricsRowInput): boolean {
+  const day = String(row?.day ?? '').trim();
+  if (!day) return false;
+  handle.prepare(METRICS_UPSERT).run(day, ...metricsValues(row));
+  return true;
+}
+
 export async function upsertMetrics(row: MetricsRowInput, options: StoreOptions = {}): Promise<boolean> {
   const day = String(row?.day ?? '').trim();
   if (!day) return false;
@@ -350,21 +395,8 @@ export async function upsertMetrics(row: MetricsRowInput, options: StoreOptions 
   await waitForRebuild(dbPath);
   const handle = await openIndex(options);
   if (!handle) return false;
-  const values = METRIC_FIELDS.map(field => {
-    const value = row[field];
-    return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
-  });
-  const columns = ['day', ...METRIC_FIELDS].join(', ');
-  const placeholders = ['?', ...METRIC_FIELDS.map(() => '?')].join(', ');
-  const updates = METRIC_FIELDS.map(field => `${field} = COALESCE(excluded.${field}, metrics.${field})`).join(', ');
   try {
-    await withRetry(() =>
-      runSerial(`db:${handle.path}`, () =>
-        handle
-          .prepare(`INSERT INTO metrics (${columns}) VALUES (${placeholders}) ON CONFLICT(day) DO UPDATE SET ${updates}`)
-          .run(day, ...values)
-      )
-    );
+    await withRetry(() => runSerial(`db:${handle.path}`, () => writeMetricsRow(handle, row)));
     return true;
   } catch (error) {
     log(`metrics insert failed (${errText(error)}); the projection can be rebuilt`);
@@ -560,7 +592,8 @@ export async function rebuild(options: StoreOptions = {}): Promise<RebuildResult
       setMeta(handle, 'source_messages', String(messages.length));
       handle.exec('COMMIT');
       counts = countsOf(handle);
-      checksums = tableChecksums(handle);
+      // Checksums are computed after the delta + metrics pass (below), so they
+      // describe the database that is actually in place.
       // Everything is in the main file after a TRUNCATE checkpoint; closing then
       // removes the (empty) WAL siblings so the rename cannot resurrect them.
       handle.exec('PRAGMA wal_checkpoint(TRUNCATE);');
@@ -599,21 +632,33 @@ export async function rebuild(options: StoreOptions = {}): Promise<RebuildResult
     const fresh = await openDb({ path: dbPath, storage: target.storage });
     if (fresh) {
       const after = readMessages(options.messagesFile ? { file: options.messagesFile } : {});
-      const late = after.messages.filter(message => !built.has(message.id));
-      if (late.length) {
+      // F2 (review): the delta pass applies the **same** `sinceDays` window as
+      // the initial pass and the `metrics` recompute. Before that, a message
+      // appended mid-rebuild with an old `sentAt` landed in `messages` while
+      // `metrics` (cutoff-filtered) did not cover it — `stats` then showed
+      // `messages=3` with a 2-day coverage. The projection is a derived store:
+      // `sinceDays` trims it, the JSONL truth is never trimmed, and
+      // `sinceDays:0` rebuilds the full history at any time.
+      const inWindow = after.messages.filter(message => cutoff === 0 || message.sentAt >= cutoff);
+      const late = inWindow.filter(message => !built.has(message.id));
+      // R1: `metrics` is part of the projection. Recompute it from the **final**
+      // log (same window as the rebuild) so the returned checksums — and the
+      // "two rebuilds agree" promise — cover the rows the operator queries.
+      const metricRows = metricsRowsOf(inWindow, options);
+      try {
+        fresh.exec('BEGIN IMMEDIATE');
+        for (const envelope of late) insertRow(fresh, envelope, envelope.sentAt);
+        for (const row of metricRows) writeMetricsRow(fresh, row);
+        fresh.exec('COMMIT');
+        counts = countsOf(fresh);
+        checksums = tableChecksums(fresh);
+      } catch (error) {
         try {
-          fresh.exec('BEGIN IMMEDIATE');
-          for (const envelope of late) insertRow(fresh, envelope, envelope.sentAt);
-          fresh.exec('COMMIT');
-          counts = countsOf(fresh);
-        } catch (error) {
-          try {
-            fresh.exec('ROLLBACK');
-          } catch {
-            /* ignore */
-          }
-          log(`rebuild delta pass failed: ${errText(error)}`);
+          fresh.exec('ROLLBACK');
+        } catch {
+          /* ignore */
         }
+        log(`rebuild delta/metrics pass failed: ${errText(error)}`);
       }
       closeDb(dbPath);
     }
@@ -684,6 +729,24 @@ export async function backfill(options: StoreOptions = {}): Promise<RebuildResul
  */
 let statusCache: { key: string; at: number; value: Awaited<ReturnType<typeof computeStatus>> } | undefined;
 
+/**
+ * R2 (`11-21-collab-0p9-close`): the days `metrics` actually covers. `undefined`
+ * when the table is empty — `stats` then says 「无」 instead of inventing a range.
+ */
+function metricsCoverage(handle: DbHandle): IndexStats['metricsRange'] {
+  try {
+    const row = handle.prepare('SELECT MIN(day) AS first, MAX(day) AS last, COUNT(*) AS days FROM metrics').get() as
+      | { first?: string | null; last?: string | null; days?: number | bigint }
+      | undefined;
+    const first = String(row?.first ?? '').trim();
+    const last = String(row?.last ?? '').trim();
+    if (!first || !last) return undefined;
+    return { first, last, days: Number(row?.days ?? 0) };
+  } catch {
+    return undefined;
+  }
+}
+
 async function computeStatus(options: StoreOptions): Promise<{
   available: boolean;
   dbPath: string;
@@ -693,6 +756,7 @@ async function computeStatus(options: StoreOptions): Promise<{
   counts: Record<string, number>;
   backfilled: boolean;
   rebuiltAt?: number;
+  metricsRange?: IndexStats['metricsRange'];
 }> {
   const dbPath = dbPathOf(options);
   const mode = resolved(options).storage;
@@ -708,6 +772,7 @@ async function computeStatus(options: StoreOptions): Promise<{
     if (!hasSchema(handle)) return { ...base, available: false, reason: '未建立索引（先跑 collab_index rebuild）' };
     const counts = countsOf(handle);
     const rebuiltAt = Number(metaValue(handle, 'rebuilt_at')) || undefined;
+    const metricsRange = metricsCoverage(handle);
     return {
       ...base,
       available: true,
@@ -715,7 +780,8 @@ async function computeStatus(options: StoreOptions): Promise<{
       bytes: statSync(dbPath).size,
       counts,
       backfilled: metaValue(handle, 'backfilled') === '1',
-      ...(rebuiltAt ? { rebuiltAt } : {})
+      ...(rebuiltAt ? { rebuiltAt } : {}),
+      ...(metricsRange ? { metricsRange } : {})
     };
   } catch (error) {
     log(`index stats failed: ${errText(error)}`);

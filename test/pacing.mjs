@@ -32,7 +32,7 @@
  *
  * Exits 1 if any check fails.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -50,6 +50,26 @@ mkdirSync(contractDir, { recursive: true });
  * must fail — that is the whole point of the assertion.
  */
 const WINDOW_MS = Number(process.env.PACING_TEST_WINDOW_MS ?? 120_000);
+
+/**
+ * R5 (`11-21-collab-0p9-close`): the operator's **real** pacing file may well
+ * exist — this machine runs the plugin. "The file was not created" was an
+ * assertion that goes red on any healthy install, so the isolation rule is a
+ * **snapshot**: size + mtime taken before the suite must equal the values after
+ * (the same pattern as 0.9.0's B1 check).
+ */
+const realDir = join(homedir(), '.config', 'opencode');
+const snapshotOf = path => {
+  try {
+    const stat = statSync(path);
+    return `${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return 'absent';
+  }
+};
+const realPacingPath = join(realDir, 'collab-pacing.json');
+const realDecisionPath = join(realDir, 'collab-decisions', 't_pacenoop.json');
+const realPacingBefore = snapshotOf(realPacingPath);
 
 // Every global path is read once at import: pin them *before* importing.
 process.env.COLLAB_CONTRACT_DIR = contractDir;
@@ -922,9 +942,19 @@ internals.clearFlushTimers();
 
 // -------------------------------------------------- no real ~/.config writes
 section('11) this suite never writes the operator’s real ~/.config/opencode');
-const realDir9 = join(homedir(), '.config', 'opencode');
-expect('no real collab-pacing.json was created', !existsSync(join(realDir9, 'collab-pacing.json')));
-expect('no real collab-decisions/ was created by the decision case', !existsSync(join(realDir9, 'collab-decisions', 't_pacenoop.json')));
+// R5: snapshot, not "absent" — the plugin is running on this machine and its
+// buffer file legitimately exists. Size + mtime unchanged is the real claim.
+const realPacingAfter = snapshotOf(realPacingPath);
+expect(
+  'the real collab-pacing.json is unchanged by this suite (size + mtime snapshot)',
+  realPacingAfter === realPacingBefore,
+  `${realPacingBefore} → ${realPacingAfter}`
+);
+expect(
+  'no real collab-decisions/ was created by the decision case',
+  !existsSync(realDecisionPath),
+  realDecisionPath
+);
 
 // ------------------------------------------------------------------ summary
 const failed = checks.filter(check => !check.ok);

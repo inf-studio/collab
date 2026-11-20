@@ -283,7 +283,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_locks` | `{ resource? }` | **只读**列出租约：`resource / free 或 held / mode / holders / 剩余 / ttl / waiters / 我的位置`。不改状态、不回收、不叫醒排队者；过期租约直接显示 `free`。`collab_list` 会额外追加本会话「持有 / 排队中」 |
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 | `collab_archive` | `{ bid?, session?, restore?, confirm }` | **归档 spawn 会话（0.5.0，归档 ≠ 删除）**：`PATCH /api/session/{id} { archived:true }`（宿主无 `session.update` 时走 `COLLAB_SERVER_URL` HTTP），会话与消息保留、记录 `state/receipt` 不变，`restore:true` → `archived:false` 并清 `archivedAt`。`bid` 只认得**本插件拉起的**会话（`claim.by`；spawn 租约过期后才被领取的取 `expiredClaim.by`），别的单一律报错并提示改用 `session` 直指；`confirm:false` 只预览。自动路径还有 10 分钟防抖（默认）/idle/未决引用/未读队列等门（见 §11.13），**手动工具跳过这些门**，但 `[protected*]` 一律拒绝 |
-| `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
+| `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled` / `metrics` 覆盖范围「首日–末日（N 天）」，无数据写「无」），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天；结束时按同一窗口**重算 `metrics`** —— 逐日 `msg_count`（排除 `_r<n>` 重发行）/ `median_gap_ms`（与投递侧同一函数）/ `noop_count` / `late_count`（取 `collab-pacing.json` 的 `counters[day]`，缺失记 0），只覆盖日志里存在的日期）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
 | `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by?, next?, on?, reason? }` | **会话契约主线（0.9.1；0.9.3 三选一）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。**0.9.3**：`resume {next}` / `block {on,reason}` / `done` 是回答 `[drift]` 的唯一三个动作；`done` 要求已有 mainline next-up 待办。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 / §11.24 |
 | `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
 | `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, factId?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。`factId?`（0.9.4）：这条待办依据的事实（`F3`，ref 同时记 `workspace`）；同一工作区的事实被作废后行保留并标 `⚠失效`（§11.25）。见 §11.22 / §11.24 |
@@ -1973,10 +1973,21 @@ collab_index { action:"backfill", confirm:true }             # 回填历史状�
 | 幂等 | 同一输入两次 rebuild：行数 + 每表 checksum 完全相同（`meta` 的 `rebuilt_at` / `rebuilt_ms` 等易变键不计入） |
 | 原子 | 建在 `<dbPath>.tmp` → `PRAGMA wal_checkpoint(TRUNCATE)` → 关闭 → `fsync` → rename；**失败保留旧库**并返回可读错误 |
 | 坏行 | jsonl 里一行非法 JSON / 半行 / 哈希不符 → 跳过并计入 `warnCount`，rebuild 仍然成功 |
+| metrics | `rebuild` 结束时**重算**每日 `metrics`（0.9.7）：`msg_count` / `median_gap_ms` 来自消息日志（`_r<n>` 重发行排除，与投递侧同一个 `aggregateDay`），`noop_count` / `late_count` 取 `collab-pacing.json` 的 `counters[day]`（缺失 / 坏文件 / 外来版本 → 0）；只覆盖日志里存在的日期，`--sinceDays` 同窗口；两次 rebuild 的 `metrics` checksum 相同。`stats` 多一行 `metrics 覆盖 <首日>–<末日>（N 天）`，无数据显示 `metrics 覆盖 无` |
 | 回填 | 只写 `handoffs` / `threads`；正文历史上没存过 → **不写 messages 行**，`meta.backfilled=1` 标记「历史不完整」 |
 | 降级 | `storage:"json"` 不 import sqlite；库损坏 / 驱动异常 → 进程级熔断，后续调用直接走 JSON；看板显示 `[索引不可用]` |
 | 并发 | 写入单进程串行（Promise 队列）+ 跨进程 WAL / `busy_timeout` / 3 次指数退避（50/200/800ms）；`rebuild` 持 `<dbPath>.lock`（60s 判陈旧），写方短暂等待；**rename 后按 inode 重开**，否则会写进被 unlink 的旧文件 |
 | 消息覆盖 | 除 `send`/`reply`/接管请求外，`collab_escalate` / `collab_freeze` 通知（notify）· `notifyRequester`（note）· `[ack]`（ack，同 cid 只写一次）· 受限重发（request，`_r<n>`，带 `resend_of`，指标可排除）· 缺陷上报（note）都各写一行 |
+
+#### 窗口（`sinceDays`，0.9.7）
+
+- `sinceDays` **只裁剪投影**：`messages` 与 `metrics` 用**同一个窗口**（初始遍历、delta pass、重算三处同一个
+  `cutoff`）。JSONL 是永久真源、不被裁剪，任何时候 `collab_index { action:"rebuild", sinceDays:0, confirm:true }`
+  都能重建全量（0 = 不按时间过滤，工具层原样下传）。
+- 窗口外的旧 `metrics` 行**在新库里不存在**——这是预期（重建出来的是裁剪后的投影），不是历史丢失：
+  用 `sinceDays:0` 重建即可补回。
+- `stats` 的 `metrics 覆盖 <首日>–<末日>` 与该库 `messages` 的日期跨度**必须一致**（测试断言，`sinceDays:3`
+  与 `sinceDays:0` 各一组）；出现「messages 有更早的行、覆盖范围却没有」即为回归。
 
 #### 读路径（0.9.0 review 后）
 
@@ -1998,11 +2009,15 @@ collab_index { action:"backfill", confirm:true }             # 回填历史状�
 
 #### 验收
 
-`test/store-rebuild.mjs`（30 项）：工具面 22 → 23 · `storage:"json"` 不 import · 1.5MB 分片 + 引号/CJK/换行三种
+`test/store-rebuild.mjs`（30 → 43 项）：工具面 22 → 23 · `storage:"json"` 不 import · 1.5MB 分片 + 引号/CJK/换行三种
 **编码后** 1MB 边界 · 重建幂等（行数 + checksum + `sent_at` 值）· 坏行容错 · 新装 `stats.available=true` ·
 坏库降级 · 熔断只触发一次 · 读路径命中 / 等价 / 陈旧回落 · 单 rebuild 锁 · 子进程连续写 + 6 次并发 rebuild 零丢失 ·
 回填 24 / 49（宿主实测 50）且不伪造 messages；真源写失败时跳过索引（S2）；
-只跑 rebuild 读者命中（P1-1）· 冷启动只读不建库 / 0 条 mirror 日志（P1-2）· 按源水位（P1-3）· frozen 不被清零（S9）。
+只跑 rebuild 读者命中（P1-1）· 冷启动只读不建库 / 0 条 mirror 日志（P1-2）· 按源水位（P1-3）· frozen 不被清零（S9）；
+**`rebuild` 重算 `metrics`**（0.9.7，43 项）：3 天消息 + pacing 计数 → 与写入侧逐日逐字段一致 · `_r1`/`_r2` 不计入 `msg_count` ·
+两次 rebuild 的 `metrics` checksum 相同 · `sinceDays` 限定重算范围 · `stats` 覆盖范围 / 无数据时「无」·
+`sinceDays:0` 全量（1 年前的消息也进库）· `messages` 与 `metrics` 的日期跨度一致（3 天窗 / 全量各一组）·
+工具层把 `sinceDays:0` 原样下传、预览文案随之切换。
 `test/delivery-history.mjs`（9 项）：六个补充投递点各 1 行、kind 正确、ack 同 cid 不重复；
 重发行 `resend_of` 可用于排除指标（S10）。
 
@@ -2656,7 +2671,11 @@ conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **co
   `median_gap_ms`（当天**全机**相邻消息间隔中位数 —— 不分会话/对端）。刷新由投递路径触发，**最多 1 分钟一次**（`PACING_METRICS_TTL_MS`），
   `storage:"json"` 时跳过（没有投影）；
 - `msg_count` 是**消息数**（一条批量 = 1），不是 item 数 —— 这正是「消息总量」的口径；
-- `rebuild` 不重建 `metrics`（它是可重建投影的派生值）：删库后当天那一行会在下一次投递刷新时重算。
+- `rebuild` **重算** `metrics`（0.9.7，修复「重建后 `metrics=0`」）：`metrics` 表不是投递侧的私产，而是可投影的派生值——
+  重建结束时按同一 `--sinceDays` 窗口对**日志里存在的每一天**跑一次 `aggregateDay`（投递侧与重建共用这一个函数），
+  所以 `msg_count` / `median_gap_ms` 不可能出现两套口径；`noop_count` / `late_count` 只有 `collab-pacing.json`
+  一个写点，重建时直接读它的 `counters[day]`（缺失 / 坏文件 → 0，不伪造）。`stats` 用
+  `metrics 覆盖 <首日>–<末日>（N 天）` 说清覆盖到哪，无数据时写 `无`；安装前的历史不存在，不补造。
 
 #### 回滚
 
@@ -2672,7 +2691,9 @@ conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **co
 **增量基线按对端**（同一事实 B 之后仍发给 C，再发 B 才抑制）· **记账失败不重投**（storage 写失败仍只投 1 次）·
 **零窗口时 `context` 不建缓冲文件** · `collab_wait` 对窗口内 thread 给 flush 时间 · 失败重放保留更早 `openedAt` ·
 窗口 item 上限（201 → 提前 flush，不丢 item）· 过期窗口由 `context` 补齐 · 超 5min 迟到仍投递且只投一次（`late_count`）· 直通四例（escalate / blocked / protected / bid）+ `windowMs:0` · 失败 flush 保留 item 并重投 ·
-`metrics` 四字段落库 + `resend_of` 排除 · 624 条回放（per-target p50 间隔、总量降幅）。
+`metrics` 四字段落库 + `resend_of` 排除 · 624 条回放（per-target p50 间隔、总量降幅）·
+真实 `~/.config/opencode/collab-pacing.json` 用**前后快照**（size + mtime，0.9.7）断言本套件没有改动它 ——
+插件运行时该文件本来就存在，「文件不存在」的写法在任何健康安装上都会误红。
 **变异（强制）**：`PACING_TEST_WINDOW_MS=0 node test/pacing.mjs` → 「10 条合并为 1」必红（实测退出码 1）。
 
 **回放口径（合成数据估计，非线上实测）**：624 条按 PRD 的 gap 分位数（p10 6.6s / p50 20s / p90 90s）+

@@ -45,6 +45,13 @@ const tableLine = (counts: Record<string, number>, keys: string[]): string =>
     )
     .join('  ');
 
+/** R2 (0.9.7): 「metrics 覆盖 2026-11-20–2026-11-21（2 天）」 or an honest 「无」. */
+function metricsCoverageLine(stats: { metricsRange?: { first: string; last: string; days: number } }): string {
+  const range = stats.metricsRange;
+  if (!range) return 'metrics 覆盖 无';
+  return `metrics 覆盖 ${range.first}–${range.last}（${range.days} 天）`;
+}
+
 function renderRebuild(result: RebuildResult, action: 'rebuild' | 'backfill'): string {
   if (!result.ok) {
     return `[索引不可用] ${action} 未完成：${result.reason ?? 'unknown error'}（旧库保留，工具与看板仍可用）`;
@@ -82,7 +89,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
       'Maintain the rebuildable message index (`collab.db`). `stats` is read-only and reports the projection ' +
       '(tables, rows, backend) or why it is unavailable. `rebuild` re-creates it from `collab-messages.jsonl` + ' +
       'the `collab-*.json` files into a temp file, fsyncs and atomically renames (idempotent: the same input ' +
-      'gives the same row counts and per-table checksums; a failure keeps the old database). `backfill` adds the ' +
+      'gives the same row counts and per-table checksums; a failure keeps the old database). It also recomputes ' +
+      'the per-day `metrics` rows from the message log (resends excluded) and the pacing counters, and `stats` ' +
+      'reports the day range those rows cover. `backfill` adds the ' +
       'status-level history of the pre-0.9.0 files (hand-offs / threads; bodies were never stored, so no messages ' +
       'rows are invented and `meta.backfilled=1` marks the partial history). The JSON files are the source of ' +
       'truth; deleting `collab.db` never loses a message. `rebuild` / `backfill` write and need `confirm:true`; ' +
@@ -96,7 +105,7 @@ export function indexTool(kit: ToolKit): ToolDefinition {
         },
         sinceDays: {
           type: 'number',
-          description: `rebuild 只保留最近 N 天（默认 180；0 表示不按时间过滤）。`
+          description: `rebuild 的投影只保留最近 N 天（默认 180；0 = 不按时间过滤）。只裁剪投影，JSONL 真源永久保留。`
         },
         confirm: {
           type: 'boolean',
@@ -108,11 +117,16 @@ export function indexTool(kit: ToolKit): ToolDefinition {
     async execute(input) {
       const action = String(input?.action ?? '').trim();
       const config = readConfig();
+      // F1 (review): `sinceDays:0` means "no time filter" and must reach the
+      // core — the old `> 0` test silently turned it back into the 180-day
+      // default (schema / docs / preview all promised 0 = unlimited).
       const sinceDays = Number(input?.sinceDays);
+      const windowed = Number.isFinite(sinceDays) && sinceDays >= 0;
+      const days = windowed ? sinceDays : REBUILD_SINCE_DAYS;
       const options = {
         dbPath: config.dbPath,
         storage: config.storage,
-        ...(Number.isFinite(sinceDays) && sinceDays > 0 ? { sinceDays } : {})
+        ...(windowed ? { sinceDays } : {})
       };
 
       if (action === 'stats') {
@@ -130,6 +144,7 @@ export function indexTool(kit: ToolKit): ToolDefinition {
           content: [
             `索引可用: ${stats.dbPath}  backend=${stats.backend ?? '?'}  size=${stats.bytes ?? 0}B`,
             `行数: ${tableLine(stats.counts, ['messages', 'threads', 'handoffs', 'locks', 'queue', 'sessions', 'facts', 'todos', 'decisions', 'progress', 'metrics'])}`,
+            metricsCoverageLine(stats),
             `backfilled=${stats.backfilled}${stats.rebuiltAt ? `  rebuilt_at=${new Date(stats.rebuiltAt).toISOString()}` : ''}`,
             '只读：stats 不建库、不写入（没有索引时看板显示 [索引不可用]）。'
           ].join('\n')
@@ -152,7 +167,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             `未执行（confirm 不为 true，仅预览）。将${action === 'rebuild' ? '全量重建' : '回填'}索引:`,
             `dbPath=${config.dbPath}`,
             action === 'rebuild'
-              ? `来源: collab-messages.jsonl + collab-*.json（保留最近 ${Number.isFinite(sinceDays) && sinceDays > 0 ? sinceDays : REBUILD_SINCE_DAYS} 天）`
+              ? days === 0
+                ? '来源: collab-messages.jsonl + collab-*.json（sinceDays:0 → 不按时间过滤，全量重建）'
+                : `来源: collab-messages.jsonl + collab-*.json（保留最近 ${days} 天；JSONL 永久保留，之后可用 sinceDays:0 重建全量）`
               : '来源: collab-broadcast/*.json + collab-threads.json（只补状态级历史，不伪造正文）',
             '确认后在同样参数下传 confirm:true。'
           ].join('\n')

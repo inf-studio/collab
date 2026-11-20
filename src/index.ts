@@ -39,6 +39,7 @@ import {
   PACING_MAX_ITEMS,
   PACING_RETRY_MS,
   PACING_SLA_MS,
+  PACING_VERSION,
   PACING_WINDOW_MAX_MS,
   PACING_WINDOW_MS
 } from './constants.ts';
@@ -828,6 +829,7 @@ export const __internals = {
   // delivery policy. The pacing test drives the real functions with an injected
   // clock (no waiting 2 minutes) and a temp state file.
   PACING_FILE,
+  PACING_VERSION,
   PACING_WINDOW_MS,
   PACING_WINDOW_MAX_MS,
   PACING_SLA_MS,

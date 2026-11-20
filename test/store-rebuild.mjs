@@ -28,6 +28,10 @@
  *   8. concurrency: 3 processes × 100 messages → 300 rows, 300 lines, no dup
  *   9. backfill: 24 hand-offs + 49 threads, `meta.backfilled=1`, and **no**
  *      fabricated `messages` rows (bodies were never stored)
+ *  10. R1/R2 (0.9.7): `rebuild` recomputes `metrics` — equal to the write path
+ *      day by day, resends excluded, `noop`/`late` from the pacing counters,
+ *      the same checksum twice, `sinceDays` bounds the window, and `stats`
+ *      prints the coverage range (「无」 when empty)
  *
  * Exits 1 if any check fails.
  */
@@ -872,6 +876,266 @@ expect(
     fabricated === 0,
   `meta=${backfilledMeta.map(row => `${row.key}=${row.value}`).join(',')} / fabricated=${fabricated}`
 );
+
+// ============ 10) R1/R2 (0.9.7): rebuild recomputes metrics + coverage range
+// The measured defect: `rebuild` dropped the whole `metrics` table
+// (`metrics=1` → `metrics=0`). These assertions compare the **write path** rows
+// (the same `pacingMetrics` + `upsertMetrics` the delivery path calls) with the
+// rows a rebuild produces, day by day, and check the coverage line `stats` shows.
+fresh();
+const metricsDir = join(root, 'metrics');
+mkdirSync(metricsDir, { recursive: true });
+const metricsDb = join(metricsDir, 'collab.db');
+const metricsMessages = join(metricsDir, 'collab-messages.jsonl');
+const metricsPacing = join(metricsDir, 'collab-pacing.json');
+const dayAt = (month, day) => new Date(2026, month - 1, day, 12, 0, 0).getTime();
+const mDay1 = dayAt(1, 5);
+const mDay2 = dayAt(1, 6);
+const mDay3 = dayAt(1, 7);
+const mDay = time => internals.dayKey(time);
+const appendMetricsMessage = (id, sentAt) =>
+  appendMessage(
+    internals.makeEnvelope({ id, from: 'ses_m_a', to: 'ses_m_b', sentAt, kind: 'note', body: `metrics ${id}` }),
+    { file: metricsMessages }
+  );
+// Day 1: 3 messages (gaps 10s / 30s → median 20s) + 2 resends (`_r1`/`_r2`).
+appendMetricsMessage('msg_metrics_1', mDay1);
+appendMetricsMessage('msg_metrics_1_r1', mDay1 + 15_000);
+appendMetricsMessage('msg_metrics_2', mDay1 + 10_000);
+appendMetricsMessage('msg_metrics_1_r2', mDay1 + 20_000);
+appendMetricsMessage('msg_metrics_3', mDay1 + 40_000);
+// Day 2: 2 messages, gap 5s. Day 3: 1 message, median 0.
+appendMetricsMessage('msg_metrics_4', mDay2);
+appendMetricsMessage('msg_metrics_5', mDay2 + 5_000);
+appendMetricsMessage('msg_metrics_6', mDay3);
+const mCounters = {
+  [mDay(mDay1)]: { noop: 5, late: 1 },
+  [mDay(mDay2)]: { noop: 2, late: 0 }
+};
+writeJson(metricsPacing, {
+  v: internals.PACING_VERSION,
+  windows: [],
+  counters: mCounters,
+  lastSent: {},
+  noops: {}
+});
+// Write-side rows: exactly what `refreshMetrics` persists (pacingMetrics → upsertMetrics).
+for (const [day, time] of [
+  [mDay(mDay1), mDay1],
+  [mDay(mDay2), mDay2],
+  [mDay(mDay3), mDay3]
+]) {
+  await internals.upsertMetrics(internals.pacingMetrics(day, mCounters[day] ?? { noop: 0, late: 0 }, { file: metricsMessages }), {
+    dbPath: metricsDb
+  });
+}
+const readMetricRows = async path => {
+  const handle = await openDb({ path });
+  const rows = handle
+    .prepare('SELECT day, msg_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day')
+    .all()
+    .map(row => ({
+      day: String(row.day),
+      msg_count: Number(row.msg_count),
+      noop_count: Number(row.noop_count),
+      late_count: Number(row.late_count),
+      median_gap_ms: Number(row.median_gap_ms)
+    }));
+  closeDb();
+  return rows;
+};
+const writeSideRows = await readMetricRows(metricsDb);
+fresh();
+const mFirst = await rebuildIndex({
+  dbPath: metricsDb,
+  messagesFile: metricsMessages,
+  pacingFile: metricsPacing,
+  broadcasts: [],
+  threads: {},
+  sinceDays: 0
+});
+const rebuiltSideRows = await readMetricRows(metricsDb);
+fresh();
+const mSecond = await rebuildIndex({
+  dbPath: metricsDb,
+  messagesFile: metricsMessages,
+  pacingFile: metricsPacing,
+  broadcasts: [],
+  threads: {},
+  sinceDays: 0
+});
+expect(
+  'R1 rebuild 重算 metrics：与写入侧（pacingMetrics + upsertMetrics）逐日、逐字段一致',
+  mFirst.ok &&
+    writeSideRows.length === 3 &&
+    JSON.stringify(rebuiltSideRows) === JSON.stringify(writeSideRows),
+  `${JSON.stringify(rebuiltSideRows)} vs ${JSON.stringify(writeSideRows)}`
+);
+expect(
+  'R1 重发行（_r1/_r2）不计入 msg_count，median_gap_ms 用同一函数（20s / 5s / 0）',
+  rebuiltSideRows[0]?.msg_count === 3 &&
+    rebuiltSideRows[0]?.median_gap_ms === 20_000 &&
+    rebuiltSideRows[1]?.msg_count === 2 &&
+    rebuiltSideRows[1]?.median_gap_ms === 5_000 &&
+    rebuiltSideRows[2]?.msg_count === 1 &&
+    rebuiltSideRows[2]?.median_gap_ms === 0,
+  JSON.stringify(rebuiltSideRows)
+);
+expect(
+  'R1 noop_count / late_count 来自 collab-pacing.json 的 counters[day]（文件缺失记 0）',
+  rebuiltSideRows[0]?.noop_count === 5 &&
+    rebuiltSideRows[0]?.late_count === 1 &&
+    rebuiltSideRows[1]?.noop_count === 2 &&
+    rebuiltSideRows[1]?.late_count === 0 &&
+    rebuiltSideRows[2]?.noop_count === 0 &&
+    rebuiltSideRows[2]?.late_count === 0,
+  JSON.stringify(rebuiltSideRows.map(row => `${row.day}:${row.noop_count}/${row.late_count}`))
+);
+expect(
+  'R1 幂等：两次 rebuild 的 metrics checksum（以及整表 checksum）相同',
+  mFirst.ok &&
+    mSecond.ok &&
+    mFirst.checksums?.metrics === mSecond.checksums?.metrics &&
+    JSON.stringify(mFirst.checksums) === JSON.stringify(mSecond.checksums),
+  `metrics=${mFirst.checksums?.metrics} / ${mSecond.checksums?.metrics}`
+);
+const metricsStats = await indexStats({ dbPath: metricsDb });
+expect(
+  'R2 indexStats 返回 metrics 覆盖范围（首日–末日 + 天数）',
+  metricsStats.available &&
+    metricsStats.metricsRange?.first === mDay(mDay1) &&
+    metricsStats.metricsRange?.last === mDay(mDay3) &&
+    metricsStats.metricsRange?.days === 3,
+  JSON.stringify(metricsStats.metricsRange ?? null)
+);
+// The tool line is what an operator reads — assert the rendered text, not just
+// the field (mutation: `stats` stops printing the range → this must go red).
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: metricsDb });
+const coverageStats = await runIndexTool({ action: 'stats' });
+expect(
+  'R2 `collab_index stats` 输出「metrics 覆盖 <首日>–<末日>（N 天）」',
+  coverageStats.content.includes(`metrics 覆盖 ${mDay(mDay1)}–${mDay(mDay3)}（3 天）`),
+  coverageStats.content.split('\n').find(line => line.includes('metrics 覆盖')) ?? '-'
+);
+// sinceDays bounds the recompute too: 3 days before 2026-01-09 = from 01-06 00:00.
+// F1/F2 (review): first prove the *other* end — `sinceDays:0` keeps a message a
+// year older than the default window, and `messages` / `metrics` always share
+// one window (a rebuild must never leave rows `metrics` does not cover).
+appendMetricsMessage('msg_metrics_old', new Date(2025, 0, 5, 12, 0, 0).getTime());
+/** The metric units of a database: non-resend rows, grouped by local day. */
+const metricSpanOf = async path => {
+  const handle = await openDb({ path });
+  const rows = handle.prepare('SELECT id, sent_at FROM messages').all();
+  const metricDays = handle.prepare('SELECT day FROM metrics ORDER BY day').all().map(row => String(row.day));
+  closeDb();
+  const units = rows.filter(row => !internals.isResendID(String(row.id)));
+  const days = units.map(row => internals.dayKey(Number(row.sent_at))).sort();
+  return { rows: rows.length, units: units.length, first: days[0], last: days.at(-1), metricDays };
+};
+const spansAgree = async path => {
+  const span = await metricSpanOf(path);
+  return span.units === 0
+    ? span.metricDays.length === 0
+    : JSON.stringify([span.first, span.last, span.metricDays.length]) ===
+        JSON.stringify([span.metricDays[0], span.metricDays.at(-1), span.metricDays.length]);
+};
+fresh();
+const mAll = await rebuildIndex({
+  dbPath: metricsDb,
+  messagesFile: metricsMessages,
+  pacingFile: metricsPacing,
+  broadcasts: [],
+  threads: {},
+  sinceDays: 0
+});
+const allRows = await readMetricRows(metricsDb);
+const allSpan = await metricSpanOf(metricsDb);
+expect(
+  'F1 sinceDays:0 = 不按时间过滤：1 年前的消息也进库，metrics 覆盖 4 天（首日 2025-01-05）',
+  mAll.ok &&
+    allSpan.rows === 9 &&
+    allSpan.units === 7 &&
+    allRows.length === 4 &&
+    allRows[0]?.day === mDay(new Date(2025, 0, 5, 12, 0, 0).getTime()) &&
+    allRows.at(-1)?.day === mDay(mDay3),
+  `messages=${allSpan.rows}(units ${allSpan.units}) days=${allRows.map(row => row.day).join(',')}`
+);
+expect(
+  'F2 sinceDays:0：messages 的日期跨度与 metrics 覆盖范围一致（含 2025 年那一天）',
+  await spansAgree(metricsDb),
+  JSON.stringify(await metricSpanOf(metricsDb))
+);
+fresh();
+const mWindowed = await rebuildIndex({
+  dbPath: metricsDb,
+  messagesFile: metricsMessages,
+  pacingFile: metricsPacing,
+  broadcasts: [],
+  threads: {},
+  sinceDays: 3,
+  now: new Date(2026, 0, 9, 0, 0, 0).getTime()
+});
+const windowedRows = await readMetricRows(metricsDb);
+const windowedSpan = await metricSpanOf(metricsDb);
+expect(
+  'R1 sinceDays 限定重算范围：窗口外的那一天不重算、也不伪造（首日 = 01-06）',
+  mWindowed.ok &&
+    windowedRows.length === 2 &&
+    windowedRows[0]?.day === mDay(mDay2) &&
+    windowedRows[1]?.day === mDay(mDay3),
+  JSON.stringify(windowedRows.map(row => row.day))
+);
+expect(
+  'F2 sinceDays:3：messages 也只剩窗口内 3 行（1 年前与 01-05 都不再插入），跨度与 metrics 覆盖一致',
+  windowedSpan.rows === 3 &&
+    windowedSpan.units === 3 &&
+    windowedSpan.first === mDay(mDay2) &&
+    windowedSpan.last === mDay(mDay3) &&
+    (await spansAgree(metricsDb)),
+  JSON.stringify(windowedSpan)
+);
+// And a database with no metrics row says 「无」 instead of inventing a range.
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: b2Db });
+const emptyCoverage = await runIndexTool({ action: 'stats' });
+expect(
+  'R2 无数据时 `stats` 输出「metrics 覆盖 无」（不伪造范围）',
+  /metrics 覆盖 无/.test(emptyCoverage.content),
+  emptyCoverage.content.split('\n').find(line => line.includes('metrics 覆盖')) ?? '-'
+);
+// F1 (review): the tool layer used to drop `sinceDays:0` (only `> 0` was
+// forwarded), so the documented "0 = 不按时间过滤" silently rebuilt 180 days.
+// The shared log here is two messages from 2023 — far outside the default
+// window — so the two rebuilds are distinguishable by row count alone.
+const windowDb = join(metricsDir, 'window.db');
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: windowDb });
+const previewDefault = await runIndexTool({ action: 'rebuild' });
+const previewAll = await runIndexTool({ action: 'rebuild', sinceDays: 0 });
+expect(
+  'F1 预览文案跟随窗口：默认写「保留最近 180 天」，sinceDays:0 写「不按时间过滤」',
+  /保留最近 180 天/.test(previewDefault.content) && /不按时间过滤/.test(previewAll.content),
+  `default=${previewDefault.content.split('\n').find(line => line.startsWith('来源'))} / 0=${previewAll.content
+    .split('\n')
+    .find(line => line.startsWith('来源'))}`
+);
+const rebuildDefault = await runIndexTool({ action: 'rebuild', confirm: true });
+const rebuildAll = await runIndexTool({ action: 'rebuild', sinceDays: 0, confirm: true });
+const windowAllStats = await runIndexTool({ action: 'stats' });
+const oldDay = internals.dayKey(1_700_000_000_001);
+expect(
+  'F1 `collab_index {sinceDays:0, confirm:true}` 真的下传到核心：默认窗口 messages=0，0 时 messages=2',
+  /messages=0/.test(rebuildDefault.content) &&
+    /messages=2/.test(rebuildAll.content) &&
+    windowAllStats.content.includes(`metrics 覆盖 ${oldDay}–${oldDay}（1 天）`),
+  `default=${rebuildDefault.content.split('\n').find(line => line.startsWith('行数'))} / 0=${rebuildAll.content
+    .split('\n')
+    .find(line => line.startsWith('行数'))} / ${windowAllStats.content
+    .split('\n')
+    .find(line => line.includes('metrics 覆盖'))}`
+);
+writeJson(configFile, { storage: 'sqlite' });
 
 // ============================ cleanup + summary
 rmSync(root, { recursive: true, force: true });

@@ -94,6 +94,11 @@ export const DEFAULT_GATE_MODE = 'enforce';
  * (harness / sandbox runs).
  */
 export const PACING_FILE = process.env.COLLAB_PACING_FILE || join(homedir(), '.config', 'opencode', 'collab-pacing.json');
+/**
+ * The state-file version. A foreign `v` is treated as an empty buffer (the
+ * pacing path), and its counters are **not** used as metrics input (0.9.7).
+ */
+export const PACING_VERSION = 1;
 /** Default window (D3). Config `windowMs`; `0` = off. */
 export const PACING_WINDOW_MS = 120_000;
 /** A window wider than this is a typo, not a batching policy (30min). */

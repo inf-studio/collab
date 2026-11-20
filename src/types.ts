@@ -901,6 +901,11 @@ export interface IndexStats {
   counts: Record<string, number>;
   backfilled: boolean;
   rebuiltAt?: number;
+  /**
+   * 0.9.7 (`11-21-collab-0p9-close`, R2): the days `metrics` covers —
+   * `{ first, last, days }`, absent when no row exists (never invented).
+   */
+  metricsRange?: { first: string; last: string; days: number };
 }
 
 /** The messages a `rebuild` / `backfill` actually produced. */
