@@ -38,9 +38,25 @@
   `collab_progress` / `collab_todo` 的写动作沿用插件约定：`confirm:true` 才写。
 - 版本三处同步：`package.json` / `src/constants.ts` / `src/gui.tsx` 探针（`0.9.1`）。
 
+### Fixed（0.9.1 复核）
+
+- **并发 add 重复 id**：`collab_todo add` 的 id / 上限与 `collab_progress add` 的存在性 / 上限都移进
+  `updateContract()` 的串行 mutate 内——修前 `Promise.all(3 × add)` → `[T1,T1,T1]`，修后 `[T1,T2,T3]`；
+  同 id 里程碑并发 add 也只留一行。
+- **`turn.count` 只在有 todo 时推进**：契约文件存在即**每轮无条件**推进 `count/lastAt/startedAt`；
+  mission-only / milestone-only 契约 3 次请求后 `count=3`（修前均为 0，0.9.3 漂移判定会永远从 0 起算）。
+  `noAdvanceTurns` 改为独立条件（上一轮有已验证推进才归零，否则 +1；阈值判定仍属 0.9.3）。
+- **`[未收尾]` 晚两轮**：新增 `turn.startedAt`（本轮请求开始），判定改为
+  `status='doing' && updatedAt ≤ 本轮 startedAt`——请求中途新建的 doing 在下一轮即被标（修前两边都不满足）。
+- **`ambiguous` 锚点噪声**：2+ `in_progress` 且**无契约**时不再注入（修前每次 4 行「未设置」且不含歧义信息）；
+  有契约时 `[mission]` 行写明「有 N 个进行中任务，未选定」并给 `collab_mission set` 的 `taskPath`。
+- **`confirm` 缺省 `by=会话 id`**：`confirm` / `reconfirm` 均强制 `by`（缺省可读拒绝），人类确认不再与模型自确认混淆。
+- **测试覆盖**：并发 add、todo-less 契约的 `turn.count`、`[未收尾]` 两轮序列与关闭后不标、`defer/until/kind:"collab"`、
+  三个工具的 `list`、`[scope]` 走 hook 且随消息变化、`ambiguous` 静默/显式、坏契约文件不抛、`confirm` 缺 `by` 拒绝。
+
 ### Tests
 
-- 新增 `test/contract-inject.mjs`（**49** 项）：工具面 / 连续两轮注入 / 无 evidence 与假 commit 拒绝 /
+- 新增 `test/contract-inject.mjs`（**69** 项）：工具面 / 连续两轮注入 / 无 evidence 与假 commit 拒绝 /
   真 commit 点亮 + `lastAdvancedAt` / 同 evidence 不重复推进 / confirm 后 set 拒绝与 reconfirm 通过 /
   无任务 `[mission] … [未确认]` / 10 条 todo 只列 3 条 + 「还有 7 条」/ suspend 缺 `wakeWhen` 拒绝 /
   close 缺 evidence 与文件不存在拒绝 / 截断时 `[progress]` 整段丢弃 / `[未收尾]` 回溯 / 主线锚
@@ -49,7 +65,7 @@
   还原后 49/49。原始输出见任务报告。
 - **测试隔离**：所有导入 server 模块的套件新增 `COLLAB_CONTRACT_DIR` 固定到临时目录（0.9.0 的 B1 规则延续），
   真实 `~/.config/opencode/collab-contract/` 不会被测试读写。
-- 回归：**900 + 13 + 20 + 53 + 54 + 30 + 49 + 9 + 60 + 47 + 82 = 1317**；工具数 **26**；
+- 回归：**900 + 13 + 20 + 53 + 54 + 30 + 69 + 9 + 60 + 47 + 82 = 1337**；工具数 **26**；
   全段场景（mission+todo+drift+scope+progress）实测 **12 行**（恰好塞满）；10 条 todo 场景 **8 行**（3 条明细 + 还有 7 条）。
 
 ### Notes（与 design 的偏差）

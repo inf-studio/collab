@@ -117,22 +117,29 @@ export function progressTool(kit: ToolKit): ToolDefinition {
       if (action === 'add') {
         const title = truncate(input?.title, 120);
         if (!title) throw invalid('add 需要 title（里程碑标题）');
-        if (contract.plan.milestones.length >= CONTRACT_MILESTONE_LIMIT && !contract.plan.milestones.some(item => item.id === milestoneID)) {
-          throw invalid(`里程碑已达上限 ${CONTRACT_MILESTONE_LIMIT} 条：先清理计划，不要无限增长`);
-        }
-        const existing = contract.plan.milestones.find(item => item.id === milestoneID);
-        const written = await updateContract(sid, latest => ({
-          ...latest,
-          plan: {
-            ...latest.plan,
-            milestones: existing
-              ? latest.plan.milestones.map(item => (item.id === milestoneID ? { ...item, title } : item))
-              : [...latest.plan.milestones, { id: milestoneID, title, done: false }]
+        // Cap + "does it already exist" are decided inside the serialised
+        // mutate: two concurrent adds of the same id would both see the old list
+        // and append the milestone twice (review #1).
+        let existed = false;
+        const written = await updateContract(sid, latest => {
+          const existing = latest.plan.milestones.find(item => item.id === milestoneID);
+          existed = Boolean(existing);
+          if (!existing && latest.plan.milestones.length >= CONTRACT_MILESTONE_LIMIT) {
+            throw invalid(`里程碑已达上限 ${CONTRACT_MILESTONE_LIMIT} 条：先清理计划，不要无限增长`);
           }
-        }));
+          return {
+            ...latest,
+            plan: {
+              ...latest.plan,
+              milestones: existing
+                ? latest.plan.milestones.map(item => (item.id === milestoneID ? { ...item, title } : item))
+                : [...latest.plan.milestones, { id: milestoneID, title, done: false }]
+            }
+          };
+        });
         return {
           content: [
-            `${existing ? '已更新' : '已新增'}里程碑 ${milestoneID}「${title}」`,
+            `${existed ? '已更新' : '已新增'}里程碑 ${milestoneID}「${title}」`,
             ...renderProgress(written, now)
           ].join('\n')
         };

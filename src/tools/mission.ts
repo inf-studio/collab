@@ -9,7 +9,9 @@
  *            refused unless `reconfirm:true` **and** `by` are given (D7: auto
  *            inference never overwrites a human confirmation).
  *   confirm  fix the mission once. After that every injection keeps showing it
- *            and no inference can replace it.
+ *            and no inference can replace it. `by` is **required** — a human
+ *            confirmation must be traceable to a person, not defaulted to the
+ *            session id (review #6).
  */
 
 import { CONTRACT_ONE_LINE_LIMIT, CONTRACT_SCOPE_CHARS, CONTRACT_SCOPE_ITEMS } from '../constants.ts';
@@ -83,7 +85,7 @@ function renderMission(
   ];
   if (!mission.confirmedBy) {
     if (suggestion) {
-      lines.push(`建议主线: ${suggestion}（确认后固定：collab_mission { action:"confirm" }）`);
+      lines.push(`建议主线: ${suggestion}（确认后固定：collab_mission { action:"confirm", by:"<你>" }）`);
     } else {
       lines.push('提示: 没有可推断的主线，请用 collab_mission { action:"set", oneLine:"…" } 后再 confirm。');
     }
@@ -105,7 +107,8 @@ export function missionTool(kit: ToolKit): ToolDefinition {
       '(session pointer → the workspace’s single in_progress task → nothing) plus a suggestion (task title, then the ' +
       'first human instruction) when nothing is set yet. `set` writes the mission; after a human `confirm` it is ' +
       'refused unless `reconfirm:true` and a non-empty `by` are given — inference never overwrites a human ' +
-      'confirmation. `confirm` fixes the mission once; every later request keeps injecting it as `[mission]`. ' +
+      'confirmation. `confirm` fixes the mission once and **requires a non-empty `by`** (who confirmed it — ' +
+      'a session id is not a human); every later request keeps injecting it as `[mission]`. ' +
       'The contract file is created lazily by the first writing call.',
     input: jsonInput({
       properties: {
@@ -147,7 +150,7 @@ export function missionTool(kit: ToolKit): ToolDefinition {
         },
         by: {
           type: 'string',
-          description: '确认人 / 会话（confirm 缺省用当前会话 id；reconfirm 时必填）。'
+          description: '确认人（confirm / reconfirm 必填）：写清是谁拍的板（如 "human" / "@长久同学"），不接受缺省。'
         }
       },
       required: ['action']
@@ -239,6 +242,13 @@ export function missionTool(kit: ToolKit): ToolDefinition {
               '注入会一直显示它；确实要改：collab_mission { action:"set", reconfirm:true, by:"<确认人>", … }'
           };
         }
+        const by = String(input?.by ?? '').trim();
+        if (!by) {
+          throw invalid(
+            'confirm 必须给 by（确认人）：确认要能追溯到人，不能用当前会话 id 代替。' +
+              '例：collab_mission { action:"confirm", by:"human" }'
+          );
+        }
         const oneLine =
           truncate(input?.oneLine, CONTRACT_ONE_LINE_LIMIT) ||
           current.oneLine ||
@@ -250,7 +260,6 @@ export function missionTool(kit: ToolKit): ToolDefinition {
               'collab_mission { action:"set", oneLine:"…" } 然后再 confirm。'
           );
         }
-        const by = String(input?.by ?? '').trim() || sid;
         const taskPath = current.taskPath ?? hint.taskPath;
         const written = await updateContract(sid, latest => ({
           ...latest,

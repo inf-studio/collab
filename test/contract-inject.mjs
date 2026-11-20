@@ -25,6 +25,17 @@
  *      two in_progress tasks → ambiguous (never guessed)
  *  11. `get` suggests the first human instruction when nothing is set
  *
+ * Review round (0.9.1 fixes), cases 12–20:
+ *  12. concurrent `add` → T1/T2/T3 (not T1/T1/T1); same-id milestones collapse
+ *  13. mission-only / milestone-only contracts still advance `turn.count`
+ *  14. `[未收尾]` marks a doing todo created after the previous request
+ *  15. a closed doing todo is never marked
+ *  16. defer/until/kind:"collab" + the three `list` verbs
+ *  17. `[scope]` follows the current message through the hook
+ *  18. ambiguous anchor: silent without a contract, named with one
+ *  19. a corrupt contract file never throws
+ *  20. `confirm` requires a human `by`
+ *
  * Exits 1 if any check fails.
  */
 import { spawnSync } from 'node:child_process';
@@ -412,6 +423,184 @@ expect(
   firstGet.split('\n').find(line => line.includes('建议主线')) ?? firstGet.slice(0, 160)
 );
 expect('get did not create a contract file', !existsSync(internals.contractFile('ses_first')));
+
+
+// ==================================== 12) concurrent adds keep ids unique
+section('12) concurrent adds keep ids unique');
+const parallelAdds = await Promise.all(
+  [1, 2, 3].map(index => call('collab_todo', { action: 'add', subject: `并发待办 ${index}`, confirm: true }, 'ses_parallel'))
+);
+const parallelIds = contractOf('ses_parallel').todos.map(todo => todo.id).sort();
+expect(
+  '3 concurrent collab_todo add → T1,T2,T3 (no duplicates)',
+  JSON.stringify(parallelIds) === JSON.stringify(['T1', 'T2', 'T3']),
+  `${parallelIds.join(',')} via ${parallelAdds.map(text => text.split('\n')[0]).join(' | ')}`
+);
+await Promise.all([
+  call('collab_progress', { action: 'add', milestone: 'M1', title: '并发一', confirm: true }, 'ses_parallel_progress'),
+  call('collab_progress', { action: 'add', milestone: 'M2', title: '并发二', confirm: true }, 'ses_parallel_progress')
+]);
+const parallelMilestones = contractOf('ses_parallel_progress').plan.milestones.map(item => item.id);
+expect(
+  '2 concurrent milestone adds both persist',
+  parallelMilestones.length === 2 && parallelMilestones.includes('M1') && parallelMilestones.includes('M2'),
+  parallelMilestones.join(',')
+);
+await Promise.all([
+  call('collab_progress', { action: 'add', milestone: 'M3', title: '同一 id A', confirm: true }, 'ses_parallel_progress'),
+  call('collab_progress', { action: 'add', milestone: 'M3', title: '同一 id B', confirm: true }, 'ses_parallel_progress')
+]);
+const sameId = contractOf('ses_parallel_progress').plan.milestones.filter(item => item.id === 'M3');
+expect(
+  'concurrent adds of the same milestone id collapse to one row',
+  sameId.length === 1,
+  `${sameId.length} × M3`
+);
+
+// ============================== 13) turn.count advances without todos
+section('13) turn.count advances on contract requests without todos');
+await call('collab_mission', { action: 'confirm', oneLine: '只有主线', by: 'human' }, 'ses_mission_only');
+for (let index = 0; index < 3; index += 1) await ask('ses_mission_only');
+const missionTurn = contractOf('ses_mission_only').turn;
+expect(
+  'mission-only contract: 3 requests → turn.count=3',
+  missionTurn.count === 3 && missionTurn.startedAt > 0,
+  `count=${missionTurn.count} startedAt=${missionTurn.startedAt}`
+);
+await call('collab_progress', { action: 'add', milestone: 'M1', title: '只有里程碑', confirm: true }, 'ses_milestone_only');
+for (let index = 0; index < 3; index += 1) await ask('ses_milestone_only');
+const milestoneTurn = contractOf('ses_milestone_only').turn;
+expect(
+  'milestone-only contract: 3 requests → turn.count=3',
+  milestoneTurn.count === 3,
+  `count=${milestoneTurn.count}`
+);
+
+// ======================== 14) [未收尾] after a mid-sequence creation
+section('14) [未收尾] marks a doing todo created after the previous request');
+await call('collab_mission', { action: 'confirm', oneLine: '未收尾序列', by: 'human' }, 'ses_doing_between');
+await ask('ses_doing_between'); // request 1 stamps turn.lastAt
+await call('collab_todo', { action: 'add', subject: '中途新建的 doing', status: 'doing', confirm: true }, 'ses_doing_between');
+const betweenText = await ask('ses_doing_between'); // request 2
+expect(
+  'the next request marks a doing todo created mid-sequence',
+  betweenText.includes('[未收尾]'),
+  betweenText.split('\n').find(line => line.includes('T1')) ?? betweenText.slice(0, 160)
+);
+
+// ======================== 15) closing clears the [未收尾] mark
+section('15) a closed doing todo is not marked [未收尾]');
+await call('collab_mission', { action: 'confirm', oneLine: '关闭后不标', by: 'human' }, 'ses_doing_closed');
+await call('collab_todo', { action: 'add', subject: '将被关闭', status: 'doing', confirm: true }, 'ses_doing_closed');
+await ask('ses_doing_closed');
+await call('collab_todo', { action: 'close', id: 'T1', evidence: 'file:a.txt:1', confirm: true }, 'ses_doing_closed');
+const closedDoing = await ask('ses_doing_closed');
+expect(
+  'closed todo disappears from [todo] and is never [未收尾]',
+  !closedDoing.includes('[未收尾]') && !closedDoing.includes('将被关闭'),
+  closedDoing.split('\n').find(line => line.startsWith('[todo]')) ?? '(no [todo])'
+);
+
+// ======================== 16) defer / until / kind / list actions
+section('16) defer / until / kind:"collab" / list actions');
+await call('collab_mission', { action: 'confirm', oneLine: '待办细节', by: 'human' }, 'ses_todo_ops');
+await call(
+  'collab_todo',
+  { action: 'add', subject: '协作等待项', kind: 'collab', blockingOn: 'ses_peer', confirm: true },
+  'ses_todo_ops'
+);
+const until = Date.now() + 3_600_000;
+await call('collab_todo', { action: 'defer', id: 'T1', until, reason: '等窗口', confirm: true }, 'ses_todo_ops');
+const opsTodo = contractOf('ses_todo_ops').todos[0];
+expect(
+  'defer stores until + reason and keeps the todo open',
+  opsTodo.status === 'open' && Math.abs(Number(opsTodo.deferredUntil) - until) < 1000 && opsTodo.deferReason === '等窗口',
+  JSON.stringify({ status: opsTodo.status, deferredUntil: opsTodo.deferredUntil, deferReason: opsTodo.deferReason })
+);
+expect(
+  'kind:"collab" and blockingOn persist',
+  opsTodo.kind === 'collab' && opsTodo.blockingOn === 'ses_peer',
+  `${opsTodo.kind} / ${opsTodo.blockingOn}`
+);
+const opsInjection = await ask('ses_todo_ops');
+expect(
+  '[todo] renders the waiting item (kind is persisted, not printed in the injection)',
+  opsInjection.includes('协作等待项') && opsInjection.includes('等 ses_peer'),
+  opsInjection.split('\n').find(line => line.includes('T1'))
+);
+const opsList = await call('collab_todo', { action: 'list' }, 'ses_todo_ops');
+expect(
+  'collab_todo list shows the deferred row',
+  opsList.includes('[collab]') && opsList.includes('等窗口') && opsList.includes('推迟至'),
+  opsList.split('\n').find(line => line.includes('T1'))
+);
+const progressFileBefore = readFileSync(internals.contractFile('ses_parallel_progress'), 'utf8');
+const progressList = await call('collab_progress', { action: 'list' }, 'ses_parallel_progress');
+const progressFileAfter = readFileSync(internals.contractFile('ses_parallel_progress'), 'utf8');
+expect(
+  'collab_progress list is read-only',
+  progressList.includes('M1') && progressFileBefore === progressFileAfter,
+  progressList.split('\n')[0]
+);
+
+// ======================== 17) [scope] follows the current message
+section('17) [scope] follows the current message (via the hook)');
+await call(
+  'collab_mission',
+  { action: 'set', oneLine: '边界测试', outOfScope: ['ws集群实施'], handoffTo: { ws集群实施: 'ses_owner' } },
+  'ses_scope'
+);
+await call('collab_mission', { action: 'confirm', by: 'human' }, 'ses_scope');
+const scopeHit = await ask('ses_scope', [{ role: 'user', parts: [{ type: 'text', text: '这轮做 ws集群实施' }] }]);
+expect(
+  '[scope] appears on a keyword hit with the handoff target',
+  scopeHit.includes('[scope]') && scopeHit.includes('转交 ses_owner'),
+  scopeHit.split('\n').find(line => line.startsWith('[scope]'))
+);
+const scopeMiss = await ask('ses_scope', [{ role: 'user', parts: [{ type: 'text', text: '这轮做排钟接线' }] }]);
+expect('[scope] disappears on the next, unrelated message', !scopeMiss.includes('[scope]'));
+
+// ======================== 18) ambiguous anchor: silent vs explicit
+section('18) ambiguous anchor: silent without a contract, named with one');
+const ambiguousSilent = await ask('ses_ambiguous_none');
+expect('no contract + 2 in_progress → no [mission] block', !ambiguousSilent.includes('[mission]'), ambiguousSilent.slice(0, 120) || '(empty)');
+await call('collab_todo', { action: 'add', subject: '歧义会话的一件事', confirm: true }, 'ses_ambiguous_contract');
+const ambiguousText = await ask('ses_ambiguous_contract');
+expect(
+  'with a contract the ambiguity is named + collab_mission set is offered',
+  /有 2 个进行中任务，未选定/.test(ambiguousText) && ambiguousText.includes('collab_mission { action:"set"'),
+  ambiguousText.split('\n')[0]
+);
+
+// ======================== 19) corrupt contract never throws
+section('19) a corrupt contract file never throws');
+writeFileSync(internals.contractFile('ses_corrupt'), '{ this is not json');
+let corruptError;
+let corruptText = '';
+try {
+  corruptText = await ask('ses_corrupt');
+} catch (error) {
+  corruptError = error;
+}
+expect(
+  'the hook survives a corrupt contract (and repairs it)',
+  !corruptError && corruptText.includes('[mission]'),
+  corruptError ? String(corruptError?.message ?? corruptError) : corruptText.split('\n')[0]
+);
+const corruptList = await call('collab_todo', { action: 'list' }, 'ses_corrupt');
+expect('tools tolerate a corrupt contract', /0 open/.test(corruptList), corruptList.split('\n')[0]);
+
+// ======================== 20) confirm requires a human by
+section('20) confirm requires a human `by`');
+await call('collab_mission', { action: 'set', oneLine: '确认测试' }, 'ses_confirm');
+const confirmNoBy = await callError('collab_mission', { action: 'confirm' }, 'ses_confirm');
+expect('confirm without by is refused', /confirm 必须给 by/.test(confirmNoBy ?? ''), confirmNoBy);
+const confirmWithBy = await call('collab_mission', { action: 'confirm', by: 'human-owner' }, 'ses_confirm');
+expect(
+  'confirm with by passes and records the human',
+  /已确认 mission（by=human-owner）/.test(confirmWithBy) && contractOf('ses_confirm').mission.confirmedBy === 'human-owner',
+  confirmWithBy.split('\n')[0]
+);
 
 // ------------------------------------------------------------------- result
 await Promise.resolve(cleanup?.()).catch(() => {});

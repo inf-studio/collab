@@ -26,6 +26,11 @@
 
 写：`tmp + rename`。key 不存在时惰性创建。
 
+> **与 0.9.1 的接口（复核记录）**：0.9.1 的 `decision:<id>` evidence 目前读 hand-off 的 `decisions[]`
+> （`src/core/evidence.ts`）。本版上线独立决策账本后，必须把两处合并成**单一 resolver**
+> （先读本账本，hand-off `decisions[]` 只作为兼容输入），不允许保留两套「算不算已决策」的判断。
+
+
 ## 4. 动作与规则
 
 | action | 语义 | 校验 |

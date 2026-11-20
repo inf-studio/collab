@@ -41,7 +41,7 @@
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
 | `collab_archive`   | 归档/恢复某个会话（**不是删除**）：`PATCH { archived }`，会话与消息保留；spawn 会话在交接终态 10 分钟后自动归档（可 `archiveSpawned:false` 关闭） | 写会话归档位      |
 | `collab_index`     | **消息历史 / 可重建索引（0.9.0）**：`stats` 只读看投影（12 表 + FTS5，行数/backend/大小/`backfilled`，不可用回 `[索引不可用]`）；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建（锁 + tmp → fsync → 原子 rename，**幂等**，失败保留旧库）；`backfill` 只补状态级历史（不伪造正文）。快照 / `collab_status` / `collab_threads` 在投影**新鲜**时优先读它，否则回落 JSON | 读/写本地投影     |
-| `collab_mission`  | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 工作区唯一 `in_progress` 任务 → 空；不猜标题、不跑 python）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象；`confirm` 一次确认后**固定**，再改必须 `reconfirm:true` + `by`（自动推断永不覆盖人工确认） | 写本地契约        |
+| `collab_mission`  | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 工作区唯一 `in_progress` 任务 → 空；不猜标题、不跑 python）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象；`confirm` **必填 `by`**、一次确认后**固定**，再改必须 `reconfirm:true` + `by`（自动推断永不覆盖人工确认） | 写本地契约        |
 | `collab_progress` | **里程碑（0.9.1）**：`list` 只读；`add` 规划 `M1`…；`light` **必须给可校验 evidence**（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），无 evidence 或校验失败一律拒绝；点亮后 `plan.lastAdvancedAt` 推进、`noAdvanceTurns` 归零 | 写本地契约        |
 | `collab_todo`     | **契约待办（0.9.1）**：`add`（`blockingOn`=`me` 或 `ses_…`，可 `status:"doing"`）/ `close`（必填 evidence）/ `defer` / `suspend`（必填 `wakeWhen`）/ `list`；`[todo]` 注入每轮只列 top3 + 计数，上一轮未动的 `doing` 标 `[未收尾]` | 写本地契约        |
 

@@ -114,10 +114,19 @@ export interface ContractPeer {
 }
 
 export interface ContractTurn {
+  /** Requests seen while the contract file existed (incremented unconditionally). */
   count: number;
+  /** Start of the previous request (the `[未收尾]` "was there a previous turn" gate). */
   lastAt: number;
+  /** Start of the request currently being rendered — `[未收尾]` compares against it. */
+  startedAt: number;
+  /** Last verified advance (milestone evidence / closed mainline todo). */
   lastAdvancedAt: number;
-  /** 0.9.3 reads it; 0.9.1 only resets it when progress lights. */
+  /**
+   * Consecutive requests without an advance. 0.9.1 only maintains the counter
+   * (reset on a verified advance, +1 on a turn that had none); the drift
+   * **decision** (threshold / trigger) belongs to 0.9.3.
+   */
   noAdvanceTurns: number;
 }
 
@@ -170,7 +179,7 @@ export function emptyContract(sessionID: string): Contract {
     plan: { milestones: [], lastAdvancedAt: 0 },
     todos: [],
     peers: [],
-    turn: { count: 0, lastAt: 0, lastAdvancedAt: 0, noAdvanceTurns: 0 }
+    turn: { count: 0, lastAt: 0, startedAt: 0, lastAdvancedAt: 0, noAdvanceTurns: 0 }
   };
 }
 
@@ -311,6 +320,7 @@ export function normalizeContract(raw: unknown, sessionID: string): Contract {
     turn: {
       count: num(turn.count),
       lastAt: num(turn.lastAt),
+      startedAt: num(turn.startedAt),
       lastAdvancedAt: num(turn.lastAdvancedAt),
       noAdvanceTurns: num(turn.noAdvanceTurns)
     }
@@ -419,27 +429,58 @@ export function openTodos(contract: Contract): ContractTodo[] {
 }
 
 /**
- * The todos that were already `doing` when the **previous** request ended and
- * were not touched since — the honest 0.9.1 version of "idle 前未收尾" (there is
- * no idle hook; design §7). Returns their ids for the `[未收尾]` suffix.
+ * The todos that were already `doing` before **this** request started — the
+ * honest 0.9.1 version of "idle 前未收尾" (there is no idle hook; design §7).
+ *
+ * The comparison uses the **current** request's start (`startedAt`, passed by
+ * the hook), not the previous turn's stamp: a todo created mid-previous-request
+ * has `updatedAt` *after* that request's start but *before* this one, so it is
+ * marked on the next turn (the two-round sequence in the test).
+ *
+ * `<=` rather than `<`: timestamps are milliseconds, so a create + two requests
+ * can share one tick (observed as a flaky test). Marking a doing todo that is
+ * exactly as old as this request's start is the intended "not touched this
+ * turn" semantics; the rendering happens before tool calls, so a todo created
+ * *during* this turn is not in this block at all.
+ *
+ * `lastAt > 0` is the "a previous request really happened" gate: a `doing` todo
+ * created before the first request was never left behind by a turn, so it is not
+ * marked yet.
  */
-export function unfinishedTodos(contract: Contract): string[] {
-  const lastAt = Number(contract.turn?.lastAt) || 0;
-  if (!lastAt) return [];
+export function unfinishedTodos(contract: Contract, startedAt?: number): string[] {
+  const previousStart = Number(contract.turn?.lastAt) || 0;
+  const start = Number(startedAt) || Number(contract.turn?.startedAt) || 0;
+  if (!previousStart || !start) return [];
   return contract.todos
     .filter(todo => todo.status === 'doing')
-    .filter(todo => (Number(todo.updatedAt ?? todo.since) || 0) <= lastAt)
+    .filter(todo => (Number(todo.updatedAt ?? todo.since) || 0) <= start)
     .map(todo => todo.id);
 }
 
-/** Stamp one request: count + `lastAt`. Never touches `noAdvanceTurns` (0.9.3). */
+/**
+ * Stamp one request. Called **unconditionally** whenever the contract file
+ * exists (a mission-only or milestone-only contract still needs a turn count —
+ * 0.9.3's drift check must not start from 0 forever).
+ *
+ * `noAdvanceTurns` has its own condition (the review's #2): it resets when the
+ * previous request verified an advance (`lastAdvancedAt > lastAt`) and increments
+ * otherwise. 0.9.1 only maintains the number; 0.9.3 owns the threshold/decision.
+ */
 export function stampTurn(contract: Contract, now = Date.now()): Contract {
+  const previousStart = Number(contract.turn?.lastAt) || 0;
+  const lastAdvancedAt = Number(contract.turn?.lastAdvancedAt) || 0;
+  const previousNoAdvance = Number(contract.turn?.noAdvanceTurns) || 0;
+  const advancedLastTurn = previousStart > 0 && lastAdvancedAt > previousStart;
+  const noAdvanceTurns =
+    previousStart === 0 ? 0 : advancedLastTurn ? 0 : previousNoAdvance + 1;
   return {
     ...contract,
     turn: {
       ...contract.turn,
       count: (Number(contract.turn?.count) || 0) + 1,
-      lastAt: now
+      lastAt: now,
+      startedAt: now,
+      noAdvanceTurns
     }
   };
 }
@@ -493,6 +534,12 @@ export interface RenderInput {
   contract: Contract;
   /** Effective mission (`effectiveMission`), not necessarily the stored one. */
   mission: ContractMission;
+  /**
+   * The resolved mission anchor. `source:'ambiguous'` (2+ in_progress tasks) is
+   * shown **inside `[mission]`** — an unselected anchor is not guessed, and an
+   * empty mission must say *why* it is empty.
+   */
+  anchor?: { source: string; candidates?: string[] };
   unfinished?: string[];
   /** 0.9.3 fills this; 0.9.1 always passes nothing (placeholder, never triggers). */
   drift?: string[];
@@ -508,8 +555,17 @@ export interface RenderResult {
   dropped: string[];
 }
 
-function missionLines(mission: ContractMission, contract: Contract, now: number): string[] {
-  const head = mission.oneLine.trim() || '未设置（collab_mission { action:"set", oneLine }）';
+function missionLines(
+  mission: ContractMission,
+  contract: Contract,
+  now: number,
+  anchor?: { source: string; candidates?: string[] }
+): string[] {
+  const ambiguous = anchor?.source === 'ambiguous' && !mission.confirmedBy && !mission.oneLine.trim();
+  const candidates = anchor?.candidates ?? [];
+  const head = ambiguous
+    ? `未设置（有 ${candidates.length} 个进行中任务，未选定；不猜）`
+    : mission.oneLine.trim() || '未设置（collab_mission { action:"set", oneLine }）';
   const path = mission.taskPath ? ` · ${mission.taskPath}` : '';
   const flag = mission.confirmedBy ? '' : ' [未确认]';
   const lines = [`[mission] ${head}${path}${flag}`];
@@ -522,7 +578,10 @@ function missionLines(mission: ContractMission, contract: Contract, now: number)
   if (lastAdvanced) bits.push(`推进于 ${formatAge(now - lastAdvanced)} 前`);
   lines.push(`  边界: ${bits.join(' · ')}`);
 
-  if (!mission.confirmedBy) {
+  if (ambiguous) {
+    const first = candidates[0] ?? '.trellis/tasks/<slug>';
+    lines.push(`  选定: collab_mission { action:"set", taskPath:"${first}" } 后再 confirm（2+ 进行中任务不猜）`);
+  } else if (!mission.confirmedBy) {
     lines.push('  确认: collab_mission { action:"confirm", by:"<你>" }');
   }
   return lines;
@@ -606,7 +665,7 @@ export function renderInjection(input: RenderInput): RenderResult {
   const now = input.now ?? Date.now();
   const unfinished = new Set(input.unfinished ?? []);
   const sections: Array<{ name: keyof typeof INJECT_SECTION_LIMITS; lines: string[] }> = [
-    { name: 'mission', lines: missionLines(input.mission, input.contract, now) },
+    { name: 'mission', lines: missionLines(input.mission, input.contract, now, input.anchor) },
     { name: 'todo', lines: todoLines(input.contract, unfinished, now) },
     { name: 'drift', lines: (input.drift ?? []).map(line => String(line ?? '')).filter(Boolean) },
     { name: 'scope', lines: scopeLines(input.messageText ?? '', input.mission) },

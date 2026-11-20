@@ -41,7 +41,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 | `collab_archive` | `bid?` / `session?`, `restore?`, `confirm` | **归档 ≠ 删除**：把 spawn 会话藏起来（`PATCH {archived:true}`，消息全留），`restore:true` 恢复；交接终态 10 分钟后自动归档 | 写会话归档位 |
 | `collab_index` | `action`（`rebuild`/`backfill`/`stats`）, `sinceDays?`, `confirm` | **消息历史索引（0.9.0）**：`stats` 只读；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 幂等重建 `collab.db`（失败保留旧库）；`backfill` 只补状态级历史（不伪造正文）。JSON 是真源，删库不影响协作；`storage:"json"` 时显示 `[索引不可用]` | 读/写本地投影 |
-| `collab_mission` | `action`(`get`/`set`/`confirm`), `oneLine?`, `taskPath?`, `inScope?`, `outOfScope?`, `handoffTo?`, `state?`, `reconfirm?`, `by?` | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 唯一 `in_progress` 任务 → 空；不猜标题）；`set` 写主线/边界；`confirm` 一次固定，之后 `set` 必须 `reconfirm:true` + `by` | 写本地契约 |
+| `collab_mission` | `action`(`get`/`set`/`confirm`), `oneLine?`, `taskPath?`, `inScope?`, `outOfScope?`, `handoffTo?`, `state?`, `reconfirm?`, `by?` | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 唯一 `in_progress` 任务 → 空；不猜标题）；`set` 写主线/边界；`confirm` **必填 `by`**、一次固定，之后 `set` 必须 `reconfirm:true` + `by` | 写本地契约 |
 | `collab_progress` | `action`(`list`/`add`/`light`), `milestone`, `title?`, `evidence?`, `confirm` | **里程碑（0.9.1）**：`light` 必须给可校验 evidence（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`）；无 evidence 不点亮；点亮才推进 `lastAdvancedAt` | 写本地契约 |
 | `collab_todo` | `action`(`add`/`close`/`defer`/`suspend`/`list`), `id?`, `subject?`, `kind?`, `blockingOn?`, `status?`, `wakeWhen?`, `evidence?`, `reason?`, `until?`, `confirm` | **契约待办（0.9.1）**：`close` 必填 evidence；`suspend` 必填 `wakeWhen`；`add` 可 `status:"doing"`；注入只列 top3 + 计数，上一轮未动的 doing 标 `[未收尾]` | 写本地契约 |
 

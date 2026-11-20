@@ -1962,6 +1962,7 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 
 - 写路径 **tmp + rename**；读路径**惰性创建**——只读永远不落盘，第一次 `set/confirm/add/light/close/...` 才建文件；
 - 文件可手工编辑：读时逐字段归一化（未知字段丢弃、长度截断、枚举回落），坏文件不会让一次请求失败；
+- `collab_mission confirm` **必填 `by`**（如 `"human"`）；不接受缺省成当前会话 id——确认必须能追溯到人。
 - `mission.confirmedBy` 一旦写入，`set` 必须 `reconfirm:true` **且** `by` 非空——**自动推断永不覆盖人工确认**（D7）。
 
 #### 主线锚（`collab_mission get`）
@@ -1982,7 +1983,7 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 | `commit:<sha>` | `git cat-file -e <sha>^{commit}` 成功，且 `git merge-base --is-ancestor <sha> HEAD`（未合入不算） |
 | `file:<path>:<line>` | 文件存在且行数 ≥ `line`（`line` 可省 = 仅存在性） |
 | `test:<path>` | 测试报告 / 输出文件存在 |
-| `decision:<id>` | 某个 hand-off 记录的 `decisions[]` 里有该 id（`collab_decisions` 写入即为已决策；独立决策账本在 0.9.5） |
+| `decision:<id>` | 某个 hand-off 记录的 `decisions[]` 里有该 id（`collab_decisions` 写入即为已决策；独立决策账本在 0.9.5，上线时必须与本处合并为**单一 resolver**，hand-off 只作兼容输入） |
 
 - 无 evidence → **拒绝**；校验失败 → 拒绝并返回原因；不写入任何字段。
 - 点亮后 `plan.lastAdvancedAt = now`、`turn.noAdvanceTurns = 0`；同一 evidence 重复点亮**不重复推进**时间。
@@ -2006,9 +2007,12 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 - `[todo]` 只列 **top3**（`blockingOn=me` 优先，其次最老 `since`），头部给总数与「还有 N 条」；
 - `[scope]`：把**本轮最新一条消息正文**与 `outOfScope` 做关键词匹配；`|`（或 `｜`）分隔别名，
   如 `"ws集群实施|ws 集群"`。命中才出现，行内给「转交（`mission.handoffTo[关键词]`）/ 拒绝 / 问 owner」三条路；
-- `[未收尾]`：插件**没有 idle 钩子**，改为**下一轮回溯**——上一轮结束时 `status:"doing"`、且本轮前未被更新
-  （`updatedAt ≤ turn.lastAt`）的 todo 标 `[未收尾]`。语义等价于「上一轮没收尾」，不承诺 idle 写入；
-- `turn` 计数器只在**契约文件已存在且有 todo** 时写（每轮一次 tmp+rename），没有契约的会话不会被 hook 建文件；
+- `[未收尾]`：插件**没有 idle 钩子**，改为**下一轮回溯**——上一轮结束时 `status:"doing"`、且在本轮开始前未被更新
+  （`updatedAt ≤ 本轮 startedAt`；请求中途新建的 doing 会在下一轮被标）的 todo 标 `[未收尾]`。
+  语义等价于「上一轮没收尾」，不承诺 idle 写入；
+- `turn.count` / `lastAt` / `startedAt`：**契约文件存在就每轮推进**（只有 mission 或只有里程碑也一样），
+  `noAdvanceTurns` 单独按「上一轮是否有已验证推进」维护（阈值/漂移判定留给 0.9.3）；
+  没有契约的会话不会被 hook 建文件（惰性创建）；
 - 该块排在注入最前（主线/待办是整体框架），失败独立兜底，不影响未读消息 / 交接 / 感知行。
 
 #### 配置与回滚
@@ -2019,11 +2023,12 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 
 #### 验收
 
-`test/contract-inject.mjs`（49 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
+`test/contract-inject.mjs`（复核后 69 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
 无 evidence / 假 commit 拒绝 · 真 commit 点亮并推进时间 · 同 evidence 不重复推进 · confirm 后 set 拒绝 / reconfirm+by 通过 ·
 无任务仍显示 `[mission] … [未确认]` · 10 条 todo 只列 3 条 + 「还有 7 条」且整块 ≤12 行 ·
 suspend 缺 `wakeWhen` 拒绝 · close 缺 evidence / 文件不存在拒绝 · 截断时 `[progress]` 被整段丢弃 ·
-`[未收尾]` 下一轮标记 · 主线锚（指针 > 唯一任务 > 多任务不猜）· `get` 用会话首条人类指令作建议且不写盘。
+`[未收尾]` 下一轮标记 · 主线锚（指针 > 唯一任务 > 多任务不猜；无契约时 ambiguous 静默）· `get` 用会话首条人类指令作建议且不写盘 ·
+并发 `add` 不产生重复 id · mission-only / milestone-only 契约的 `turn.count` 正常递增 · `confirm` 缺 `by` 拒绝。
 
 
 ## 12. 协作链路（handoff chain：local + peer）

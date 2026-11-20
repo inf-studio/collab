@@ -210,6 +210,9 @@ interface Contract {
 - 真源 `collab-contract/<sid>.json`（D18）；
 - `mission.taskPath` 来自 `task.py current`；无任务时用会话首条人类指令生成，**必须人类确认一次**（`collab_mission confirm`），之后不可被注入覆盖；
 - `plan.lastAdvancedAt` 只接受 `collab_progress M# --evidence <commit|test|decision>`；evidence 需 `task.json` 或 `git log` 可校验（D21）。
+- **0.9.5 合并点**：0.9.1 的 `decision:<id>` 读 hand-off 的 `decisions[]`；独立决策账本（0.9.5）上线后必须合并为
+  **单一 resolver**（账本优先、hand-off 兼容输入），不要留两套判定。
+
 
 ## 5. 注入格式（每轮，硬上限 12 行）
 

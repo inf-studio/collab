@@ -179,10 +179,6 @@ export function todoTool(kit: ToolKit): ToolDefinition {
       if (action === 'add') {
         const subject = truncate(input?.subject, CONTRACT_TODO_SUBJECT_LIMIT);
         if (!subject) throw invalid('add 需要 subject（一件事一行）');
-        const open = openTodos(contract);
-        if (open.length >= CONTRACT_TODO_LIMIT) {
-          throw invalid(`open 待办已达上限 ${CONTRACT_TODO_LIMIT} 条：先关闭几条，列表不能无限增长`);
-        }
         const kind = TODO_KINDS.includes(String(input?.kind ?? '') as TodoKind)
           ? (String(input?.kind) as TodoKind)
           : 'mainline';
@@ -201,18 +197,29 @@ export function todoTool(kit: ToolKit): ToolDefinition {
             ].join('\n')
           };
         }
-        const id = nextTodoID(contract.todos);
-        const todo: ContractTodo = {
-          id,
-          kind,
-          subject,
-          status,
-          blockingOn: blocking,
-          since: now,
-          updatedAt: now
-        };
-        const written = await updateContract(sid, latest => ({ ...latest, todos: [...latest.todos, todo] }));
-        return { content: [`已新增待办 ${id}`, ...renderTodos(written, now)].join('\n') };
+        // The id and the cap are computed **inside** the serialised mutate:
+        // `Promise.all(3 × add)` used to read the same pre-call list and append
+        // three `T1`s. `updateContract` re-reads the latest file per call, so the
+        // id is unique by construction.
+        let newID = '';
+        const written = await updateContract(sid, latest => {
+          const open = openTodos(latest);
+          if (open.length >= CONTRACT_TODO_LIMIT) {
+            throw invalid(`open 待办已达上限 ${CONTRACT_TODO_LIMIT} 条：先关闭几条，列表不能无限增长`);
+          }
+          newID = nextTodoID(latest.todos);
+          const todo: ContractTodo = {
+            id: newID,
+            kind,
+            subject,
+            status,
+            blockingOn: blocking,
+            since: now,
+            updatedAt: now
+          };
+          return { ...latest, todos: [...latest.todos, todo] };
+        });
+        return { content: [`已新增待办 ${newID}`, ...renderTodos(written, now)].join('\n') };
       }
 
       const id = String(input?.id ?? '').trim();

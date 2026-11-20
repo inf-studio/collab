@@ -24,9 +24,13 @@ import { jsonInput } from './shared.ts';
 import type { ToolKit } from './shared.ts';
 
 /**
- * S8 (review): a `0` on a table this version never writes would read as
- * "nothing there". These tables belong to 0.9.1+ (facts / todos / decisions /
- * progress / metrics) — label them instead of printing a bare zero.
+ * S8 (review): a `0` on a table no current version writes would read as
+ * "nothing there" — label them instead of printing a bare zero.
+ *
+ * Actual ownership: `todos` / `progress` mirror the workspace task layer in
+ * 0.9.3, `facts` in 0.9.4, `decisions` in 0.9.5, `metrics` in 0.9.6. **0.9.1
+ * does not project the contract** (`collab-contract/<sid>.json` stays a separate
+ * JSON truth; todos/progress there are not `collab.db` rows).
  */
 const EMPTY_BY_DESIGN = ['facts', 'todos', 'decisions', 'progress', 'metrics'];
 const tableLine = (counts: Record<string, number>, keys: string[]): string =>

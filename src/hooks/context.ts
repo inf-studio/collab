@@ -57,10 +57,12 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
    * session in a workspace with no Trellis task has no mainline to remind it of,
    * and a `[mission] 未设置` line on every request would be noise, not memory.
    *
-   * The only write is the `turn` stamp (`lastAt`), and only when a contract file
-   * already exists **and** it has todos: `[未收尾]` needs the previous request's
-   * boundary, and a session that never used a contract tool must not get a file
-   * created by the hook (lazy creation, design §3).
+   * The only write is the `turn` stamp, and only when a contract file **already
+   * exists** (a session that never used a contract tool must not get a file
+   * created by the hook — lazy creation, design §3). It runs on **every** such
+   * request, not only when there are todos: a mission-only / milestone-only
+   * contract still needs `turn.count` for 0.9.3's drift check. `[未收尾]` uses
+   * the current request's start, not the previous one's.
    */
   async function injectContract(event: ContextHookEvent): Promise<string | undefined> {
     const sessionID = event?.sessionID;
@@ -72,28 +74,36 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     const missionSet = Boolean(contract.mission.confirmedBy) || Boolean(contract.mission.oneLine.trim());
     const hint =
       hasContract && missionSet ? undefined : resolveMissionAnchor(deps.ctx?.location?.directory, sessionID);
-    if (!hasContract && (!hint || hint.source === 'none')) return undefined;
+    // No contract and nothing resolvable → stay silent. `ambiguous` is silent
+    // too (review #4): 2+ in_progress tasks in a task-heavy repo used to inject
+    // four lines of "未设置" every request without naming the ambiguity. With a
+    // contract, the ambiguity is rendered *inside* `[mission]` instead.
+    if (!hasContract && (!hint || hint.source === 'none' || hint.source === 'ambiguous')) return undefined;
 
     const now = Date.now();
     const result = renderInjection({
       contract,
       mission: effectiveMission(contract, hint),
-      unfinished: unfinishedTodos(contract),
+      // The current request's start: a doing todo created mid-previous-request is
+      // older than this stamp but newer than the previous one, so it is marked
+      // exactly one turn later (review #3).
+      unfinished: unfinishedTodos(contract, now),
       // 0.9.3 fills `[drift]`; 0.9.1 reserves the slot and never triggers it.
       drift: [],
+      anchor: hint,
       messageText: latestRequestText(event),
       now
     });
     if (!result.lines.length) return undefined;
 
-    if (contract.todos.length) {
-      try {
-        await updateContractIfExists(sessionID, current => stampTurn(current, now));
-      } catch (error) {
-        // The block is already built; a failed stamp only means `[未收尾]` is
-        // judged against the previous successful turn. Never fail the request.
-        log('contract turn stamp failed:', (error as Error)?.message ?? error);
-      }
+    try {
+      // Unconditional (count / lastAt / startedAt) whenever a contract file
+      // exists; `updateContractIfExists` is a no-op without one.
+      await updateContractIfExists(sessionID, current => stampTurn(current, now));
+    } catch (error) {
+      // The block is already built; a failed stamp only means `[未收尾]` is
+      // judged against the previous successful turn. Never fail the request.
+      log('contract turn stamp failed:', (error as Error)?.message ?? error);
     }
     return result.lines.join('\n');
   }
