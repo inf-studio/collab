@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十七个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约/事实账本各一组）
+### 11.2 二十八个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约/事实账本/决策账本各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -289,6 +289,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, factId?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。`factId?`（0.9.4）：这条待办依据的事实（`F3`，ref 同时记 `workspace`）；同一工作区的事实被作废后行保留并标 `⚠失效`（§11.25）。见 §11.22 / §11.24 |
 | `collab_fact` | `{ action, claim?, evidence?, grade?, factIds?, id?, reason?, since?, includeAll?, limit?, confirm }` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`/`F2`…（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行；`relayed`/`unknown` 事实**不得**被引用为证据，按正文 `F3` 或 `factIds` 都会被拒）；`retract {id, reason}` 撤回单条并写当日 `metrics.retract_count` + 原因分类；`invalidate {since}` 作废一条事实及其**显式引用**（`basedOn.factIds`）的派生，或 epoch 数字作废该 epoch 及之前 settled 的 active 事实，`epoch+1`，工作区级传播，并在途 todo 标 `staleWork`（**不关闭**）；`list` 只读（默认 active，`includeAll` 含历史，并显示当日 `settled`/`retracted`/`stale` 计数）。写动作需 `confirm:true`。见 §11.25 |
 
+| `collab_decide` | `{ action, key?, threadID?, bid?, question?, options?, owner?, id?, answer?, reason?, includeAll?, limit?, confirm }` | **决策账本（0.9.5，工具 27 → 28）**：`open { key, question, options[≥2], owner? }` —— `key` 是 threadID（`t_…`）**或** bid（`b_…`），所以没有交接记录的 thread 也能开决策；`owner` 缺省 = 契约里的 `decider`，再退到发单方（thread 发起人 / 交接单 `from.sid`）。同问（NFKC + 去空白/标点 + 小写后 sha1 相同）已 open → 拒绝并返回既有 `D#` + owner；同一 `key` 同时 open 的**手工**决策 ≤ **3**（D9，conflict 决策单独配额），第 4 条可读拒绝并提示先关。`answer { id, answer }` **只有 owner** 能写（提问方不得代答，提问方也不会被当成 owner），已回答不可再答（先 `supersede`）；`supersede { id, reason }` **提问方 / owner / 该 thread（或交接单）的参与方**都能作废（记 `by` + `reason`）；`list { key? }` 只读（省略 key = 本会话作为提问方 / owner / 参与方的全部 open）。存 `~/.config/opencode/collab-decisions/<key>.json`（`tmp+rename` + 跨进程 `<file>.lock`；`COLLAB_DECISIONS_DIR` 可覆盖）。双方下一轮注入一行 `[decide]`；`decision:<key>#D3` 作为 evidence 走**唯一 resolver**（账本优先、旧 hand-off `decisions[]` 兼容）。见 §11.26 |
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
 若承接方是只读 agent（`explore` / `plan`）而 `expected:"implement"`，结果里会明确提示**能力不匹配**并建议 `expected:"research"` 或先 `collab_promote`。
@@ -2371,7 +2372,7 @@ collab_send { target, text, glossary:{ conflict:["状态"] }, confirm:true }
 | 3 | repo / env 的先后 | 没有任意 commit 的祖先判定：值不同按「落后」；只有同时 ahead+behind 才 `conflict` |
 | 4 | 契约本身没有 workspace 字段 | 由 todo 的 `ref.workspace` 承担（复核后）；无 workspace 的旧 ref 不参与 `staleWork` 标记 |
 | 5 | `[未标注]` / `[基线未知]` 的噪声 | 这是**故意可见的债**：旧消息 / CLI 消息没有元数据，标记它们正是 R2 的验收项 |
-| 6 | `conflict` 不开决策 | 本版只标记 + 注入；0.9.5 的 `collab_decide` 负责开单 |
+| 6 | `conflict` 不开决策 | 0.9.4 只标记 + 注入；**0.9.5 起**由 `core/decisions.ts#openConflictDecision` 自动开一条 `origin:"conflict"` 的决策，thread/bid 只读直到 answer / supersede（24h 未回答自动作废）——见 §11.26 |
 
 #### 配置 / 回滚
 
@@ -2408,6 +2409,101 @@ settle 25 条 × 3 轮 `wsA/wsB/wsC = 25/25/25 lost=0`、9 次子进程 `refusal
 他人 token 不删除、对自己 token 删除。
 **变异（强制）**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（退出码 1）；
 `withFileLock` 置空 → 3 工作区回归必红（实测单轮 lost = 22–24，退出码 1）。
+
+### 11.26 决策载具与角色四元组（0.9.5）
+
+> 问题（PRD）：24 条交接的 `decisions[]` **全空**、`collab_decisions` 一次没用过；两条最大的 thread（418 / 140 条）
+> **根本没有交接记录**，决策无处可落。同一个决策反复重开（11:09 起「决策」类措辞 19 次，00:52 出现「第四次/第五次
+> 同步同一事实」）；角色边界靠自然语言重申（B 54 次决策类措辞 / 31 次边界声明，A 38 / 36）——**双方都在声明边界 =
+> 边界没被写下来**。
+
+#### 存储
+
+```
+~/.config/opencode/collab-decisions/<key>.json     key = threadID（t_…）或 bid（b_…）
+{ "v": 1, "key": "t_…", "next": 4,
+  "items": [{ "id": "D1", "question": "…", "options": ["A","B"], "owner": "ses_…",
+              "status": "open|answered|superseded", "answer": null, "by": null, "at": 0,
+              "hash": "sha1", "origin": "manual|conflict" }] }
+```
+
+惰性创建（读不写）· `tmp + rename` · **整段 read-modify-write 套 `<file>.lock`**（跨进程互斥，`tmp+rename` 只保证
+原子性不保证互斥）· 坏文件降级为空、不抛错 · `COLLAB_DECISIONS_DIR` 覆盖目录（测试绝不写真实 `~/.config`）。
+
+#### 动作与规则
+
+| action | 语义 | 校验 |
+| --- | --- | --- |
+| `open {key, question, options≥2, owner?}` | 新建 `D#` | `question` 非空；`options ≥ 2`；`owner` 为 `ses_…`（缺省见下） |
+| `answer {key, id, answer}` | `status='answered'` + `by` | **调用者必须 == owner**；已回答需先 `supersede` |
+| `supersede {key, id, reason}` | `status='superseded'` | **提问方 / owner / 该 thread（或交接单）的参与方**可作废，但 `by` + `reason` 必记；占用释放 |
+| `list {key?, includeAll?}` | 只读 | 省略 `key` = 本会话作为提问方 / owner / 参与方的全部 open |
+
+- **同问去重（R3）**：`hash = sha1(normalize(question))`，`normalize` = NFKC + 小写 + 去空白/标点/符号。
+  同 hash 的 **open** 记录已存在 → 拒绝，返回 `已有同问决策 D3 open, wait ses_x`（不重复计数）。
+- **上限 3（D9）**：同一 `key` 同时 open 的**手工**决策 ≤ 3；第 4 条拒绝并列出当前 `D#`，提示先 `answer` 或 `supersede`。
+  **conflict 决策单独占一条配额**（不占手工 3 条）：手工列表满了也必须能升级，否则 thread 会继续用对话争论。
+- **提问方是当事人（B1）**：`askedBy` 与 `owner` 分开记 —— 提问方拿得到 `[decide]`、能 `supersede` 撤回，
+  但**不能 answer**（owner 独占）。
+- **owner 缺省**：契约 `peers` 里的 `decider` → 发单方（thread 发起人 / 交接单 `from.sid`）→ 当前会话。
+  **conflict 决策例外**：`decider` 未声明时 owner = **收到分叉的本会话**（不把提出分叉的对端设为裁决者，N11）。
+- **`D#` 每个 key 独立**（两条 thread 各有 D1）：所以注入行写成 `D1@t_…`，而 `decision:<id>` 在跨 key 重名时
+  会明确报**歧义**，要求写作用域 `decision:<key>#D1` —— 绝不静默挑一个。
+
+#### 角色四元组（R5）
+
+`peers: [{ sid, role: 'requester'|'implementer'|'decider'|'verifier', threadId, since }]`（0.9.1 的占位字段，本版有语义）。
+
+- 默认推导：交接发起方 = `requester`、承接方 = `implementer`、`decider` = 发起方 owner、`verifier` = `requester`；
+  `collab_accept` 领取成功时写进承接方契约，`collab_decide open` 时写进提问方契约（都是注入提示，写失败不影响主流程）。
+- 注入：`[role:implementer] 你负责实现；实现选择请交 decider` —— 并入 `[mission]` 首行，**不单独占行**。
+- **只声明角色，不做文本推断**：0.9.2 起插件不对消息正文做任何关键词 / 子串匹配（闸门也一样）。角色行是静态的；
+  「这条消息是不是在让我决定实现」由模型自己判断，插件不猜（B4：早期子串匹配在「帮我改 PRD 验收口径」
+  「这个模块怎么实现的？」「我先看一下再决定」三句上都误伤过）。
+
+#### conflict 自动升决策（R6）
+
+`tri-state` 判 `conflict`（两侧在不同维度各自超前）时：
+
+1. `core/decisions.ts#openConflictDecision` 开一条 `origin:"conflict"` 的决策：`question = 基线分叉：<维度>`，
+   `options = 以我方为准 / 以对方为准 / 重新测量`，`owner = decider ?? 收到分叉的本会话`，并记 `parties`（thread 的两端）；
+   **幂等**（同 key 已有 open 的 conflict 决策 → 复用），**不占手工 3 条配额**。
+2. 注入 `[conflict] 已开 D2（等 ses_…）—— 决策关闭前本 thread 只读（不再产生新消息）；双方都可 supersede 解除`。
+3. `collab_send` / `collab_reply` / `collab_handoff` 在**该 thread 或该 bid**（`b_…` 同样拦）上有未关闭的 conflict
+   决策时**可读拒绝**（降级为只读，读用 `collab_inbox` / `collab_status`）；`answer` / `supersede` 后恢复。
+   **逃生口（B2）**：owner 缺席时，该 thread 的任一方（`parties`）都能 supersede；且冲突决策 **24h 未回答自动
+   作废**（`expireConflictDecisions` 在每次注入时扫描，`by=system`，理由写明「24h 未回答」），thread 一定不会永久只读。
+   `tri-state.ts` 保持纯函数（`conflictDecision(verdict)` 只产生 question/options），写盘在 `core/decisions.ts`。
+
+#### `decision:` 的单一 resolver
+
+`core/decisions.ts#resolveDecision` 是**唯一**回答「这条算不算已决策」的地方：先读决策账本（权威），再读 0.7.0 的
+hand-off `decisions[]`（兼容输入）。`core/evidence.ts`、`collab_todo close`、`collab_progress light` 全部走它；
+open / superseded 的决策**不是**证据（旧 hand-off 记录里的 id 仍按「已记录」处理）。
+
+#### 注入
+
+```
+[mission] 排钟 B4 接线 · .trellis/tasks/… · [role:requester+verifier] 你发单；你验收
+[decide] D2@t_mwoy2460_b9pm open（等 ses_e176…，4.2h） · D3@b_55ab… open（等 ses_p…，<1m） · 还有 1 条
+```
+
+`[role]` **并入 `[mission]` 首行**（不占新行），`[decide]` 独立 ≤1 行。段上限 mission 3 + todo 4 + decide 1 +
+drift 2 + progress 2 = **12**，与生产预算相等：六段全满时**没有任何一段被丢**（`test/decide.mjs` 有一条
+12 行 / `dropped=[]` 的用例）。没有契约、也没有任务锚的会话，如果它是某个 open 决策的当事人，只注入 `[decide]` 那一行。
+
+#### 验收
+
+`test/decide.mjs`（**79 项**）：28 个工具 · thread 路径 open/list · bid 路径 open 且与 thread 命名空间隔离 · 非 owner
+answer 拒绝（0 写入）· 已回答再 answer 拒绝（提示 supersede）· 同问变体（大小写/空白/标点 + **NFKC 全角**）拒绝并返回
+既有 `D#` + owner · 第 4 条 open 拒绝（上限 3）+ supersede 释放槽位 · owner 缺省（decider → 交接发起方）· 四元组推导 +
+`[role:…]` 静态声明（三句常见话都不产生建议）· **提问方是当事人**（owner≠asker：看得见、可 supersede、不能 answer）·
+conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **conflict 逃生口**（对端 supersede、25h 自动作废）·
+**bid-key 拦截** · **手工 cap 满仍能升级** · **六段全满 12 行 / 无 dropped** · **501 条扫描保留最新 500** ·
+`[decide]` 一行且只列 open · `decision:` 单一 resolver（open 不是证据 / answered 是 / superseded 不是 / 跨 key 重名报歧义 /
+旧 `decisions[]` 兼容 / `collab_todo close` 使用它）。
+**变异（强制）**：去掉 `normalizeQuestion`（hash 直接 sha1 原文）→ 「同问变体被拒」与「重复 open 0 写入」两条必红
+（实测退出码 1）；去掉 `.normalize('NFKC')` → 「全角数字同问被拒」必红（该行为由 S9 用例固定）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

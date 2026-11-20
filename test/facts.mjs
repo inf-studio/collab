@@ -11,7 +11,7 @@
  * no `~/.config/opencode/collab-*`. `compare` is clock/git free (an explicit
  * local state), so the fresh/stale/conflict cases need no repository.
  *
- *   1. surface: 27 tools, `collab_fact` once, four actions, version 0.9.4
+ *   1. surface: 28 tools, `collab_fact` once, four actions, version 0.9.5
  *   2. settle + list: sequential ids, active visible, grade required,
  *      explicit `unknown` is listable as `grade=unknown`
  *   3. `relayed` / `unknown` facts are refused as evidence (by text and by
@@ -196,9 +196,9 @@ const seedInbox = (sid, messages) =>
   });
 
 // ============================================================ 1) surface
-section('1) surface: 27 tools + collab_fact');
-expect('PLUGIN_VERSION / package.json agree (0.9.4)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.4', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
-expect('27 tools are registered', tools.length === 27, `${tools.length} tools`);
+section('1) surface: 28 tools + collab_fact');
+expect('PLUGIN_VERSION / package.json agree (0.9.5)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
 expect(
   'collab_fact is registered exactly once',
   tools.filter(definition => definition.name === 'collab_fact').length === 1,
@@ -323,7 +323,11 @@ expect('facts behind → stale', stale.state === 'stale' && stale.behind.include
 expect('the stale line forbids restating retracted facts', /只回增量（≤30% 原文），不要重述已作废事实/.test(stale.line ?? ''), stale.line);
 const conflict = internals.compareBasedOn({ repo: { '/w': 'ffff9999' }, env: { '.env': 'bbbb2222' }, facts: 9 }, local);
 expect('ahead + behind → conflict', conflict.state === 'conflict', `${conflict.state} ahead=${JSON.stringify(conflict.ahead)} behind=${JSON.stringify(conflict.behind)}`);
-expect('the conflict line defers the decision to 0.9.5', /0\.9\.5/.test(conflict.line ?? ''), conflict.line);
+expect(
+  'the conflict line says the decision is open and the thread is read-only (0.9.5 landed)',
+  /已转决策/.test(conflict.line ?? '') && /只读/.test(conflict.line ?? '') && !/0\.9\.5/.test(conflict.line ?? ''),
+  conflict.line
+);
 const unknown = internals.compareBasedOn(undefined, local);
 expect('no basedOn → fresh + unknown (D2)', unknown.state === 'fresh' && unknown.unknown, JSON.stringify(unknown));
 expect('D2 is not stale', !unknown.line, String(unknown.line));

@@ -12,6 +12,7 @@ import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
 import { allBroadcasts, mergeDelivery, readBroadcast, writeBroadcast } from '../core/claim.ts';
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
+import { openConflictOf } from '../core/decisions.ts';
 import { recordMessage } from '../core/index-db.ts';
 import { makeEnvelope } from '../core/envelope.ts';
 import { normalizeFactIds, normalizeGrade } from '../core/messages.ts';
@@ -537,6 +538,23 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const config = readConfig();
     const body = String(input?.text ?? '').trim();
     if (!body) throw invalid('text 不能为空');
+
+    // 0.9.5 (design §6): a `conflict` verdict opens a decision instead of another
+    // round of prose — and the subject it belongs to stops producing messages
+    // until that decision is answered or superseded (degraded to read-only).
+    // Review S5: the gate covers **both** key shapes; a `b_…` conflict recorded
+    // from the message body used to be ignored because only `threadID` was read.
+    const conflictBid = String(input?.bid ?? '').trim() || RECEIPT_BID_RE.exec(body)?.[1] || '';
+    for (const key of [threadID, conflictBid].filter(Boolean) as string[]) {
+      const conflict = openConflictOf(key);
+      if (!conflict) continue;
+      throw invalid(
+        `${key.startsWith('b_') ? '交接单' : 'thread'} ${key} 有未关闭的冲突决策 ${conflict.id}（等 ${conflict.owner}）：` +
+          '决策关闭前该项目降级为只读（不再产生新消息）。先 ' +
+          `collab_decide { action:"answer", key:"${key}", id:"${conflict.id}", answer:"…", confirm:true }` +
+          '（仅 owner）或 supersede（提问方 / owner / 该 thread 的任一方）后再发。未发送任何内容。'
+      );
+    }
 
     const { sessionID, alias, info } = target;
     const from = senderLabel(context?.sessionID);

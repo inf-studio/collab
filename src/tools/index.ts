@@ -2,6 +2,7 @@ import type { ToolDefinition } from '../types.ts';
 import { acceptTool } from './accept.ts';
 import { archiveTool } from './archive.ts';
 import { broadcastTool } from './broadcast.ts';
+import { decideTool } from './decide.ts';
 import { decisionsTool } from './decisions.ts';
 import { followupTool } from './followup.ts';
 import { grantTool } from './grant.ts';
@@ -73,7 +74,10 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     todoTool(kit),
     // 0.9.4 (`11-20-collab-facts`): the workspace facts ledger, 26 → 27.
     // `settle` / `retract` / `invalidate` / `list` — one tool, four verbs.
-    factTool(kit)
+    factTool(kit),
+    // 0.9.5 (`11-20-collab-decide`): the decision ledger, 27 → 28.
+    // `open` / `answer` / `supersede` / `list` — thread **and** hand-off paths.
+    decideTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

@@ -179,12 +179,17 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - **`turn.count` 每请求无条件推进**（契约存在即推进），不要和「有没有 todo 可比较」耦合；推进判定用 `>=`（同毫秒下严格 `>` 会漏计）。
 - `[未收尾]` 判定用「本轮开始时间」比较（`updatedAt <= startedAt`），语义是「本轮开始前未更新」；渲染发生在工具调用之前，本轮新建的行不会出现在本轮块里。
 
-### 四段注入（硬上限 12 行）
+### 注入（硬上限 12 行）
 固定顺序累加，超限即停，被截断的段落**不出现**：
 
 ```
-[mission] ≤3  [todo] ≤4  [drift] ≤2  [progress] ≤2
+[mission] ≤3（含并入首行的 [role:…]）  [todo] ≤4  [decide] ≤1  [drift] ≤2  [progress] ≤2   → 合计 12
 ```
+
+- **角色并入 `[mission]` 首行**，不单独占行：3+4+1+2+2 = 12 = 生产预算，六段全满时**不允许任何段被丢**
+  （`test/decide.mjs` 断言 12 行且 `dropped=[]`）。新增段必须重新核算这道等式，或明确写出让哪一段整段让位。
+- 没有契约、也没有任务锚的会话：若它是某个 open 决策的当事人，**只**注入 `[decide]` 那一行（不要再顺手造
+  `[mission] 未设置`）。
 
 - **每轮重算、不注销**：绝不写 `injected[]`（这是 0.5.x 一次性注入的教训——展示过就永久消失）。
 - `[todo]`：`N open · M 需要你 · K 等对方` + top3（`blockingOn=me` 优先，其次最老 `since`）。
@@ -193,8 +198,20 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `[drift]`：仅触发时出现（连续 5 轮无 evidence，或挂起 >2h，或 suspended 超 24h）。
 - 插件**没有 idle 钩子**：`[未收尾]` 靠下一轮回溯判定，不要在文档里承诺 idle 写入。
 
+### 决策账本（0.9.5）
+- 存储 `collab-decisions/<key>.json`，`key` = threadID 或 bid；**每个 key 一个 `D#` 命名空间**，所以注入写
+  `D1@t_…`，`decision:<id>` 跨 key 重名必须报歧义（作用域写法 `decision:<key>#D#`），**绝不静默取第一条**。
+- 读改写必须 `<file>.lock` + `tmp+rename`；hook 里的冲突路径用 `waitMs: 1000`（不能把请求拖到 30s）。
+- **提问方（`askedBy`）与回答者（`by`）分开**：提问方是当事人（可见、可 `supersede`），但 answer 只有 owner。
+- **手工 open ≤3（D9）；conflict 决策单独配额**：升级不能因为手工列表满了而失败。
+- **conflict 不能永久只读**：owner 缺省 = 收到分叉的本会话（不把对端设为裁决者）；该 thread/bid 的参与方都能
+  supersede；24h 未回答由注入时的扫描自动作废（`by=system`）。`openConflictOf` 对超 TTL 的决策直接放行，不等扫描。
+- **升级闸门同时对 `threadID` 与 `bid` 生效**（`b_…` 曾经漏掉，消息照发）。
+
 ### 闸门（只拦接单；**不推断语义**）
 - **不写关键词 / 别名 / 子串匹配**：`mission.outOfScope` 与 bid 文案之间没有任何自动比对
+  （**0.9.5 的角色行同样只做静态声明**：不要根据消息正文给「应转 decider / 该由 implementer 执行」这类
+  建议——实测三句常见话都会误伤；判断权在模型）
   （`redis` 既是 ws 集群别名也是排钟缓存键的词，匹配必然误伤；领域词不进通用插件）。
   判断权在会话自己的模型，插件只**逼表态 + 记录**。
 - `accept`：本会话 `outOfScope` 非空 → 必须带 `scopeCheck:{inScope:boolean, reason?}`；
@@ -226,7 +243,9 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   0.9.1 的自由文本按 `manual` 兼容，不改写。到期在**每次注入时**扫描（不依赖定时器），到期转 `drifted`，**不自动关闭**；
   非 `time` 型 24h 兜底；记录的未来 `at` 优先于 24h 兜底。
 - 评估 / 写入都在 `context` hook：读 → `evaluate` → 渲染 → 串行 `stampTurn` + `markDrifted`（一次写）。
-- `[drift]` ≤2 行；四段上限之和 11，生产预算 12 下截断分支不可达（测试用 `renderInjection {maxLines}` 驱动）。
+- `[drift]` ≤2 行；0.9.5 起五段上限之和 = **12**（mission 含 role 3 + todo 4 + decide 1 + drift 2 + progress 2），
+  恰好用满预算，**六段全满时不允许任何段被丢**；新增段必须重算这道等式。`renderInjection {maxLines}` 仅测试用，
+  截断分支保留但正常路径不可达。
 
 ### 事实账本（0.9.4）
 - 存储：`collab-facts.json` 是**全机单文件**、按 `workspaces[dir]` 分区；读改写必须外套 `<file>.lock`（`wx` + 60s 陈旧 + pid 存活检查）。`tmp+rename` 只保证原子性，**不保证互斥**——不加锁的双进程并发会静默丢对方整本账（实测 `lost=20~25/50`，两边 exit 0）。

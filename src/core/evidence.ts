@@ -13,16 +13,17 @@
  *
  * Every failure returns a readable reason (`ok:false`); callers throw it as a
  * `ValidationError` so a bad evidence string is never reported as a plugin bug.
- * `decision:` reads the hand-off `decisions[]` (`collab_decisions`, 0.7.0) — the
- * dedicated decision ledger lands in 0.9.5, and this stays honest about it in
- * the refusal text instead of accepting an unverifiable claim.
+ * `decision:` goes through the **single resolver** in `core/decisions.ts`: the
+ * 0.9.5 decision ledger first, the 0.7.0 hand-off `decisions[]` as a
+ * compatibility input. An `open` / `superseded` decision is not evidence.
  */
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
-import { allBroadcasts } from './claim.ts';
+import { resolveDecision } from './decisions.ts';
 import { errText } from '../log.ts';
+import { truncate } from '../util.ts';
 
 export interface EvidenceResult {
   ok: boolean;
@@ -135,26 +136,50 @@ function checkTest(raw: string, directory: string | undefined): EvidenceResult {
 function checkDecision(raw: string): EvidenceResult {
   const id = raw.trim();
   if (!id) return { ok: false, kind: 'decision', reason: 'decision evidence 缺 id（decision:<D#>）' };
-  const wanted = id.toLowerCase();
-  const records = allBroadcasts();
-  for (const record of records) {
-    for (const decision of record.decisions ?? []) {
-      if (String(decision?.id ?? '').trim().toLowerCase() === wanted) {
-        return {
-          ok: true,
-          kind: 'decision',
-          detail: id,
-          reason: `决策 ${id} 已记录在交接 ${record.bid}（${decision.decision}）`
-        };
-      }
-    }
+  // **The single resolver** (`core/decisions.ts#resolveDecision`): the 0.9.5
+  // decision ledger first, the 0.7.0 hand-off `decisions[]` as a compatibility
+  // input. Nothing else in this build decides "is this decision decided?".
+  const found = resolveDecision(id);
+  if (!found) {
+    return {
+      ok: false,
+      kind: 'decision',
+      reason:
+        `未找到决策 ${id}：用 collab_decide { action:"open", key:"<threadID 或 bid>", question, options:[…] } ` +
+        '开一条，由 owner answer 后再作为证据（0.7.0 的 hand-off decisions[] 仍可读）。'
+    };
+  }
+  if (found.ambiguous?.length) {
+    return {
+      ok: false,
+      kind: 'decision',
+      reason:
+        `决策 ${id} 有歧义：${found.ambiguous.join(' / ')} 都含这个 id（D# 是每个 key 独立的）：` +
+        `请写清作用域 decision:<key>#${id}（例如 decision:${found.ambiguous[0]}#${id}）。`
+    };
+  }
+  if (found.status === 'open') {
+    return {
+      ok: false,
+      kind: 'decision',
+      reason: `决策 ${id} 还是 open（等 ${found.owner}）：未回答的决策不能作为 evidence；先由 owner answer。`
+    };
+  }
+  if (found.status === 'superseded') {
+    return {
+      ok: false,
+      kind: 'decision',
+      reason: `决策 ${id} 已 superseded（key=${found.key}）：作废的决策不能作为 evidence。`
+    };
   }
   return {
-    ok: false,
+    ok: true,
     kind: 'decision',
+    detail: found.id,
     reason:
-      `未找到已决策记录 ${id}：0.9.1 的 decision evidence 读取 hand-off 的 decisions[]（collab_decisions）；` +
-      '独立决策账本在 0.9.5 落地前不会被当作证据。'
+      found.source === 'ledger'
+        ? `决策 ${found.id} 已 ${found.status}（key=${found.key}${found.by ? `，by ${found.by}` : ''}）：${truncate(found.decision, 120)}`
+        : `决策 ${found.id} 已记录在交接 ${found.key}（兼容 0.7.0 hand-off decisions[]）：${truncate(found.decision, 120)}`
   };
 }
 

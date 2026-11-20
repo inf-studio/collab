@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十七个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork）、决策账本与角色（collab_decide：open/answer/supersede/list，key 是 threadID 或 bid，owner 独占 answer、提问方为当事人，同问去重、手工 open ≤3（conflict 单独配额），conflict 自动开决策且该 thread/bid 只读（任一方可 supersede，24h 自动解除），静态 [role:…] 并入 [mission]、[decide] 一行，decision:<key>#D# 单一 resolver），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -46,6 +46,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_todo` | `action`(`add`/`close`/`defer`/`suspend`/`list`), `id?`, `subject?`, `kind?`, `blockingOn?`, `status?`, `wakeWhen?`, `evidence?`, `reason?`, `until?`, `confirm` | **契约待办（0.9.1）**：`close` 必填 evidence；`suspend` 必填 `wakeWhen`；`add` 可 `status:"doing"`；注入只列 top3 + 计数，上一轮未动的 doing 标 `[未收尾]`；读侧保留全部 active、只裁最近 50 条关闭历史，id 不复用 | 写本地契约 |
 | `collab_fact` | `action`(`settle`/`retract`/`invalidate`/`list`), `claim?`, `evidence?`, `grade?`, `factIds?`, `id?`, `reason?`, `since?`, `includeAll?`, `limit?`, `confirm` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`…（claim/evidence/grade 必填；relayed/unknown 不得被引用为证据）；`retract` 需要 reason 并按日计数；`invalidate` 作废一条及其显式派生的引用或一个 epoch（epoch+1，工作区级传播，在途 todo 标 `staleWork` 且不关闭）；`list` 只读 | 写工作区账本 |
 
+| `collab_decide` | `action`(`open`/`answer`/`supersede`/`list`), `key?`/`threadID?`/`bid?`, `question?`, `options?`, `owner?`, `id?`, `answer?`, `reason?`, `confirm` | **决策账本（0.9.5）**：`open`（key = threadID **或** bid，`options≥2`；同问去重、同 key 手工 open ≤3、conflict 单独配额；owner 缺省 = 契约 decider → 发单方）；`answer` **只有 owner**，已回答需先 `supersede`；`supersede` 提问方 / owner / 该 thread 的参与方都能做（记 `by`+`reason`）；`list` 只读。提问方是当事人（看得见 `[decide]`、可撤回）；双方下一轮注入一行 `[decide]`，`decision:<key>#D#` 作为 evidence | 写本地决策账本 |
 
 ### 事实账本（0.9.4）：撤回要能传播
 
@@ -536,6 +537,62 @@ collab_todo { action:"suspend", id:"T2", wakeWhen:{ kind:"manual" } }        # �
 - 不要用一句「我不再回执」当停机声明：没有 `done` + next-up 占位，`[drift]` 会一直问；
 - 不要把 `block` 当免打扰开关：主线挂起超过 2h 同样进 `[drift]`（这是设计，不是 bug）；
 - 不要给挂起项随便写一个过去的时间来「静音」——会被拒绝。
+
+## 一点十六、决策与角色（0.9.5）
+
+同一个决策被反复重开 19 次、24 条交接的 `decisions[]` 全空——因为决策没有载体。本版把它做成 `D1`/`D2`：
+**写在账本里，owner 关掉，双方都看得见**。
+
+### 什么时候用
+
+- 一个**选择**出现，且答案会影响后续实现（退出码用 2 还是 3、事件型还是断言型、基线分叉以谁为准）；
+- 你已经问过第二遍（同问会被去重，逼你回看已有 `D#`）；
+- `[conflict]` 出现时**自动**开决策，你只需要回答或作废。
+
+### 开 / 答 / 作废
+
+```text
+# 开：key 是 threadID（t_…）或交接单（b_…）；thread 没有 handoff 记录也能开
+collab_decide { action:"open", key:"t_mwoy…", question:"退出码用 2 还是 3",
+                options:["用 2（沿用旧约定）","用 3（新约定）"], confirm:true }
+
+# 答：只有 owner 能答（非 owner 会被拒绝，0 写入）；已回答再答会被要求先 supersede
+collab_decide { action:"answer", key:"t_mwoy…", id:"D1", answer:"用 3", confirm:true }
+
+# 作废：任何一方都可以，但必须写原因
+collab_decide { action:"supersede", key:"t_mwoy…", id:"D1", reason:"方案已被 D3 取代", confirm:true }
+
+# 看：只读；省略 key = 本会话作为提问方/owner 的全部 open
+collab_decide { action:"list", key:"t_mwoy…" }
+```
+
+### 硬规则
+
+- **owner 独占关闭**：提问方不得代答；`owner` 缺省 = 契约里的 `decider` → 发单方（thread 发起人 / 交接单 `from.sid`）。
+- **提问方是当事人**：`askedBy` 单独记，提问方在 `[decide]` 里看得到、能 `supersede` 撤回，但 **answer 只能 owner**。
+- **同问不重复**：NFKC + 去空白/标点/小写后 hash 相同且仍 open → 拒绝，返回 `已有同问决策 D3 open, wait ses_x`。
+- **同一 key 手工 open ≤ 3**（D9）：第 4 条拒绝，先 `answer` 或 `supersede`。`conflict` 决策有**单独配额**，手工满了也能升级。
+- **`D#` 每个 key 独立**：注入写成 `D1@t_…`；`decision:D1` 跨 key 重名会报歧义，写 `decision:t_…#D1`。
+
+### 角色（只声明，不推断）
+
+`[role:requester+verifier] 你发单；你验收` / `[role:implementer] 你负责实现；实现选择请交 decider` ——
+**并入 `[mission]` 首行**，不单独占行。
+
+- 角色是**声明**：`implementer` 的实现选择属于 `decider`，`requester` 的实施交给 `implementer`——这是约定，不是插件判定；
+- **插件不对消息正文做任何关键词/子串匹配**（0.9.2 起零语义推断）：它不会因为你说「你来决定」「帮我改一下」
+  就给你贴角色建议；判断由你自己做；
+- 硬拒绝只发生在闸门层（越界 / 冻结 / protect）。
+
+### `[conflict]` → 决策 → 该项目只读（有逃生口）
+
+基线分叉（两侧在不同维度各自超前）时，插件自动开一条 `origin:"conflict"` 的决策：
+`question = 基线分叉：<维度>`，`options = 以我方为准 / 以对方为准 / 重新测量`，
+`owner = decider`（没有 decider 时 = **收到分叉的本会话**，不把提出分叉的对端设为裁决者）。
+**决策关闭前该 thread（或该交接单）不再产生新消息**（`collab_send`/`collab_reply`/`collab_handoff` 可读拒绝）。
+
+- **逃生口**：该 thread 的任一方都能 `supersede` 解除；**24h 未回答自动作废**（`by=system`），不会永久只读；
+- 不要在 thread 里继续争论——那正是这个开关要停掉的行为；有分歧就 `answer` 或 `supersede` 后重开。
 
 ## 二、同工作区（local）
 

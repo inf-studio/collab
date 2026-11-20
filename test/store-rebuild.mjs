@@ -145,7 +145,7 @@ const byName = name => registered.find(definition => definition.name === name);
 const indexDefinition = byName('collab_index');
 expect(
   '工具面 23 → 26：collab_index 只注册一次，0.9.1 的三个工具也在',
-  registered.length === 27 && Boolean(indexDefinition),
+  registered.length === 28 && Boolean(indexDefinition),
   `${registered.length} tool(s)`
 );
 expect(
@@ -168,8 +168,8 @@ expect(
   indexDescription.slice(0, 140)
 );
 expect(
-  'PLUGIN_VERSION 与 package.json 一致（0.9.4）',
-  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.4',
+  'PLUGIN_VERSION 与 package.json 一致（0.9.5）',
+  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
 const runIndexTool = input => indexDefinition.execute(input, { sessionID: 'ses_tool' });

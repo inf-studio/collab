@@ -28,8 +28,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { STALE_REPLY_RATIO } from '../constants.ts';
-
+import { CONFLICT_DECISION_OPTIONS, STALE_REPLY_RATIO } from '../constants.ts';
 export type TriState = 'fresh' | 'stale' | 'conflict';
 
 export interface BasedOn {
@@ -197,9 +196,27 @@ export function staleLine(basedOn: BasedOn, local: LocalState, verdict: CompareR
   const current = ourRepo ? `${ourRepo}` : `facts epoch ${local.facts}`;
   const instruction = `只回增量（≤${Math.round(STALE_REPLY_RATIO * 100)}% 原文），不要重述已作废事实`;
   if (verdict.state === 'conflict') {
-    return `[conflict] 基线分叉（本条 ${baseline}，本地 ${current}）—— 先各自报增量，0.9.5 会开决策`;
+    return (
+      `[conflict] 基线分叉（本条 ${baseline}，本地 ${current}）—— 已转决策：本 thread 只读，` +
+      '等 owner answer 或 supersede 后再继续'
+    );
   }
   return `[stale] 本条基于 ${baseline}，你已到 ${current}；${instruction}`;
+}
+
+/**
+ * 0.9.5 (design §6): a `conflict` verdict opens a **decision** instead of another
+ * round of prose. The question names the dimensions that diverged, so the ledger
+ * row is readable on its own; the options are the only three honest answers.
+ *
+ * Pure (no clock, no I/O) — `core/decisions.ts` performs the write.
+ */
+export function conflictDecision(verdict: CompareResult): { question: string; options: string[] } {
+  const dimensions = [...new Set([...verdict.behind, ...verdict.ahead])];
+  return {
+    question: `基线分叉${dimensions.length ? `：${dimensions.join(' / ')}` : ''}`,
+    options: [...CONFLICT_DECISION_OPTIONS]
+  };
 }
 
 /** One-line summary for a tool result (the `basedOn` marker that was written). */

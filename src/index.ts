@@ -3,18 +3,25 @@ import { createContextHook } from './hooks/context.ts';
 import {
   contractExists,
   contractFile,
+  deciderOf,
+  derivePeerRoles,
   effectiveMission,
   emptyContract,
   formatAge,
   normalizeContract,
   nextTodoSeq,
   openTodos,
+  peerRolesOf,
+  primaryRole,
   readContract,
+  recordPeers,
   renderInjection,
+  roleLine,
   stampTurn,
   unfinishedTodos,
   updateContract,
   updateContractIfExists,
+  upsertPeers,
   writeContract
 } from './core/contract.ts';
 import { checkEvidence } from './core/evidence.ts';
@@ -119,8 +126,30 @@ import {
 } from './core/facts.ts';
 import { FILE_LOCK_ATTEMPTS, FILE_LOCK_RETRY_DELAYS_MS, FILE_LOCK_STALE_MS, tryAcquireFileLock, withFileLock } from './core/file-lock.ts';
 import {
+  answerDecision,
+  decideLine,
+  decisionFile,
+  decisionsDir,
+  decisionsForSession,
+  formatDecision,
+  isDecisionKey,
+  listDecisions,
+  normalizeQuestion,
+  expireConflictDecisions,
+  openConflictDecision,
+  openConflictOf,
+  openDecision,
+  questionHash,
+  readAllDecisions,
+  readDecisions,
+  resolveDecision,
+  supersedeDecision,
+  writeDecisions
+} from './core/decisions.ts';
+import {
   basedOnLabel,
   compareBasedOn,
+  conflictDecision,
   gitHead,
   localSnapshot,
   staleLine
@@ -706,5 +735,35 @@ export const __internals = {
   tryAcquireFileLock,
   FILE_LOCK_STALE_MS,
   FILE_LOCK_ATTEMPTS,
-  FILE_LOCK_RETRY_DELAYS_MS
+  FILE_LOCK_RETRY_DELAYS_MS,
+  // 0.9.5 (`11-20-collab-decide`): the decision ledger + the role four-tuple.
+  // The test drives the real storage (lazy read, lock + rename, `D#` monotonic)
+  // and the single `decision:` resolver directly — no re-implementation.
+  decisionsDir,
+  decisionFile,
+  readDecisions,
+  writeDecisions,
+  readAllDecisions,
+  openDecision,
+  answerDecision,
+  supersedeDecision,
+  expireConflictDecisions,
+  openConflictDecision,
+  openConflictOf,
+  listDecisions,
+  decisionsForSession,
+  decideLine,
+  formatDecision,
+  isDecisionKey,
+  normalizeQuestion,
+  questionHash,
+  resolveDecision,
+  conflictDecision,
+  peerRolesOf,
+  primaryRole,
+  derivePeerRoles,
+  upsertPeers,
+  deciderOf,
+  recordPeers,
+  roleLine
 };

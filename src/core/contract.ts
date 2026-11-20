@@ -346,6 +346,145 @@ export function todoSeqOf(id: unknown): number {
   return match ? Number(match[1]) : 0;
 }
 
+/* -------------------------------------------------- roles (0.9.5, R5) */
+
+/**
+ * 0.9.5 (`11-20-collab-decide`, R5): the **role four-tuple** written onto the
+ * existing `peers` face (0.9.1 declared it display-only; this version gives it
+ * meaning). One entry per `(sid, role)` pair, so the same session may be both
+ * `requester` and `decider` (the default: the asker owns the decision).
+ *
+ * The role is an **injection hint, not a hard gate** (design §5): a hard refusal
+ * on "you may not decide this" would misfire constantly; the gate layer
+ * (`core/gate.ts`) is where hard refusals live.
+ */
+const ROLE_RANK: Record<PeerRole, number> = { decider: 0, implementer: 1, requester: 2, verifier: 3 };
+
+/** The roles this session holds in the contract (ordered: decider first). */
+export function peerRolesOf(contract: Contract, sid: string): PeerRole[] {
+  const wanted = String(sid ?? '').trim();
+  if (!wanted) return [];
+  const roles = [
+    ...new Set(
+      (contract.peers ?? [])
+        .filter(peer => String(peer?.sid ?? '').trim() === wanted)
+        .map(peer => peer.role)
+        .filter((role): role is PeerRole => PEER_ROLES.includes(role))
+    )
+  ];
+  return roles.sort((left, right) => ROLE_RANK[left] - ROLE_RANK[right]);
+}
+
+export function primaryRole(roles: PeerRole[]): PeerRole | undefined {
+  return [...roles].sort((left, right) => ROLE_RANK[left] - ROLE_RANK[right])[0];
+}
+
+/**
+ * The default four-tuple (design §5): the hand-off requester is `requester`, its
+ * claimant is `implementer`, the **decider defaults to the requester's owner**
+ * and the `verifier` is the requester (the person who asked is the person who
+ * accepts the answer). Explicit values win; `undefined` sids are skipped.
+ */
+export function derivePeerRoles(input: {
+  requester?: string;
+  implementer?: string;
+  decider?: string;
+  verifier?: string;
+  threadId?: string | null;
+  now?: number;
+}): ContractPeer[] {
+  const now = Number(input.now) || Date.now();
+  const sidOf = (value: unknown): string => String(value ?? '').trim();
+  const requester = sidOf(input.requester);
+  const entries: Array<{ sid: string; role: PeerRole }> = [
+    { sid: requester, role: 'requester' },
+    { sid: sidOf(input.implementer), role: 'implementer' },
+    { sid: sidOf(input.decider) || requester, role: 'decider' },
+    { sid: sidOf(input.verifier) || requester, role: 'verifier' }
+  ];
+  const seen = new Set<string>();
+  const out: ContractPeer[] = [];
+  for (const entry of entries) {
+    if (!entry.sid) continue;
+    const key = `${entry.sid}|${entry.role}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      sid: entry.sid,
+      role: entry.role,
+      threadId: input.threadId ? String(input.threadId) : null,
+      since: now
+    });
+  }
+  return out;
+}
+
+/**
+ * Merge `(sid, role)` entries into a contract's `peers` (a repeat only refreshes
+ * `threadId` / keeps the original `since`). Bounded by the reader's 50-row cap.
+ */
+export function upsertPeers(
+  contract: Contract,
+  entries: readonly { sid?: string; role: PeerRole; threadId?: string | null }[],
+  now = Date.now()
+): Contract {
+  const peers = [...(contract.peers ?? [])];
+  for (const entry of entries) {
+    const sid = String(entry?.sid ?? '').trim();
+    if (!sid || !PEER_ROLES.includes(entry.role)) continue;
+    const index = peers.findIndex(peer => peer.sid === sid && peer.role === entry.role);
+    if (index >= 0) {
+      const current = peers[index];
+      peers[index] = {
+        ...current,
+        ...(entry.threadId ? { threadId: String(entry.threadId) } : {}),
+        since: Number(current.since) || now
+      };
+    } else {
+      peers.push({ sid, role: entry.role, threadId: entry.threadId ? String(entry.threadId) : null, since: now });
+    }
+  }
+  return { ...contract, peers: peers.slice(-50) };
+}
+
+/** The decision owner's default (`decider` peer, then the `requester` peer). */
+export function deciderOf(contract: Contract): string | undefined {
+  return (
+    (contract.peers ?? []).find(peer => peer.role === 'decider')?.sid ??
+    (contract.peers ?? []).find(peer => peer.role === 'requester')?.sid
+  );
+}
+
+/** Write the roles into **this** session's contract (lazy creation, best-effort). */
+export function recordPeers(
+  sessionID: string,
+  entries: readonly { sid?: string; role: PeerRole; threadId?: string | null }[],
+  now = Date.now()
+): Promise<Contract> {
+  return updateContract(sessionID, current => upsertPeers(current, entries, now));
+}
+
+const ROLE_DUTY: Record<PeerRole, string> = {
+  requester: '你发单',
+  implementer: '你负责实现；实现选择请交 decider',
+  decider: '你裁决（owner 独占 answer）',
+  verifier: '你验收'
+};
+
+/**
+ * The `[role:…]` line (design §7): one line, only when this session has a role
+ * in the contract.
+ *
+ * **No text matching, no advice** (review B4): since 0.9.2 the plugin makes no
+ * semantic inference from message text (the gate is the model's own
+ * `scopeCheck`), and a substring matcher here mis-fired on three ordinary
+ * sentences. The role is declared, the reader decides.
+ */
+export function roleLine(contract: Contract, sessionID: string): string | undefined {
+  const roles = peerRolesOf(contract, sessionID);
+  if (!roles.length) return undefined;
+  return `[role:${roles.join('+')}] ${roles.map(role => ROLE_DUTY[role]).join('；')}`;
+}
 /** Highest `T<n>` in a raw list (before closed-history trimming). */
 export function maxTodoSeq(todos: ContractTodo[]): number {
   return todos.reduce((max, todo) => Math.max(max, todoSeqOf(todo.id)), 0);
@@ -635,6 +774,13 @@ export interface RenderInput {
   unfinished?: string[];
   /** 0.9.3 (`core/drift.ts`): the `[drift]` section; empty when not triggered. */
   drift?: string[];
+  /**
+   * 0.9.5 (R5): the `[role:…]` line (`roleLine`) and the `[decide]` line
+   * (`core/decisions.ts#decideLine`), each at most one line. Already rendered by
+   * their owners so the renderer stays a pure line assembler.
+   */
+  role?: string;
+  decide?: string;
   now?: number;
   /**
    * Line budget for the whole block. Defaults to `INJECT_MAX_LINES`; the
@@ -655,7 +801,8 @@ function missionLines(
   mission: ContractMission,
   contract: Contract,
   now: number,
-  anchor?: { source: string; candidates?: string[] }
+  anchor?: { source: string; candidates?: string[] },
+  role?: string
 ): string[] {
   const ambiguous = anchor?.source === 'ambiguous' && !mission.confirmedBy && !mission.oneLine.trim();
   const candidates = anchor?.candidates ?? [];
@@ -664,7 +811,11 @@ function missionLines(
     : mission.oneLine.trim() || '未设置（collab_mission { action:"set", oneLine }）';
   const path = mission.taskPath ? ` · ${mission.taskPath}` : '';
   const flag = mission.confirmedBy ? '' : ' [未确认]';
-  const lines = [`[mission] ${head}${path}${flag}`];
+  // 0.9.5 (review B3): the role is part of the **mission head line**, not a
+  // section of its own — with 3+4+1+2+2 = 12 lines the budget stays exactly at
+  // the cap, so `[progress]` is never dropped in production.
+  const rolePart = role ? ` · ${role}` : '';
+  const lines = [`[mission] ${head}${path}${flag}${rolePart}`];
 
   const bits: string[] = [];
   if (mission.inScope.length) bits.push(`做 ${mission.inScope.join(' / ')}`);
@@ -757,8 +908,11 @@ export function renderInjection(input: RenderInput): RenderResult {
   const maxLines = Math.max(1, Number(input.maxLines) || INJECT_MAX_LINES);
   const unfinished = new Set(input.unfinished ?? []);
   const sections: Array<{ name: keyof typeof INJECT_SECTION_LIMITS; lines: string[] }> = [
-    { name: 'mission', lines: missionLines(input.mission, input.contract, now, input.anchor) },
+    // The role rides on the mission head line (review B3) instead of a section:
+    // mission 3 + todo 4 + decide 1 + drift 2 + progress 2 = 12, exactly the cap.
+    { name: 'mission', lines: missionLines(input.mission, input.contract, now, input.anchor, input.role) },
     { name: 'todo', lines: todoLines(input.contract, unfinished, now) },
+    { name: 'decide', lines: input.decide ? [input.decide] : [] },
     { name: 'drift', lines: (input.drift ?? []).map(line => String(line ?? '')).filter(Boolean) },
     { name: 'progress', lines: progressLines(input.contract) }
   ];

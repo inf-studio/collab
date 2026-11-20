@@ -3,6 +3,76 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.5] - 2026-11-20
+
+> **决策载具 + 角色四元组**。24 条交接的 `decisions[]` **全空**、`collab_decisions` 一次没用过；两条最大的
+> thread（418 / 140 条）**根本没有交接记录**，决策无处可落。同一个决策反复重开（11:09 起「决策」类措辞 19 次，
+> 00:52 出现「第四次/第五次同步同一事实」）；角色边界靠自然语言重申（B 54 次决策类措辞 / 31 次边界声明，
+> A 38 / 36）——双方都在声明边界 = 边界没被写下来。本版把「决策」做成可寻址的 `D1`/`D2`，把四个角色写进契约。
+> 工具面 **27 → 28**（新增 `collab_decide`）；新增一个全局目录（`COLLAB_DECISIONS_DIR` 可覆盖）。
+
+### Added
+
+- **决策账本（R1）**：`src/core/decisions.ts` — `~/.config/opencode/collab-decisions/<key>.json`，`key` 为
+  `threadID`（`t_…`）**或** `bid`（`b_…`），所以**没有交接记录的 thread 也能开决策**（418 / 140 条的两条 thread
+  正是这个缺口）。`{id, question, options, owner, status, answer, by, askedBy, parties?, at, hash, origin}`；
+  `D#` 单调、每个 key 独立；惰性创建、`tmp + rename`、**整段 read-modify-write 套跨进程 `<file>.lock`**
+  （`tmp+rename` 只保证原子性）。
+- **`collab_decide`（27 → 28）**：`open {key, question, options≥2, owner?}` · `answer {key, id, answer}` ·
+  `supersede {key, id, reason}` · `list {key?}`（只读）。写动作需 `confirm:true`。
+- **owner 独占关闭（R2）**：只有 `owner` 能 `answer`（提问方不得代答，可读拒绝 0 写入）；已回答不可再答
+  （必须 `supersede` 后重开）。
+- **提问方是当事人（复核 B1）**：`askedBy` 与 `by`（回答者）分开记。提问方拿得到 `[decide]`、能 `supersede`
+  撤回自己的问题，但**不能 answer**；没有契约的 owner 会话也会收到那行 `[decide]`（不再要求它先建契约）。
+- **`supersede` 白名单**：提问方 / owner / 该 thread（或交接单）的参与方（`parties`），一律记 `by` + `reason`。
+- **同问去重（R3）**：`hash = sha1(NFKC + 小写 + 去空白/标点/符号)`；同 hash 的 open 已存在 → 拒绝并返回
+  `已有同问决策 D3 open, wait ses_x`（不重复计数）。
+- **上限 3（D9）**：同一 key 同时 open 的**手工**决策 ≤ 3；第 4 条可读拒绝并列出当前 `D#`，提示先 `answer` /
+  `supersede`。**conflict 决策单独占一条配额（复核 S6）**：手工列表满了，升级也必须成功，否则 thread 会继续争论。
+- **owner 缺省**：契约 `peers` 里的 `decider` → 发单方（thread 发起人 / 交接单 `from.sid`）→ 当前会话。
+- **角色四元组（R5）**：`src/core/contract.ts` — `peers[].role`（`requester` / `implementer` / `decider` /
+  `verifier`）读写与默认推导（交接发起方 = requester、承接方 = implementer、decider = 发起方 owner、
+  verifier = requester）；`collab_accept` 领取成功与 `collab_decide open` 时写入本会话契约（best-effort）。
+  注入 `[role:…]`（≤1 行）+ 两条**提示而非硬拦**：`implementer` 收到实现决策请求 → 应转 decider；
+  `requester` 收到实施请求 → 该由 implementer 执行。
+- **`[decide]` 注入（≤1 行）**：`D2@t_… open（等 ses_e176…，4.2h）· D3@b_… open（…）· 还有 N 条`；只列本会话
+  作为提问方/owner 的 open 项；12 行总预算不变（新增 role / decide 两段各 1 行，放不下整段丢弃）。
+- **conflict 自动升决策（R6）**：`tri-state` 判 `conflict` 时由 `core/decisions.ts#openConflictDecision` 开一条
+  `origin:"conflict"` 的决策（`question = 基线分叉：<维度>`，`options = 以我方为准 / 以对方为准 / 重新测量`），
+  **幂等**；`owner = decider ?? 收到分叉的本会话`（不再把提出分叉的对端设为裁决者，N11），并记 `parties`。
+  注入 `[conflict] 已开 D2（等 …）—— 决策关闭前本 thread 只读；双方都可 supersede 解除`；
+  **该 thread 或该 bid 在决策关闭前不再产生新消息**（`collab_send` / `collab_reply` / `collab_handoff` 可读拒绝，
+  读走 `collab_inbox` / `collab_status`；复核 S5 补上 `b_…` 这一路），`answer` / `supersede` 后恢复。
+  **逃生口（复核 B2）**：该 thread 的任一方都能 `supersede`；**24h 未回答自动作废**（`expireConflictDecisions`
+  在每次注入时扫描，`by=system`，理由写明「24h 未回答」）——只读降级不可能永久。
+  写盘临界区限 `waitMs: 1000`，hook 不会被账本锁拖到 30s（N12）。`tri-state.ts` 保持纯函数
+  （`conflictDecision(verdict)` 只产生 question/options，文案改为「已转决策：本 thread 只读」）。
+- **`decision:` 单一 resolver（父设计 §4）**：`core/decisions.ts#resolveDecision` 是**唯一**回答「算不算已决策」的
+  地方——账本优先、0.7.0 的 hand-off `decisions[]` 仅作兼容输入；`open` / `superseded` 不是证据；`D#` 跨 key 重名
+  时明确报**歧义**并要求写作用域 `decision:<key>#D#`（绝不静默挑一个）。`core/evidence.ts` 不再自己遍历广播记录。
+
+### Changed
+
+- `PLUGIN_VERSION` / `package.json` / 桌面探针 → **0.9.5**；工具面 27 → **28**。
+- `INJECT_SECTION_LIMITS` 新增 `decide: 1`；`[role]` 并入 `[mission]` 首行，section 上限合计仍为 12。
+- `readAllDecisions` 的有界扫描改为 `slice(-limit)`（复核 S7）：此前取的是**最老** 500 个文件，最新的一本反而被
+  隐藏。`openConflictOf` 对超过 24h 的 conflict 决策直接放行（即使扫描还没落盘）。
+- 既有测试套件的工具数 / 版本断言同步（27 → 28、0.9.4 → 0.9.5）。
+
+### 验收
+
+- `test/decide.mjs`（**79/79**）：thread 路径 open/list · bid 路径 open 且命名空间隔离 · 非 owner answer 拒绝
+  （0 写入）· 已回答再 answer 拒绝 · 同问变体（大小写/空白/标点 + **NFKC 全角**）拒绝并返回既有 `D#` + owner ·
+  第 4 条 open 拒绝 + supersede 释放槽位 · owner 缺省（decider → 交接发起方）· 四元组推导 + **静态** `[role:…]`
+  （三句误伤样例不再产生建议）· **提问方是当事人**（owner≠asker：看得见、可 supersede、不能 answer）·
+  conflict 自动开决策 + 同 thread/bid 只读（answer 后恢复）· **逃生口**（对端 supersede / 25h 自动作废）·
+  **bid-key 拦截** · **手工 cap 满仍能升级** · **六段全满 12 行 / 无 dropped** · **501 条扫描保留最新 500** ·
+  `[decide]` 一行且只列 open · `decision:` 单一 resolver（open/answered/superseded/跨 key 歧义/旧 `decisions[]`
+  兼容/`collab_todo close` 使用它）。
+- **变异（强制）**：`questionHash` 去掉 `normalizeQuestion`（直接 sha1 原文）→「同问变体被拒」与「重复 open 0 写入」
+  两条必红（实测退出码 1，2 项失败）；去掉 `.normalize('NFKC')` →「全角数字同问被拒」必红（S9 用例固定）。
+  还原后 79/79 绿。
+
 ## [0.9.4] - 2026-11-20
 
 > **事实账本 + settle/invalidate**。624 条消息里 **117 条（19%）**后来被撤回或更正（环境干扰 39、工具误用 33、

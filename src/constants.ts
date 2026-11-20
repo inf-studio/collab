@@ -586,6 +586,8 @@ export const INJECT_MAX_LINES = 12;
 export const INJECT_SECTION_LIMITS = {
   mission: 3,
   todo: 4,
+  /** 0.9.5: `[decide]` — one line summarising the open decisions waiting on somebody. */
+  decide: 1,
   drift: 2,
   progress: 2
 } as const;
@@ -654,5 +656,45 @@ export const GLOSSARY_MEANING_CHARS = 200;
 /** R6: the **second** conflict over the same term refuses until it is defined. */
 export const GLOSSARY_CONFLICT_LIMIT = 2;
 
+// --------------------------------------- decision ledger + roles (0.9.5)
+
+/**
+ * 0.9.5 (`11-20-collab-decide`, R1): the **decision ledger** — one JSON file per
+ * subject key (`<threadID>` for a thread, `<bid>` for a hand-off), because a
+ * decision is about *that* conversation, and two conversations must never share
+ * a `D#` namespace. `COLLAB_DECISIONS_DIR` overrides the directory so tests
+ * never touch `~/.config/opencode/`.
+ *
+ * A file is created lazily (reading never writes) and every write is a
+ * read-modify-write under the shared cross-process `file-lock` + `tmp + rename`.
+ */
+export const DECISIONS_DIR =
+  process.env.COLLAB_DECISIONS_DIR || join(homedir(), '.config', 'opencode', 'collab-decisions');
+/** The file shape this build writes; an unknown `v` is treated as empty. */
+export const DECISIONS_VERSION = 1;
+/**
+ * D9: at most this many **open** decisions per key. The 24 hand-offs had 0
+ * recorded decisions while 19 "决策" messages bounced back and forth — a list
+ * that can grow without a cap is a chat, not a ledger.
+ */
+export const DECISION_OPEN_LIMIT = 3;
+/**
+ * Review B2: a `conflict` decision nobody answered for this long is superseded
+ * automatically so the thread's read-only degradation can never become permanent.
+ */
+export const CONFLICT_DECISION_TTL_MS = 24 * 60 * 60 * 1000;
+export const DECISION_QUESTION_LIMIT = 300;
+export const DECISION_OPTION_CHARS = 120;
+export const DECISION_OPTIONS_MAX = 6;
+export const DECISION_ANSWER_LIMIT = 500;
+export const DECISION_REASON_LIMIT = 200;
+/** `collab_decide list` renders at most this many rows. */
+export const DECISION_LIST_MAX = 20;
+/**
+ * Design §6: a `conflict` verdict (both sides ahead in different dimensions) is
+ * not a conversation topic — it opens a decision with these options.
+ */
+export const CONFLICT_DECISION_OPTIONS = ['以我方为准', '以对方为准', '重新测量'];
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.4';
+export const PLUGIN_VERSION = '0.9.5';

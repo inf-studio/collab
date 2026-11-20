@@ -1,10 +1,11 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_MAX_ATTEMPTS, BROADCAST_DIR, MAX_STORED } from '../constants.ts';
 import { claimLock, isValidBid, persistRefresh, readBroadcast, releaseLock, writeBroadcast } from '../core/claim.ts';
-import { readContract } from '../core/contract.ts';
+import { derivePeerRoles, readContract, recordPeers } from '../core/contract.ts';
 import { invalid } from '../core/errors.ts';
 import { evaluate } from '../core/gate.ts';
 import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
+import { log } from '../log.ts';
 import type { BroadcastRecord, JsonObject, ToolDefinition } from '../types.ts';
 import { shortID, truncate } from '../util.ts';
 import { jsonInput } from './shared.ts';
@@ -286,6 +287,18 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       };
       delete accepted.asked; // the ask is answered: no lease left to run out
       record = writeBroadcast(accepted);
+      // 0.9.5 (R5): the role four-tuple — the hand-off's requester sent the
+      // order, this session implements it, and the requester owns the decision
+      // unless somebody is named `decider`. Display/injection only; a contract
+      // write failure must never undo a claim that already succeeded.
+      try {
+        await recordPeers(
+          me,
+          derivePeerRoles({ requester: record.from?.sid, implementer: me, decider: record.from?.sid })
+        );
+      } catch (error) {
+        log(`role recording failed for ${me}: ${(error as Error)?.message ?? error}`);
+      }
       const notified = await chain.notifyRequester(record, {
         text:
           `ACCEPT ${record.issuePath ?? record.bid} —— ${shortID(me)} 已领取 ${record.bid}` +

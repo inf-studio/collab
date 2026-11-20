@@ -2,29 +2,33 @@ import { allBroadcasts } from '../core/claim.ts';
 import { createAwareness } from '../core/awareness.ts';
 import {
   contractExists,
+  deciderOf,
   effectiveMission,
   readContract,
   renderInjection,
+  roleLine,
   stampTurn,
   unfinishedTodos,
   updateContractIfExists
 } from '../core/contract.ts';
+import { decideLine, expireConflictDecisions, openConflictDecision } from '../core/decisions.ts';
 import { isAckText } from '../core/ack.ts';
 import { evaluate as evaluateDrift, markDrifted } from '../core/drift.ts';
 import { factInjection, markFactSeen, noteStaleDeliveries, readFactSeen, workspaceFacts, workspaceOf } from '../core/facts.ts';
 import { glossaryLineFor } from '../core/glossary.ts';
 import { compareBasedOn, localSnapshot } from '../core/tri-state.ts';
+import type { CompareResult } from '../core/tri-state.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey, messageSemantics } from '../core/messages.ts';
+import { resolveMissionAnchor } from '../core/mission-resolve.ts';
 import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
-import { resolveMissionAnchor } from '../core/mission-resolve.ts';
-import { normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
+import { isValidThreadID, normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
 import { log } from '../log.ts';
 import type { ToolDeps } from '../tools/shared.ts';
 import type { ContextHookEvent, InboxMessage } from '../types.ts';
-import { dedupe, truncate } from '../util.ts';
+import { asObject, dedupe, truncate } from '../util.ts';
 
 /** The hook payload as the host hands it to `ctx.session.hook("context", …)`. */
 export type ContextEventHandler = (event: ContextHookEvent) => Promise<void>;
@@ -78,13 +82,26 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     const missionSet = Boolean(contract.mission.confirmedBy) || Boolean(contract.mission.oneLine.trim());
     const hint =
       hasContract && missionSet ? undefined : resolveMissionAnchor(deps.ctx?.location?.directory, sessionID);
-    // No contract and nothing resolvable → stay silent. `ambiguous` is silent
-    // too (review #4): 2+ in_progress tasks in a task-heavy repo used to inject
-    // four lines of "未设置" every request without naming the ambiguity. With a
-    // contract, the ambiguity is rendered *inside* `[mission]` instead.
-    if (!hasContract && (!hint || hint.source === 'none' || hint.source === 'ambiguous')) return undefined;
-
     const now = Date.now();
+    // 0.9.5 (R5/R1): the open decisions waiting on somebody. Computed **before**
+    // the "no contract" exit: an owner that never used a contract tool still has
+    // to see the `[decide]` line (review B1) — and the 24h conflict sweep runs
+    // here, where the drift scan runs (review B2). Each failure is a log line.
+    let decide: string | undefined;
+    try {
+      // Review B2 / N12: the sweep and the read are bounded (1s lock wait in the
+      // writer) so a busy ledger can never stall a model request.
+      await expireConflictDecisions(now);
+      decide = decideLine(sessionID, now);
+    } catch (error) {
+      log('decision injection failed:', (error as Error)?.message ?? error);
+    }
+    // No contract and nothing resolvable → stay silent unless this session is a
+    // party of an open decision (then only that line is injected).
+    if (!hasContract && (!hint || hint.source === 'none' || hint.source === 'ambiguous')) {
+      return decide;
+    }
+
     // 0.9.3 (R1/R4): stamp **first**, then evaluate/render from that snapshot,
     // then persist once. The stamped counter already includes this request
     // (its tool calls have not run yet), so `evaluate` reads it as is — the
@@ -96,11 +113,15 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     const unfinished = unfinishedTodos(contract, now);
     const stamped = stampTurn(contract, now);
     const drift = evaluateDrift(stamped, now);
+    // Review B4: the role is declared, never inferred from the request text.
+    const role = roleLine(stamped, sessionID);
     const result = renderInjection({
       contract: stamped,
       mission: effectiveMission(stamped, hint),
       unfinished,
       drift: drift.lines,
+      role,
+      decide,
       anchor: hint,
       now
     });
@@ -255,12 +276,17 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     };
     let staleLine: string | undefined;
     let conflictLine: string | undefined;
+    // 0.9.5 (design §6): what the conflict verdict was about — the escalation
+    // (one open decision, owner = decider) happens after the block is built.
+    let conflictVerdict: CompareResult | undefined;
+    let conflictMessage: InboxMessage | undefined;
     // 0.9.4 review: how many `stale` messages this request really delivered. The
     // "reply ≤30%" rule is a behavioural convention (we never write the reply),
     // so the audit trail is this counter — a human samples and measures.
     let staleCount = 0;
     const verdictOf = (
-      semantics: ReturnType<typeof messageSemantics>
+      semantics: ReturnType<typeof messageSemantics>,
+      message: InboxMessage
     ): ReturnType<typeof compareBasedOn> | undefined => {
       if (!semantics.basedOn) return undefined; // D2: no baseline = fresh + [基线未知]
       const verdict = compareBasedOn(semantics.basedOn, baseline());
@@ -268,7 +294,11 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         staleCount += 1;
         if (!staleLine) staleLine = verdict.line;
       }
-      if (verdict.state === 'conflict' && !conflictLine) conflictLine = verdict.line;
+      if (verdict.state === 'conflict' && !conflictLine) {
+        conflictLine = verdict.line;
+        conflictVerdict = verdict;
+        conflictMessage = message;
+      }
       return verdict;
     };
 
@@ -289,7 +319,7 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
               : ' → 无 thread 关联，无需等待回执'
             : '';
       const semantics = messageSemantics(message);
-      const verdict = verdictOf(semantics);
+      const verdict = verdictOf(semantics, message);
       const mark = verdict?.state === 'conflict' ? '[conflict] ' : verdict?.state === 'stale' ? '[stale] ' : '';
       // R2: no declared grade is surfaced as `[未标注]`; D2: no baseline is
       // surfaced as `[基线未知]` (still `fresh` — the marker is information, not
@@ -308,18 +338,82 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       };
     });
 
+    // `lineOf` is what *detects* the conflict (and records `conflictMessage`), so
+    // the lines must be rendered **before** the escalation below — reading them
+    // inside the return object would leave the escalation with nothing to open.
+    const messageLines = [...requests, ...replies, ...notes].map(lineOf);
+
+    // 0.9.5 (design §6 / R6): the conflict becomes **one open decision**
+    // (owner = decider) — never another message. Idempotent per key, never
+    // throws (a broken ledger must not fail a model request), and the line is
+    // the same turn's instruction: this thread is read-only until it is closed.
+    let conflictEscalation: string | undefined;
+    if (conflictMessage && conflictVerdict) {
+      try {
+        conflictEscalation = await escalateConflict(conflictMessage, conflictVerdict, sessionID);
+      } catch (error) {
+        log('conflict escalation failed:', (error as Error)?.message ?? error);
+      }
+    }
+
     return {
       text: [
         `[collab] ${head}`,
-        ...[...requests, ...replies, ...notes].map(lineOf),
+        ...messageLines,
         ...(staleLine ? [staleLine] : []),
         ...(conflictLine ? [conflictLine] : []),
+        ...(conflictEscalation ? [conflictEscalation] : []),
         rest > 0 ? `…还有 ${rest} 条，调用 collab_inbox 查看全文。` : '全文/状态用 collab_inbox。'
       ].join('\n'),
       shown: shown.length,
       rest,
       stale: staleCount
     };
+  }
+
+  /**
+   * Turn a `conflict` verdict into an open decision (design §6 step 1+2).
+   *
+   * The key is the message's thread (or the `b_…` in its body — a legacy message
+   * with neither has no subject to hang a decision on, so it is skipped rather
+   * than inventing one). The owner is the **order's sender**: the thread's
+   * initiator, then the contract's decider, then the inbound sender.
+   */
+  async function escalateConflict(
+    message: InboxMessage,
+    verdict: CompareResult,
+    sessionID: string
+  ): Promise<string | undefined> {
+    const threadID = normalizeThreadID(message.threadID);
+    const bid = /\b(b_[0-9a-f]{8,32})\b/.exec(String(message.text ?? ''))?.[1];
+    const key = threadID && isValidThreadID(threadID) ? threadID : bid;
+    if (!key) return undefined;
+    const thread = threadID ? await threads.read(threadID) : undefined;
+    // Review B2 (N11): the **receiver** owns the decision when the contract
+    // names no decider. Falling back to the counterpart that proposed the
+    // diverged baseline put the answer in the hands of the side that is absent
+    // (or is the very party that must not decide).
+    const owner = String(deciderOf(readContract(sessionID)) ?? sessionID);
+    const parties = dedupe(
+      [thread?.fromSession, thread?.toSession, message.fromSession, sessionID].map(sid =>
+        String(sid ?? '').trim()
+      )
+    ).filter(Boolean);
+    const opened = await openConflictDecision({
+      key,
+      verdict,
+      owner,
+      by: sessionID,
+      threadId: threadID,
+      ...(bid ? { bid } : {}),
+      parties
+    });
+    const decision = opened.decision ?? opened.existing;
+    if (!decision) return opened.capped ? `[conflict] 未开决策：${opened.capped}` : undefined;
+    return (
+      `[conflict] 已开 ${decision.id}（等 ${decision.owner}）—— 决策关闭前本 thread 只读（不再产生新消息）；` +
+      `双方都可 supersede 解除；owner: collab_decide { action:"answer", key:"${key}", id:"${decision.id}", answer:"…", confirm:true }`
+    );
   }
 
   /**

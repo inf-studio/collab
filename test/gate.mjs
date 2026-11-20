@@ -217,8 +217,8 @@ const eight = [...Array(4).fill('open'), ...Array(4).fill('doing'), 'closed', 'd
 
 // ================================================================ 1) surface
 section('1) tool surface 26 → 27 (the facts ledger)');
-expect('PLUGIN_VERSION / package.json agree (0.9.4)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.4', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
-expect('27 tools are registered', tools.length === 27, `${tools.length} tools`);
+expect('PLUGIN_VERSION / package.json agree (0.9.5)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
 expect('the gate is exported for direct testing', typeof internals.evaluateGate === 'function');
 expect('GATE_TODO_LIMIT is 8', internals.GATE_TODO_LIMIT === 8, String(internals.GATE_TODO_LIMIT));
 expect('COLLAB_AUDIT_FILE is honoured', internals.gateAuditFile() === auditFile, internals.gateAuditFile());
