@@ -3,6 +3,62 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.2] - 2026-11-20
+
+> **协作闸门：接单前模型表态**。初版靠关键词/别名匹配判越界，复核当场误伤（`排钟 Redis 缓存键设计`
+> 被判 outOfScope），于是**整体删除匹配**：插件不再从文本推断边界，只逼会话在 `collab_accept` 里表态
+> （`scopeCheck:{ inScope, reason? }`）并逐条审计。`openTodos ≥ 8` 从「拒收新单」改成**只提醒**。
+> 工具面不变（仍 **26**）。诚实边界：拦不住 `bash` 层跨仓写，只拦协作动作。
+
+### Added
+
+- **接单表态（R1）**：`collab_accept` 新入参 `scopeCheck:{ inScope:boolean, reason?:string }`。
+  本会话 `mission.outOfScope` 非空时**必填**：缺表态（或 `inScope` 不是布尔）→ 拒绝，文案说明
+  「插件不做语义判断，只负责逼你表态并记录」并给两种可复制调用 + override 形式；`inScope:false` → 拒绝接单，
+  返回 `handoffTo`（`mission.handoffTo`）+ 人类 `override{reason,approvedBy}` 用法；`inScope:true` → 正常接单。
+  契约缺失或 `outOfScope` 为空 → 不需要表态，行为与 0.9.1 逐字节一致。
+- **审计（R2）**：**每一次表态**往 `~/.config/opencode/collab-audit.jsonl` 追加一行
+  `{at,sid,kind:"accept",bid,inScope,reason,verifiedBy:"model"|"override",approvedBy?}`
+  （`override` 通过后 `verifiedBy:"override"`）。未表态的拒绝、溢出提醒、`gate:"off"`、预览都不写；
+  写失败只记日志、不阻断动作；`COLLAB_AUDIT_FILE` 可覆盖（测试/沙箱）。
+- **人类 override**：`{ reason, approvedBy }` 两者必填、`approvedBy` 不得以 `ses_` 开头（会话不能给自己批越界）；
+  单独给 `override` 而没有 `scopeCheck` 仍算未表态。
+- **溢出提醒（R5 修订）**：`openTodos ≥ 8`（`open/doing/blocked/suspended`）时，`accept` / `broadcast` /
+  `handoff` 的返回**末尾**追加一行 `[溢出提醒] …`——不拒绝、不改状态、不写 audit。派活是清账手段，不能因为列表长就堵住。
+
+### Changed
+
+- **`collab_accept` 的执行顺序**（复核 #3/#4）：`guards → chain.refresh（只读）→ evaluate → persistRefresh →
+  只读分支`。拒绝时记录**零变化**（`state`/`claim`/`asked`/`attempts` 与 `<bid>.lock` 全不动）；
+  「已被领取」「spawn 自领 ACK」「已闭环 / 已过期」都不经过闸门，不会被误报成越界。
+- **`collab_broadcast` / `collab_handoff` 永不拒绝、永不要求表态**（R3）：只取溢出提醒；
+  接收方的边界由它自己的 `scopeCheck` 把关（接管请求文案也点明了这一点）。
+- `gate` 三档语义：`enforce`（默认）按上表；`warn` 把拒绝降为提示（已作出的表态照常审计）；
+  `off` 完全跳过（不要求、不拒绝、不提醒、不写 audit）。写错的值回落 `enforce`。
+
+### Removed
+
+- **关键词 / 别名匹配整体删除**：`DEFAULT_SCOPE_ALIASES`、`scopeAliases`、`matchScope` / `matchScopeEntries`
+  与 gate 内的子串/归一化代码。`grep -rn "scopeAliases\|DEFAULT_SCOPE_ALIASES\|matchScope" src/` 为空。
+- **注入里的 `[scope]` 小节**（同一个关键词匹配器）：契约注入从五段变**四段**
+  （`[mission] [todo] [drift] [progress]`，每段上限不变、总上限仍 12 行）。边界只在 `[mission]` 作为声明展示。
+- 本任务草稿期曾引入的记录字段 `gateWarn` 与承接方「边界提示」行在定稿前删除（该字段从未出现在任何已发布版本）。
+
+### Tests / Docs
+
+- `test/gate.mjs` 重写（62 项，已串进 `pnpm test`）：缺表态拒绝（两种可复制调用、记录逐字节不变、无 lock、
+  不写 audit）· `inScope:false` 拒绝 + `handoffTo` + audit（model）· 合法 override 放行 + audit（override）·
+  `approvedBy:"ses_…"` 拒绝 · `inScope:true` 接单 + audit · 无 `outOfScope` 不需要表态且无 audit ·
+  `open=8` 时 accept/broadcast/handoff 全放行 + 提醒行 · 「已被领取」/ spawn 自领不被改写 ·
+  `reply`/`send` 永不校验 · `gate:"warn"` 只提示 · `gate:"off"` 全跳过 · protected 行为不变 ·
+  audit 行形状（无 `verdict` 字段，`inScope` 布尔，`verifiedBy ∈ {model,override}`）。
+  **强制变异**：「缺 `scopeCheck` 拒绝」改成放行 → 该组 8 项红（实测，退出码 1）。
+- `test/contract-inject.mjs` 83 项：删除 `[scope]` 用例，改为断言「四段齐全且没有 `[scope]` 行」；
+  12 行上限现由四个 section 的上限之和（11 行）保证，不再有可丢弃的段落。
+- 文档：`docs/collab.md` §11.22（四段注入）/ §11.23（表态 + 审计）重写；README 工具表 / 配置表 / 版本表；
+  skill `collab`「一点十三 / 一点十四」重写；`.trellis/spec/frontend/opencode-plugin-ui.md` §2.13；
+  任务 `prd.md` / `design.md` / `implement.md` 同步口径变更。
+
 ## [0.9.1] - 2026-11-20
 
 > 主线开始有记忆：`collab-contract/<sid>.json` 存主线 / 里程碑 / 待办，`context` hook **每轮**重新注入五段

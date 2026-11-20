@@ -61,8 +61,8 @@
 | 版本 | 子任务 | 交付 |
 |---|---|---|
 | 0.9.0 | `collab-store` | `messages.jsonl` 信封 + `collab.db` 可重建投影 + rebuild + 看板改读索引；零语义改动 |
-| 0.9.1 | `collab-contract` | 契约五面持久化 + `[mission]/[progress]/[todo]/[scope]` 每轮注入 |
-| 0.9.2 | `collab-gate` | scope 校验 + `override{reason,approvedBy}` + audit；`open ≥ 8` 拒收新单 |
+| 0.9.1 | `collab-contract` | 契约五面持久化 + `[mission]/[progress]/[todo]/[drift]` 每轮注入（四段，不写 injected[]） |
+| 0.9.2 | `collab-gate` | 接单前模型表态 `scopeCheck{inScope,reason}` + audit；溢出**只提醒不拦**；零关键词/零额外模型调用 |
 | 0.9.3 | `collab-drift` | `[drift]` 三选一；挂起 `wake_when` 必填 + 24h 转 drifted；主线完结核验 next-up |
 | 0.9.4 | `collab-facts` | 事实账本 + 证据等级强制 + `settle`/`invalidate` + stale 只回增量 |
 | 0.9.5 | `collab-decide` | 决策载具（thread 可用）+ owner 独占关闭 + 同问去重 + open ≤ 3 + 角色四元组 |

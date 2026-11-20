@@ -20,7 +20,7 @@
  *   - **Merge, never replace**: every field is normalised (junk tolerated,
  *     lengths capped) so a hand-edited file degrades instead of crashing the
  *     model request.
- *   - **No `injected[]`**: the five-section block is re-derived from this file
+ *   - **No `injected[]`**: the four-section block is re-derived from this file
  *     on **every** request. Persisting "what was already shown" is the 0.5.x
  *     once-only bug this version exists to remove (PRD R5).
  */
@@ -57,7 +57,7 @@ export interface ContractMission {
   oneLine: string;
   inScope: string[];
   outOfScope: string[];
-  /** out-of-scope keyword → session id that owns it (0.9.2 gate reads this). */
+  /** Boundary → the session that owns it (the 0.9.2 gate's `handoffTo` advice). */
   handoffTo: Record<string, string>;
   state: MissionState;
   /** Set by the one human confirmation; never overwritten by inference (D7). */
@@ -564,31 +564,6 @@ export function effectiveMission(
   return mission;
 }
 
-/**
- * `outOfScope` keyword matching (0.9.1's half of R5/`[scope]`).
- *
- * An entry matches when its normalised text appears in the message. `|` (or
- * `｜`) separates aliases: `"ws集群实施|ws 集群"` matches either spelling.
- * Deliberately **not** a tokenizer: over-matching would inject a scope warning
- * into unrelated work, which is worse than a missed hint.
- */
-export function matchScope(messageText: string, outOfScope: string[]): string[] {
-  const norm = (value: string): string => value.toLowerCase().replace(/\s+/g, '').trim();
-  const haystack = norm(String(messageText ?? ''));
-  if (!haystack) return [];
-  const hits: string[] = [];
-  for (const raw of outOfScope ?? []) {
-    const entry = String(raw ?? '').trim();
-    if (!entry) continue;
-    const aliases = entry
-      .split(/[|｜]/)
-      .map(norm)
-      .filter(Boolean);
-    if (aliases.some(alias => haystack.includes(alias))) hits.push(entry);
-  }
-  return hits;
-}
-
 /* ----------------------------------------------------------------- rendering */
 
 export interface RenderInput {
@@ -604,8 +579,6 @@ export interface RenderInput {
   unfinished?: string[];
   /** 0.9.3 fills this; 0.9.1 always passes nothing (placeholder, never triggers). */
   drift?: string[];
-  /** This request's latest text — the `[scope]` matcher's only input. */
-  messageText?: string;
   now?: number;
 }
 
@@ -682,21 +655,6 @@ function todoLines(contract: Contract, unfinished: Set<string>, now: number): st
   return [header, ...items];
 }
 
-function scopeLines(messageText: string, mission: ContractMission): string[] {
-  const hits = matchScope(messageText, mission.outOfScope);
-  if (!hits.length) return [];
-  const [first, ...rest] = hits;
-  const handoff = mission.handoffTo?.[first];
-  const lines = [
-    `[scope] 本条属「${truncate(first, 60)}」→ outOfScope；正确动作：` +
-      `${handoff ? `转交 ${handoff}` : '转交（未配置 handoffTo）'} / 拒绝 / 问 owner`
-  ];
-  if (rest.length) {
-    lines.push(`  另: ${rest.slice(0, 4).map(entry => `「${truncate(entry, 40)}」`).join('、')} 同样 outOfScope`);
-  }
-  return lines;
-}
-
 function progressLines(contract: Contract): string[] {
   const milestones = contract.plan?.milestones ?? [];
   if (!milestones.length) {
@@ -715,10 +673,12 @@ function progressLines(contract: Contract): string[] {
 }
 
 /**
- * The five-section block. **Pure**: rebuild it from the contract on every call
+ * The four-section block. **Pure**: rebuild it from the contract on every call
  * (never from "what was already injected") and stop at 12 lines.
  *
- * Order is fixed by the design (§6): mission → todo → drift → scope → progress.
+ * Order is fixed by the design (§6): mission → todo → drift → progress. (The
+ * 0.9.1 `[scope]` section is gone in 0.9.2 together with its keyword matcher:
+ * the session states its own boundary on `collab_accept` instead.)
  * A section that does not fit is dropped whole and later sections are not
  * attempted — a half-rendered `[todo]` would read as if the list were complete.
  */
@@ -729,7 +689,6 @@ export function renderInjection(input: RenderInput): RenderResult {
     { name: 'mission', lines: missionLines(input.mission, input.contract, now, input.anchor) },
     { name: 'todo', lines: todoLines(input.contract, unfinished, now) },
     { name: 'drift', lines: (input.drift ?? []).map(line => String(line ?? '')).filter(Boolean) },
-    { name: 'scope', lines: scopeLines(input.messageText ?? '', input.mission) },
     { name: 'progress', lines: progressLines(input.contract) }
   ];
 

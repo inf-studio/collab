@@ -19,7 +19,7 @@
  *   6. 10 open todos → block ≤ 12 lines, exactly 3 rows + `还有 7 条`
  *   7. suspend without `wakeWhen` → refused; close without evidence → refused;
  *      close with a verifiable file evidence → accepted
- *   8. truncation order: mission+todo+drift+scope+progress → `[progress]` dropped
+ *   8. the four sections (mission/todo/drift/progress) fit the 12-line cap
  *   9. `[未收尾]`: a `doing` todo untouched by the previous request is marked
  *  10. mission anchor: unique in_progress task → task; session pointer wins;
  *      two in_progress tasks → ambiguous (never guessed)
@@ -31,7 +31,7 @@
  *  14. `[未收尾]` marks a doing todo created after the previous request
  *  15. a closed doing todo is never marked
  *  16. defer/until/kind:"collab" + the three `list` verbs
- *  17. `[scope]` follows the current message through the hook
+ *  17. `[scope]` is gone (0.9.2): the boundary is never inferred from a message
  *  18. ambiguous anchor: silent without a contract, named with one
  *  19. a corrupt contract file never throws
  *  20. `confirm` requires a human `by`
@@ -166,7 +166,7 @@ const blockLines = text => text.split('\n').filter(line => line.trim().length > 
 
 // ================================================================ 1) surface
 section('1) tool surface + version');
-expect('PLUGIN_VERSION / package.json agree (0.9.1)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.1', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.2)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.2', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('26 tools are registered', tools.length === 26, `${tools.length} tools`);
 for (const name of ['collab_mission', 'collab_progress', 'collab_todo']) {
   const registrations = tools.filter(definition => definition.name === name).length;
@@ -318,8 +318,8 @@ expect(
   closeOk.split('\n')[0]
 );
 
-// ================================================= 8) truncation order (pure)
-section('8) truncation: mission+todo+drift+scope+progress → progress dropped');
+// ============================================== 8) four sections + 12-line cap
+section('8) the four sections (mission/todo/drift/progress) fit the 12-line cap');
 const synthetic = internals.emptyContract('ses_trunc');
 synthetic.mission = {
   ...synthetic.mission,
@@ -345,31 +345,30 @@ synthetic.plan = {
   ],
   lastAdvancedAt: 1000
 };
-const truncated = internals.renderInjection({
+const full = internals.renderInjection({
   contract: synthetic,
   mission: synthetic.mission,
   drift: ['[drift] 连续 6 轮无主线动作（11.2h）→ 三选一：继续 / 记阻塞 / 建 next-up', '  [未处置] 下一轮仍会提醒'],
-  messageText: '这轮做 ws集群实施 和 集群部署',
   now: 7_200_000
 });
-expect('progress is the section that gets dropped', truncated.dropped.includes('progress'), truncated.dropped.join(','));
-expect('the block never exceeds 12 lines', truncated.lines.length <= 12, `${truncated.lines.length} lines`);
+// 0.9.2 removed the `[scope]` section (and its keyword matcher), so the four
+// remaining sections top out at 3 + 4 + 2 + 2 = 11 lines: the 12-line cap can
+// no longer drop anything. The cap stays as the guard for 0.9.3's drift.
+expect('nothing is dropped', full.dropped.length === 0, full.dropped.join(','));
+expect('the block never exceeds 12 lines', full.lines.length <= 12, `${full.lines.length} lines`);
 expect(
-  'mission / todo / drift / scope are all present, progress is not',
-  ['mission', 'todo', 'drift', 'scope'].every(name => truncated.sections.includes(name)) &&
-    !truncated.lines.join('\n').includes('[progress]'),
-  truncated.sections.join(',')
+  'mission / todo / drift / progress are all present',
+  ['mission', 'todo', 'drift', 'progress'].every(name => full.sections.includes(name)),
+  full.sections.join(',')
 );
-const noOverflow = internals.renderInjection({
-  contract: synthetic,
-  mission: synthetic.mission,
-  messageText: '这轮做 ws集群实施',
-  now: 7_200_000
-});
+expect('there is no [scope] line any more', !full.lines.join('\n').includes('[scope]'));
 expect(
-  'without drift the progress section fits under the cap',
-  noOverflow.sections.includes('progress') && noOverflow.lines.length <= 12,
-  `${noOverflow.sections.join(',')} / ${noOverflow.lines.length} lines`
+  'a message about the boundary still injects nothing scope-specific',
+  !internals.renderInjection({
+    contract: synthetic,
+    mission: synthetic.mission,
+    now: 7_200_000
+  }).lines.join('\n').includes('[scope]')
 );
 
 // ================================================== 9) [未收尾] back-reference
@@ -546,22 +545,21 @@ expect(
   progressList.split('\n')[0]
 );
 
-// ======================== 17) [scope] follows the current message
-section('17) [scope] follows the current message (via the hook)');
+// ================ 17) no [scope] line: the plugin no longer guesses a boundary
+section('17) [scope] is gone — the boundary is stated on collab_accept, not inferred');
 await call(
   'collab_mission',
   { action: 'set', oneLine: '边界测试', outOfScope: ['ws集群实施'], handoffTo: { ws集群实施: 'ses_owner' } },
   'ses_scope'
 );
 await call('collab_mission', { action: 'confirm', by: 'human' }, 'ses_scope');
-const scopeHit = await ask('ses_scope', [{ role: 'user', parts: [{ type: 'text', text: '这轮做 ws集群实施' }] }]);
+const scopeMessage = await ask('ses_scope', [{ role: 'user', parts: [{ type: 'text', text: '这轮做 ws集群实施' }] }]);
+expect('a message naming the boundary injects no [scope] line', !scopeMessage.includes('[scope]'), scopeMessage.split('\n').find(line => line.startsWith('[scope]')) ?? '(none)');
 expect(
-  '[scope] appears on a keyword hit with the handoff target',
-  scopeHit.includes('[scope]') && scopeHit.includes('转交 ses_owner'),
-  scopeHit.split('\n').find(line => line.startsWith('[scope]'))
+  'the boundary is still visible in [mission] (declared, not inferred)',
+  scopeMessage.includes('不做 ws集群实施'),
+  scopeMessage.split('\n').find(line => line.includes('边界')) ?? '(no 边界 line)'
 );
-const scopeMiss = await ask('ses_scope', [{ role: 'user', parts: [{ type: 'text', text: '这轮做排钟接线' }] }]);
-expect('[scope] disappears on the next, unrelated message', !scopeMiss.includes('[scope]'));
 
 // ======================== 18) ambiguous anchor: silent vs explicit
 section('18) ambiguous anchor: silent without a contract, named with one');

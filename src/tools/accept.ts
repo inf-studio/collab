@@ -1,6 +1,8 @@
 import { BCAST_DONE_STATES, BCAST_LEASE_MS, BCAST_MAX_ATTEMPTS, BROADCAST_DIR, MAX_STORED } from '../constants.ts';
 import { claimLock, isValidBid, persistRefresh, readBroadcast, releaseLock, writeBroadcast } from '../core/claim.ts';
+import { readContract } from '../core/contract.ts';
 import { invalid } from '../core/errors.ts';
+import { evaluate } from '../core/gate.ts';
 import { freezeDenyText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import type { BroadcastRecord, JsonObject, ToolDefinition } from '../types.ts';
@@ -70,7 +72,11 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       'report back with `collab_send {target:"<requester sid>", text:"[handoff] DONE <bid> <摘要>", confirm:true}` — ' +
       'writing the conclusion in your own session is NOT a receipt. Exception (`receiptMode:"pull"`, requester on ' +
       'the protect list): that target cannot be written to, so the `[handoff] DONE|BLOCKED <bid> …` line in your ' +
-      'own last answer IS the receipt — the result says so. Requires confirm:true; otherwise it only previews.',
+      'own last answer IS the receipt — the result says so. Requires confirm:true; otherwise it only previews. ' +
+      '0.9.2 gate: when this session’s mission.outOfScope is non-empty, the call must carry ' +
+      'scopeCheck:{ inScope, reason? } — the plugin makes no semantic guess; it only forces the statement and ' +
+      'audits it. inScope:false is refused (handoffTo + a human override { reason, approvedBy } is the only way ' +
+      'through). 8+ open todos only appends a reminder line. gate:"warn"|"off" in collab.json is the rollback switch.',
     input: jsonInput({
       properties: {
         bid: {
@@ -80,6 +86,31 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
         confirm: {
           type: 'boolean',
           description: 'Must be true to actually claim. false or omitted only returns the preview.'
+        },
+        scopeCheck: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            '0.9.2 接单表态（本会话 mission.outOfScope 非空时**必填**）：`{ inScope, reason? }`。' +
+            '插件不做语义判断（没有关键词/别名匹配），只把你自己对「这条是否在你的边界内」的判断记录到 ' +
+            'collab-audit.jsonl。`inScope:false` 会被拒绝接单（除非带人类 override）；`inScope:true` 正常接单。',
+          properties: {
+            inScope: { type: 'boolean', description: 'true = 在边界内；false = 在边界外（不接）。' },
+            reason: { type: 'string', description: '一句话理由（会写进审计行）。' }
+          },
+          required: ['inScope']
+        },
+        override: {
+          type: 'object',
+          additionalProperties: false,
+          description:
+            '0.9.2 闸门 override（仅在 `scopeCheck:{ inScope:false }` 且需人类批准越界时使用）：' +
+            '`{ reason, approvedBy }` 两者必填；approvedBy 必须是人类标识、不得以 ses_ 开头。' +
+            '通过后放行并往 collab-audit.jsonl 追加一行。缺字段 / 会话自批准一律拒绝。',
+          properties: {
+            reason: { type: 'string', description: '为什么必须越界做（一句话）。' },
+            approvedBy: { type: 'string', description: '批准人（人类标识；不得以 ses_ 开头）。' }
+          }
         }
       },
       required: ['bid', 'confirm']
@@ -120,7 +151,32 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
       const freeze = await frozenBy({ session: me, bid, workspace: existing.workspace }, { lineage });
       if (freeze) throw invalid(freezeDenyText(freeze));
 
-      let record = persistRefresh(existing, await chain.refresh(existing, now, { actor: me }));
+      // The lease refresh is a *read* here: it may reopen a lapsed claim or
+      // settle an auto receipt, and the gate must judge the same state the claim
+      // path will act on. `persistRefresh` (the write) happens **after** the
+      // gate, so a refused accept leaves the record byte for byte unchanged.
+      const refreshed = await chain.refresh(existing, now, { actor: me });
+      const snapshot = refreshed ?? existing;
+      const newClaim = String(snapshot.state ?? 'open') === 'open';
+
+      // 0.9.2 (`11-20-collab-gate`): only a **new** claim is gated. "已闭环 /
+      // 已过期 / 已被领取 / spawn 自领 ACK" are read-only branches and must never
+      // be reported as an out-of-scope refusal. The gate itself never infers:
+      // it requires the claimant's own `scopeCheck` statement.
+      const gate = evaluate(
+        'accept',
+        { bid, scopeCheck: input?.scopeCheck, override: input?.override },
+        readContract(me),
+        readConfig(),
+        // A preview performed no action; a non-new-claim is not this session's
+        // decision to make — neither leaves an audit line behind.
+        { sid: me, audit: newClaim && input?.confirm === true }
+      );
+      if (newClaim && gate.verdict === 'deny' && input?.confirm === true) throw invalid(gate.content);
+      const gateLines = newClaim && gate.content ? gate.content.split('\n') : [];
+      const reminderLines = gate.reminder ? [gate.reminder] : [];
+
+      let record = persistRefresh(existing, snapshot);
 
       if (record.state === 'expired') {
         throw invalid(
@@ -132,6 +188,7 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           content: `广播 ${bid} 已闭环（state=${record.state}）：${record.receipt?.note || '-'}。无需领取。`
         };
       }
+
       const activeClaim = record.claim;
       if (activeClaim && ['claimed', 'acked'].includes(String(record.state))) {
         if (activeClaim.by === me) {
@@ -162,9 +219,11 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           return {
             content: [
               `你已领取 ${bid}（state=${record.state}，kind=${activeClaim.kind}，token=${activeClaim.token}）。`,
+              ...gateLines,
               // R1 ②: a copy-pasteable receipt — answering in this session is not
               // "done" (push), or *is* the receipt (pull, protected requester).
-              ...receiptLines(record)
+              ...receiptLines(record),
+              ...reminderLines
             ].join('\n')
           };
         }
@@ -197,7 +256,9 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
                 ? `${(record.candidates ?? [])[0].sid} score=${(record.candidates ?? [])[0].score}`
                 : '-'
             }`,
-            ...notes.map(note => `注: ${note}`)
+            ...gateLines,
+            ...notes.map(note => `注: ${note}`),
+            ...reminderLines
           ].join('\n')
         };
       }
@@ -242,11 +303,13 @@ export function acceptTool(kit: ToolKit): ToolDefinition {
           record.scope === 'peer'
             ? '跨仓护栏：只允许改目标仓 docs/issues/**，git 只读，不 push；实施由目标仓 owner 复核提交。'
             : 'local scope：按本仓正常权限实施。',
+          ...gateLines,
           notified.delivered
             ? `已通知发起方 ${record.from?.sid}（message=${notified.message ?? '?'}）。`
             : `未通知发起方：${notified.reason}`,
           ...receiptLines(record),
-          ...notes.map(note => `注: ${note}`)
+          ...notes.map(note => `注: ${note}`),
+          ...reminderLines
         ].join('\n')
       };
     }

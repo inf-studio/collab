@@ -214,7 +214,7 @@ interface Contract {
   **单一 resolver**（账本优先、hand-off 兼容输入），不要留两套判定。
 
 
-## 5. 注入格式（每轮，硬上限 12 行）
+## 5. 注入格式（每轮，硬上限 12 行，四段）
 
 ```
 [mission] 排钟 B4 接线 · .trellis/tasks/11-19-b4-wiring
@@ -223,25 +223,29 @@ interface Contract {
 [todo] 3 open · 2 需要你 · 1 等 ses_e176… · 最老 T2 6.2h
   T2 decide dev/prod 键空间 → 等 owner
   T3 reply  t_mwnmtb97 D1 记入 PRD → 可执行
-[scope] 本条属「ws集群实施」→ outOfScope；正确动作：转交 ses_edc3… / 拒绝 / 问 owner
 [drift] 连续 6 轮无主线动作（11.2h）→ 三选一：继续 / 记阻塞 / 建 next-up
 ```
 
 规则：
-- 每段 ≤3 行，todo 只列 top3 + 计数；
-- `[scope]` 仅在该条消息命中 outOfScope 时出现；
+- 每段 ≤3 行，todo 只列 top3 + 计数；四段上限之和 11，预留 1 行给后续版本；
+- **没有 `[scope]` 段**：0.9.2 起插件不做任何文本匹配，边界判断发生在 `collab_accept`（见 §6）；
 - `[drift]` 仅在触发时出现；
 - 所有段**每轮重新计算**，不写 `injected[]`、不注销（与 0.5.x 的一次性注入不同）。
 
-## 6. 闸门（0.9.2）
+## 6. 闸门（0.9.2，模型表态制）
+
+**插件零文本匹配、零语义推断**——不给别名、不做子串、不调模型。判断由会话自己的模型在接单那一刻作出，插件负责逼它表态并留痕。
 
 | 动作 | 规则 |
 |---|---|
-| `accept` | `bid.scope ∩ mission.outOfScope ≠ ∅` → 拒绝，返回 `handoffTo` + override 用法 |
-| `broadcast/handoff` 指向他人 outOfScope | 允许（发起方有权提问），但提示接收方边界 |
-| `reply/send` | 不校验 scope（回复不扩大边界） |
-| 新单 | `open todos ≥ 8` → `TODO_OVERFLOW`，要求先关 2 条 |
-| `override` | 必填 `reason` + `approvedBy`（人类），写 `audit.jsonl` |
+| `accept`（`outOfScope` 非空） | 必须带 `scopeCheck:{inScope:boolean, reason?}`；缺失 → 拒绝并回两种可复制调用；`inScope:false` → 拒绝 + `handoffTo` + audit；`inScope:true` → 接单 + audit |
+| `accept`（无契约 / `outOfScope` 为空） | 不需要表态，行为与 0.9.1 逐字节一致 |
+| `broadcast/handoff` | **永不要求表态、永不拒绝**（派活是清账手段） |
+| `reply/send` | 不校验（回复不扩大边界） |
+| 溢出 | `open collab ≥ 8` **只加一行提醒，不拦任何动作** |
+| `override` | `{reason, approvedBy}`，`approvedBy` 不得以 `ses_` 开头；通过 → audit（`verifiedBy:'override'`） |
+| `gate` 三档 | `enforce`（默认）/ `warn`（只提示）/ `off`（不校验、不写 audit） |
+| 拒绝副作用 | 记录**逐字节不变**、无 claim、无 lock、`asked/attempts` 不变 |
 
 诚实边界：插件拦不住 bash 层跨仓写，只能拦协作动作；实测漂移 90% 经协作层进入，故优先级正确。
 

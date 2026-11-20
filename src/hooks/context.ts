@@ -15,7 +15,7 @@ import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/
 import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
-import { latestRequestText, resolveMissionAnchor } from '../core/mission-resolve.ts';
+import { resolveMissionAnchor } from '../core/mission-resolve.ts';
 import { normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
 import { log } from '../log.ts';
 import type { ToolDeps } from '../tools/shared.ts';
@@ -48,8 +48,8 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
   });
 
   /**
-   * 0.9.1 (R5): the **five-section contract injection**, recomputed from the
-   * contract file on every request. Never writes `injected[]` and never
+   * 0.9.1 (R5) / 0.9.2: the **four-section contract injection**, recomputed from
+   * the contract file on every request. Never writes `injected[]` and never
    * suppresses a section because it was shown before — that once-only behaviour
    * is exactly what the 0.5.x injection did wrong (PRD R5).
    *
@@ -91,7 +91,6 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
       // 0.9.3 fills `[drift]`; 0.9.1 reserves the slot and never triggers it.
       drift: [],
       anchor: hint,
-      messageText: latestRequestText(event),
       now
     });
     if (!result.lines.length) return undefined;

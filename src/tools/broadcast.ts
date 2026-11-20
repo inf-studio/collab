@@ -8,6 +8,8 @@ import {
   STORAGE_ALIASES
 } from '../constants.ts';
 import { invalid } from '../core/errors.ts';
+import { readContract } from '../core/contract.ts';
+import { evaluate } from '../core/gate.ts';
 import {
   claimLock,
   fillOriginDirectory,
@@ -84,7 +86,10 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       "when a spawned session lets its lease lapse, the requester reads that session's last answer " +
       'once and closes the hand-off itself when it carries a verdict (receipt.auto), never spawning again. ' +
       'Idempotent: the same proposal content is the same bid. Requires confirm:true; otherwise it only previews. ' +
-      'A workspace that resolves to the current one is refused (same-workspace work is collab_handoff).',
+      'A workspace that resolves to the current one is refused (same-workspace work is collab_handoff). ' +
+      '0.9.2 gate: a broadcast is never refused and never requires a scope statement (handing work out is how a ' +
+      'list gets shorter); 8+ open todos only appends one [溢出提醒] line. The recipient states its own boundary ' +
+      'when it calls collab_accept. gate:"warn"|"off" in collab.json is the rollback switch.',
     input: jsonInput({
       properties: {
         workspace: {
@@ -244,6 +249,11 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
       // D3 (0.4.0): `expected:implement` against a read-only counterpart cannot
       // end in code — say it before writing (preview) and in the result.
       const mismatch = capabilityNote(top?.info?.agent ?? agent, expected);
+      // 0.9.2 (`11-20-collab-gate`): handing work out is how a list gets shorter
+      // — a broadcast is never refused and never requires a statement (R3). The
+      // only gate output here is the overflow reminder, printed last.
+      const gate = evaluate('broadcast', { bid }, me ? readContract(me) : undefined, readConfig(), { sid: me });
+      const reminderLines = gate.reminder ? [gate.reminder] : [];
 
       if (preview) {
         return {
@@ -267,7 +277,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
                     ? ` 已 busy ${Math.round(top.busyMinutes)}min → 确认后补发 1 条 queue prompt 叫醒`
                     : ' → 不投递任何 prompt（接管请求走它的下一轮 context 注入，0 调用）'
                 }；只有它会收到接管请求：ACCEPT = collab_accept，DECLINE（回 \`DECLINE ${bid} <理由>\`）/ 5 分钟不答 → 顺延下一候选（attempts+1）`,
-            ...(mismatch ? [mismatch] : [])
+            ...(mismatch ? [mismatch] : []),
+            ...reminderLines
           ].join('\n')
         };
       }
@@ -409,6 +420,7 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
             // requester can re-send them verbatim if delivery failed.
             ...handoffActions({ bid, requester: me, spawn: true, receiptMode, expected, origin: chainOrigin }),
             ...(mismatch ? [mismatch] : []),
+            ...reminderLines,
             `该会话不会被删除（collab_list 标 [bootstrap]）；对端不动作时，租约到期会只读提取它的结论并自动闭环。`
           ].join('\n')
         };
@@ -478,7 +490,8 @@ export function broadcastTool(kit: ToolKit): ToolDefinition {
           ...(mismatch ? [mismatch] : []),
           receiptMode === 'pull'
             ? `推辞: 不领取即可（5 分钟不答自动顺延下一候选；pull 模式没有推送，不需要 DECLINE 回执）`
-            : `推辞: collab_send {target:"${me ?? 'ses_…'}", text:"DECLINE ${bid} <理由>", confirm:true}（由被问询的 top-1 发回；不带 bid 且同时有多个问询时不会被采纳）`
+            : `推辞: collab_send {target:"${me ?? 'ses_…'}", text:"DECLINE ${bid} <理由>", confirm:true}（由被问询的 top-1 发回；不带 bid 且同时有多个问询时不会被采纳）`,
+          ...reminderLines
         ].join('\n')
       };
     }

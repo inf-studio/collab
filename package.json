@@ -1,6 +1,6 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Cross-session collaboration for OpenCode: twenty-six native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend, a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt), a pull-only review queue for protected sessions, automatic (reversible) archival of spawned sessions, a rebuildable SQLite projection of the message history, and read-only status views for the desktop sidebar and the TUI (experimental).",
   "keywords": [
     "collab",
@@ -42,7 +42,7 @@
   "scripts": {
     "build": "vp pack && vp build -c vite.gui.config.ts && vp build -c vite.tui.config.ts",
     "prepublishOnly": "pnpm run build",
-    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/board-shape.mjs && node test/graph-shape.mjs && node test/snapshot-shape.mjs && node test/store-rebuild.mjs && node test/contract-inject.mjs && node test/delivery-history.mjs && node --conditions=browser test/tui-render.mjs && node --conditions=browser test/gui-entry.mjs && node --conditions=browser test/gui-panel.mjs",
+    "test": "pnpm run build && node test/handoff-harness.mjs && node test/readonly-default.mjs && node test/board-shape.mjs && node test/graph-shape.mjs && node test/snapshot-shape.mjs && node test/store-rebuild.mjs && node test/contract-inject.mjs && node test/gate.mjs && node test/delivery-history.mjs && node --conditions=browser test/tui-render.mjs && node --conditions=browser test/gui-entry.mjs && node --conditions=browser test/gui-panel.mjs",
     "typecheck": "tsc --noEmit",
     "check:skill": "node scripts/check-skill.mjs"
   },

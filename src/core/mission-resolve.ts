@@ -142,21 +142,6 @@ export function messageTextOf(message: unknown): string {
     .join('\n');
 }
 
-/** The latest user text of this request (scope matching); falls back to any text. */
-export function latestRequestText(event: { messages?: unknown[] } | undefined): string {
-  const messages = Array.isArray(event?.messages) ? (event?.messages as unknown[]) : [];
-  let fallback = '';
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const value = asObject(messages[index]);
-    const text = messageTextOf(value);
-    if (!text.trim()) continue;
-    // The newest user turn is the message `[scope]` must judge; a host that does
-    // not tag roles still gets the newest text via the fallback.
-    if (String(value.role ?? value.type ?? '').trim() === 'user') return text;
-    if (!fallback) fallback = text;
-  }
-  return fallback;
-}
 
 /**
  * The first human instruction of the session — the last-resort `oneLine`

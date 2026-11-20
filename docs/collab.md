@@ -273,7 +273,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_escalate` | `{ bid?, threadID?, session?, reason, mode?, confirm }` | **加急（0.6.0）**：让被加急的一单**现在就进对方当前轮**——复用宿主的 `delivery:steer`（桌面端「引导」按钮同一机制），不造新投递。`bid` / `threadID` / `session` 三选一；`reason` 必填（≤200，剥控制字符）。`mode` 默认 **`steer`**（显式 `"queue"` 才排队），只读 agent（`explore`/`plan`）目标**强制 `queue`**（回执标 `forced`）；回执打印**宿主实际采用**的 `delivery`（空闲目标会降级为 `queue`）与 `messageID`。记录只追加 `priority:"urgent"` / `urgentAt` / `urgentReason` / `urgentBy`，**不改** `state` / `claim` / `receipt`。受保护目标（含血缘）**0 条 prompt** → 写一条 `priority:"urgent"` 的 owner-queue 项，回执 `canPush:false` + 队列位置。同 `bid + reason` 5 分钟内只刷新 `urgentAt`、不重复投递。`confirm:false` 零写入预览。见 §11.14.1 |
 | `collab_freeze` | `{ scope, target?, reason, until?, freeze?, confirm }` | **临时冻结（0.6.0）**：让协作层自己遵守「先别动」。`scope` = `session`（覆盖其子会话，血缘）/ `workspace`（目录）/ `bid`（一单）；`target` 除 `workspace` 外必填（`session` 收别名，`workspace` 缺省 = 当前工作区）。`until` 支持相对 `"30m"`/`"2h"`/`"45s"` 或绝对 ISO，默认 **30 分钟**、上限 30 天；**到期在读取时失效**（无定时器、无清理）。写入 `~/.config/opencode/collab-freeze.json`（`{version:1,entries:[]}`，**读-合并-写** + 原子 rename + 短锁，并发不丢条目）。被冻结对象上的**新建**协作一律可读拒绝（0 写入）：`collab_handoff`（目标 / 祖先 / 目标工作区）、`collab_broadcast`（工作区，spawn 前再判一次）、`collab_accept`（该单或本会话）、`collab_escalate`（冻结优先）；读取类 `collab_list` / `collab_status` 只标 `[frozen]`。通知一次：非受保护 → 1 条 `queue` prompt（回执 `cid` / `messageId` 存 `delivery[]`）；受保护（含血缘）→ **0 条 prompt** + 一条 `priority:"urgent"` owner-queue 项。被冻会话自己的 `context` 只提示一次（写 `notifiedAt`）。`freeze:false` 解冻（幂等 no-op）；`confirm:false` 零写入预览。冻结 ≠ 归档 ≠ 删除。见 §11.14.2 |
 | `collab_broadcast` | `{ workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm }` | **跨工作区**广播（`workspace` 解析后等于当前工作区 → **拒绝**并提示用 `collab_handoff`，0.4.0）：`issuePath` 必须在 `<workspace>/docs/issues/` 下、存在、`.md` 且**不是软链**；确定性打分 + `why`；写全局广播文件（0 模型调用）→ 只有被问询的 top-1 收到「接管请求」注入（ACCEPT/DECLINE，5 分钟租约，`busy > 30min` 时额外补 1 条 `queue` 叫醒）；无候选 ≥80 时 `claim(kind=spawn)` 拉新一个会话（默认 explore；`build` 需 `agentConfirm:true`；宿主不回 `location` 时回滚刚建的会话）。`origin?`（0.7.0）：转发链的起点，缺省从「本会话正在承接的未闭环交接」继承一层（§11.16） |
-| `collab_accept` | `{ bid, confirm }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>` |
+| `collab_accept` | `{ bid, confirm, scopeCheck?, override? }` | **原子领取**（`open(<bid>.lock,'wx')`，只有一个 winner）；输家返回「已被 `ses_x` 领取」；会话若带 `location.directory` 且不属于广播所属工作区则拒绝；`accept` 直接 `acked`，spawn 的新会话自己调用则 `claimed → acked`（记 `ackedAt`）；领取后回执 `[handoff] DONE <bid> <摘要>`。**0.9.2 闸门**：本会话 `mission.outOfScope` 非空时**必须**带 `scopeCheck:{ inScope, reason? }`（插件不做语义判断，只逼表态 + 记录）；`inScope:false` → 拒绝并给 `handoffTo`，人类 `override:{ reason, approvedBy }` 是唯一通道；每次表态都写 `collab-audit.jsonl`。`openTodos ≥ 8` 只加一行提醒，不拦（§11.23） |
 | `collab_handoff` | `{ target?, text, expected?, origin?, blocked?, confirm }` | **同工作区**交接：复用 thread 协议（`kind:request` + `queue`）。不传 `target` 时——目标唯一直接投；多目标用与广播同一套打分（阈值 80）择优。同 `(target, text)` 幂等：重复调用返回「已存在 / 已闭环」，不重投。`origin?`（0.7.0）：转发链起点，写进记录并在投递正文协议头后加「对接人」行（§11.16）。`blocked?`（0.7.0）：转发「卡住了」的活儿时带 `{ need?, excluded?, minimalTest? }`——追加在投递正文之后、写进记录（保留最近 3 次），下一跳的承接方注入与 `collab_status` 都聚合展示（§11.18） |
 | `collab_request_owner` | `{ target?, text?, issuePath?, bid?, id?, revoke?, confirm }` | **受保护目标请求队列（0.4.0）**：只允许「非受保护 → `[protected]`/`[protected-child]`」，写入 `~/.config/opencode/collab-owner-queue/<targetSid>/<queueId>.json`（`tmp+rename`，每目标上限 **50 条未读**，满则拒新；已读项不计、7 天后回收）。**不投递、不唤醒、不建 bid/thread、不改任何协作状态**（0 条 prompt）；`confirm:false` 零写入。`text` → `summary`（去控制字符、≤500）；`issuePath` 只做**语法**校验（相对、`docs/issues/<name>.md`、无 `..`/绝对路径，不读 fs）。目标会话只在自己 `context` 注入里看到 ≤3 行只读提示（与「闭环后追加」合计 ≤3、同一提案一行，§11.12.1）；`revoke:true` + `id` 只允许发起方撤回自己的一条。见 §11.12 |
 | `collab_grant` | `{ target, confirm, revoke? }` | **会话级权限补丁**：给**这一个**会话的 `permissions` 追加 5 条 `collab_*` allow（`collab_list/inbox/wait/reply/send`）。先 `GET` 现有规则 → 按 `action + resource` 去重合并 → PATCH（**整集替换**语义，原规则保留）；白名单之外（`edit`/`write`/`shell`…）一律拒绝。`confirm:true` 才写；否则只预览目标（id/agent/title/loc）与将加/将删规则。`revoke:true` 用记录里的 `before` 快照整集还原并删除记录（无记录报「无可还原」）。`[protected*]` 目标直接拒绝 |
@@ -1931,7 +1931,7 @@ collab_index { action:"backfill", confirm:true }             # 回填历史状�
 回滚：`rm -f ~/.config/opencode/collab.db* ~/.config/opencode/collab-messages*.jsonl`，或把
 `collab.json` 的 `storage` 设为 `"json"`（不删任何文件，纯 JSON 运行）。
 
-### 11.22 会话契约与五段注入（0.9.1）
+### 11.22 会话契约与四段注入（0.9.1；0.9.2 移除 `[scope]`）
 
 **为什么**：主线、边界、进度、待办过去只存在于对话里。会话 323 轮、人类只说 6 句时，
 主线 13:00 → 00:52 **10.8h 零推进、零提醒**；而旧注入是**一次性**的（展示后进 `injected[]` 注销），
@@ -1994,7 +1994,7 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 - `close` 一个 todo 同样必填 evidence；四类可校验形式会先校验，自由文本只记录、不推进里程碑。
 - `suspend` 必填 `wakeWhen`（没有唤醒条件的挂起 = 工作永久消失）。
 
-#### 五段注入（每轮重算，不注销）
+#### 四段注入（每轮重算，不注销）
 
 固定顺序累加，**硬上限 12 行**，放不下的段落**整段丢弃**（不出现半截）：
 
@@ -2002,15 +2002,15 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 [mission]  ≤3 行    一句话主线 · 任务路径 · [未确认] / 边界 · 状态 · 推进于 N 前 / 确认命令
 [todo]     ≤4 行    N open · M 需要你 · K 等对方 · 最老 T2 6.2h · 还有 7 条；随后 top3
 [drift]    ≤2 行    0.9.1 预留（不触发；0.9.3 填）
-[scope]    ≤2 行    仅当本轮消息命中 mission.outOfScope 时出现
 [progress] ≤2 行    done/total · 下一里程碑需要 evidence；或「未设置里程碑」
 ```
+
+> 0.9.2 删掉了 `[scope]` 小节（连同它背后的关键词/别名匹配）：插件不再从消息文本猜「这条算不算越界」，
+> 边界只在 `[mission]` 里作为声明展示；接单时的判断由会话自己在 `collab_accept` 的 `scopeCheck` 里作出。
 
 - **每轮重新计算、绝不写 `injected[]`**：这是与 0.5.x 一次性注入的关键差别，也是本版最重要的回归用例
   （「连续两轮，第二轮仍含 `[mission]` 与 `[todo]`」）。
 - `[todo]` 只列 **top3**（`blockingOn=me` 优先，其次最老 `since`），头部给总数与「还有 N 条」；
-- `[scope]`：把**本轮最新一条消息正文**与 `outOfScope` 做关键词匹配；`|`（或 `｜`）分隔别名，
-  如 `"ws集群实施|ws 集群"`。命中才出现，行内给「转交（`mission.handoffTo[关键词]`）/ 拒绝 / 问 owner」三条路；
 - `[未收尾]`：插件**没有 idle 钩子**，改为**下一轮回溯**——上一轮结束时 `status:"doing"`、且在本轮开始前未被更新
   （`updatedAt ≤ 本轮 startedAt`；请求中途新建的 doing 会在下一轮被标）的 todo 标 `[未收尾]`。
   语义等价于「上一轮没收尾」，不承诺 idle 写入；
@@ -2027,14 +2027,98 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 
 #### 验收
 
-`test/contract-inject.mjs`（复审后 82 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
+`test/contract-inject.mjs`（0.9.2 复审后 83 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
 无 evidence / 假 commit 拒绝 · 真 commit 点亮并推进时间 · 同 evidence 不重复推进 · confirm 后 set 拒绝 / reconfirm+by 通过 ·
 无任务仍显示 `[mission] … [未确认]` · 10 条 todo 只列 3 条 + 「还有 7 条」且整块 ≤12 行 ·
-suspend 缺 `wakeWhen` 拒绝 · close 缺 evidence / 文件不存在拒绝 · 截断时 `[progress]` 被整段丢弃 ·
+suspend 缺 `wakeWhen` 拒绝 · close 缺 evidence / 文件不存在拒绝 · 四段齐全且**没有 `[scope]` 行**（0.9.2 删除匹配器）·
 `[未收尾]` 下一轮标记 · 主线锚（指针 > 唯一任务 > 多任务不猜；无契约时 ambiguous 静默）· `get` 用会话首条人类指令作建议且不写盘 ·
 并发 `add` 不产生重复 id · mission-only / milestone-only 契约的 `turn.count` 正常递增 · `confirm` 缺 `by` 拒绝 ·
 50 closed + 10 open 时新行可读（变异：读侧截断加回 → 必红）· 只裁关闭历史且 id 不复用 · 同毫秒 advance 归零 `noAdvanceTurns`。
 
+
+### 11.23 协作闸门：接单前模型表态（0.9.2）
+
+**为什么**：排钟专题在一次 13:00 → 00:52 的会话里把主要精力投进了 ws 集群（「排钟」关键词 14:00 后归零），
+22 个工具**没有任何一个会拒绝越界动作**，最后要人类用 766 字手工拉回主线。
+
+**为什么不做关键词匹配**：初版把 `mission.outOfScope` 与 bid 文案做子串/别名匹配，复核当场误伤
+`排钟 Redis 缓存键设计`（`redis` 既是 ws 集群别名，也是排钟缓存键的词）。通用插件无法靠文本判断
+「这条算不算那个边界」，把领域词写进插件更不行。**结论：插件不判断，只逼表态并记录。**
+
+**诚实边界**：插件拦不住 `bash` 层跨仓写，只能拦**协作动作**里的**接单**。实测漂移 90% 经协作层进入。
+
+#### 接单表态（唯一需要表态的动作）
+
+本会话 `mission.outOfScope` **非空**时，`collab_accept` 必须带：
+
+```text
+collab_accept { bid:"b_…", confirm:true,
+                scopeCheck:{ inScope:true  |  false, reason:"…" } }
+```
+
+| 情况 | 结果 |
+| --- | --- |
+| 缺 `scopeCheck`（或 `inScope` 不是布尔） | **拒绝**：说明「插件不做语义判断」，给出两种可复制调用 + override 形式 |
+| `inScope:true` | 正常接单；写 audit（`verifiedBy:"model"`） |
+| `inScope:false` | **拒绝接单**：给 `handoffTo`（`mission.handoffTo`）+ override 用法；写 audit（`inScope:false`） |
+| `inScope:false` + 合法 `override` | 放行；写 audit（`verifiedBy:"override"`，含 `approvedBy`） |
+| 契约缺失 / `outOfScope` 为空 | **不需要表态**，行为与 0.9.1 逐字节一致（不写 audit） |
+
+- `override:{ reason, approvedBy }` 两者必填，`approvedBy` 不得以 `ses_` 开头（会话不能给自己批越界）；
+  单独给 `override` 而没有 `scopeCheck` 仍算**未表态**；
+- `handoffTo` 不再按「命中项」查表（没有命中项）：`mission.handoffTo` 只有一个不同目标 → 直接给；
+  多个 → 文案里全列出（避免暗示某一个是「对的」）；没有 → 「请转交 owner」；
+- **顺序**（复核 #3/#4）：`refresh → evaluate → persistRefresh → 只读分支`。拒绝时记录**零变化**
+  （`state`/`claim`/`asked`/`attempts` 与 `<bid>.lock` 全不变），「已被领取」「spawn 自领 ACK」「已闭环 / 已过期」
+  都不经过闸门，不会被误报成越界。
+
+#### 派活不拦、回复不校验
+
+- `collab_broadcast` / `collab_handoff`：**永不要求表态、永不拒绝**——派活是清账手段；
+- `collab_reply` / `collab_send`：不校验（回复不扩大边界）。
+
+#### 溢出只提醒（R5）
+
+`open todos ≥ 8`（`open / doing / blocked / suspended`）时，在 `accept` / `broadcast` / `handoff` 的返回
+**末尾**追加一行，不拒绝、不改状态、不写 audit：
+
+```text
+[溢出提醒] 你已有 8 条协作待办；若这次接单/派活会把它们挂起，先处理再继续。
+```
+
+#### 审计
+
+每次**表态**写一行 `~/.config/opencode/collab-audit.jsonl`（append-only，与看板动作审计共用文件）：
+
+```json
+{"at":0,"sid":"ses_…","kind":"accept","bid":"b_…","inScope":true,"reason":"排钟主线内","verifiedBy":"model"}
+{"at":0,"sid":"ses_…","kind":"accept","bid":"b_…","inScope":false,"reason":"…","verifiedBy":"override","approvedBy":"@长久同学^v^"}
+```
+
+未表态的拒绝、溢出提醒、`gate:"off"`、预览：不写（没有判断可记）。写失败只记日志，不阻断动作；
+`COLLAB_AUDIT_FILE` 可覆盖（测试/沙箱）。
+
+#### 开关与回滚
+
+```json
+// ~/.config/opencode/collab.json
+{ "gate": "enforce" }
+```
+
+- `enforce`（默认）：按上表执行；`warn`：拒绝降为提示（已作出的表态照常写 audit）；
+  `off`：完全跳过（不要求表态、不拒绝、不提醒、不写 audit）。写错的值回落 `enforce`；
+- 改完即时生效（配置按 mtime 重读），无需重载插件；
+- 代码回滚：`git restore -- src/tools/accept.ts src/tools/broadcast.ts src/tools/handoff.ts src/config.ts src/types.ts
+  src/constants.ts src/core/contract.ts src/hooks/context.ts src/index.ts`、`rm -f src/core/gate.ts src/core/audit.ts`。
+
+#### 验收
+
+`test/gate.mjs`（62 项）：工具面仍 26 · 缺表态拒绝（含两种可复制调用；记录逐字节不变、无 lock、不写 audit）·
+`inScope:false` 拒绝 + `handoffTo` + audit（model）· 合法 override 放行 + audit（override/approvedBy）·
+`approvedBy:"ses_…"` 拒绝 · `inScope:true` 接单 + audit（model）· 无 `outOfScope` 不需要表态且无 audit ·
+`open=8` 时 accept / broadcast / handoff 全放行 + 提醒行 · 「已被领取」/ spawn 自领不被闸门改写 ·
+`reply`/`send` 永不校验 · `gate:"warn"` 只提示 · `gate:"off"` 全跳过 · protected 行为不变。
+变异（强制）：「缺 `scopeCheck` 拒绝」改成放行 → 该组 8 项红（实测）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

@@ -138,6 +138,15 @@ export function loadConfig(options: unknown): CollabConfig {
       ? rawDbPath.trim().replace(/^~(?=\/|$)/, homedir())
       : DEFAULTS.dbPath;
 
+  // 0.9.2 (`11-20-collab-gate`): the collaboration gate. Only the exact strings
+  // `warn` / `off` downgrade it — a typo (`"of"`, `false`, `0`) falls back to
+  // `enforce`, because silently disabling a guard is the one failure mode a
+  // rollback switch must not have. There is no keyword / alias table: the gate
+  // never infers a boundary from text (the session states it on `collab_accept`).
+  const rawGate = file.gate ?? fromOptions.gate;
+  const gate: 'enforce' | 'warn' | 'off' =
+    rawGate === 'warn' || rawGate === 'off' ? rawGate : DEFAULTS.gate;
+
   return {
     aliases,
     autoDeliver,
@@ -154,6 +163,7 @@ export function loadConfig(options: unknown): CollabConfig {
     boardActions,
     storage,
     dbPath,
+    gate,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

@@ -856,6 +856,15 @@ export interface CollabConfig {
   storage: 'sqlite' | 'json';
   /** 0.9.0 (R2): the projection path (`dbPath` in `collab.json`). */
   dbPath: string;
+  /**
+   * 0.9.2 (`11-20-collab-gate`): `enforce` (default) requires an explicit
+   * `scopeCheck` statement on `collab_accept` whenever `mission.outOfScope` is
+   * non-empty (and refuses `inScope:false` without a human override); `warn`
+   * demotes those refusals to a printed warning (rollback switch); `off` skips
+   * the gate entirely (no refuse, no warning, no audit line). `broadcast` /
+   * `handoff` / `reply` / `send` never require a statement.
+   */
+  gate: 'enforce' | 'warn' | 'off';
   report?: ReportConfig;
 }
 

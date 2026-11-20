@@ -29,7 +29,7 @@
 | `collab_reply`     | 按 thread 自动路由的回执                                                   | 发消息            |
 | `collab_handoff`   | 同工作区交接：选人（同一套打分）+ 打开 thread；`origin?` 记录转发链链头；`blocked?` 把「卡住了」的结构化三段交给下一跳 | 发消息            |
 | `collab_broadcast` | 跨工作区交接：读提案 → 打分 → 写全局交接文件 → 只问 top-1 / 必要时拉新会话；`origin?` 缺省继承上一跳 | 发消息 + 可建会话 |
-| `collab_accept`    | 原子领取广播（`<bid>.lock`，只有一个 winner）                              | 写交接记录        |
+| `collab_accept`    | 原子领取广播（`<bid>.lock`，只有一个 winner）；**0.9.2 闸门**：本会话 `mission.outOfScope` 非空时**必须**带 `scopeCheck:{inScope,reason?}`（插件不做语义判断，只逼表态 + 记录 `collab-audit.jsonl`）；`inScope:false` → 拒绝并给 `handoffTo`，人类 `override:{reason,approvedBy}` 是唯一通道；`openTodos ≥ 8` 只加一行提醒 | 写交接记录        |
 | `collab_request_owner` | 给**受保护**会话（`[protected]`/`[protected-child]`）排队一条请求：只写队列文件，目标下次运行时看到 ≤3 行只读提示（**不投递**、不建 bid/thread、`revoke` 仅发起方） | 写本地队列        |
 | `collab_grant`     | 给**一个会话**追加 5 条 `collab_*` 会话级权限（`revoke` 还原快照）         | **写会话权限**    |
 | `collab_promote`   | 把一个会话的 agent 切到 `build`/`plan`（`revert` 还原）                    | **写会话 agent**  |
@@ -53,10 +53,21 @@
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
 
-0.9.1 起 hook 的**最前面**多一个**五段式会话契约**块（每轮重新计算、**不写 `injected[]`**、硬上限 12 行）：
+0.9.2 起协作层多一道**闸门**，但**插件不做语义判断**：本会话 `mission.outOfScope` 非空时，
+`collab_accept` 必须自己表态 `scopeCheck:{ inScope, reason? }`——缺表态直接拒绝（文案给出两种可复制调用）；
+`inScope:false` 拒绝接单并给 `handoffTo`，只有人类 `override:{ reason, approvedBy }`（`approvedBy` 不得以 `ses_` 开头）
+能放行；`inScope:true` 正常接单。**每一次表态都写一行** `collab-audit.jsonl`
+（`{at,sid,kind,bid,inScope,reason,verifiedBy,approvedBy?}`）。
+`broadcast` / `handoff` 永不要求表态、永不拒绝（派活是清账手段），`reply` / `send` 不校验；
+`openTodos ≥ 8` 只在返回末尾加一行 `[溢出提醒]`，不拦任何动作。
+误伤/自证时把 `collab.json` 的 `gate` 改成 `"warn"`（只提示）或 `"off"`（完全跳过）即可即时降级。
+**诚实边界：拦不住 bash 层跨仓写**，只拦协作动作。
+
+0.9.1 起 hook 的**最前面**多一个**会话契约**块（每轮重新计算、**不写 `injected[]`**、硬上限 12 行）：
 `[mission]`（一句话主线 / 边界 / 状态 / 推进时间，未确认标 `[未确认]`）→ `[todo]`（N open · M 需要你 ·
-K 等对方 · 最老 T2 6.2h · 还有 N 条，随后 top3）→ `[drift]`（0.9.1 预留，不触发）→ `[scope]`（本轮消息命中
-`mission.outOfScope` 才出现，`|` 分隔别名）→ `[progress]`（done/total · 下一里程碑需要 evidence）。
+K 等对方 · 最老 T2 6.2h · 还有 N 条，随后 top3）→ `[drift]`（0.9.1 预留，不触发）→
+`[progress]`（done/total · 下一里程碑需要 evidence）。0.9.2 删掉了 `[scope]` 小节与它背后的关键词匹配：
+边界只在 `[mission]` 作为声明展示，接单判断由会话自己的 `scopeCheck` 作出。
 放不下的段落整段丢弃；`[未收尾]` 用「下一轮回溯」标记上一轮未更新的 `doing` 待办（插件没有 idle 钩子，
 不承诺 idle 写入）。契约存 `~/.config/opencode/collab-contract/<sid>.json`，读路径惰性创建、写路径 tmp+rename。
 0.7.0 起它在**末尾**再追加一行只读的**自动感知**提示（每会话每 10 分钟最多一次、预算满时最先让位）：
@@ -290,6 +301,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 | `boardActions`   | `true`             | Desktop 面板右详情的动作行（加急/冻结/解冻/归档）。`false` **只隐藏按钮**（`snapshot.actions=false`），`collab.state.escalate\|freeze\|unfreeze\|archive` 仍可调；每次写动作追加一行 `~/.config/opencode/collab-audit.jsonl` |
 | `storage`        | `"sqlite"`         | 消息投影 `collab.db` 的开关。`"json"` = **一次也不 import** `node:sqlite` / `bun:sqlite`，全部工具与看板只读 JSON（看板显示 `[索引不可用]`，回滚开关）。写错的值回落 `"sqlite"` |
 | `dbPath`         | `~/.config/opencode/collab.db` | 投影路径（也可用 `COLLAB_DB_FILE`）。删掉它不影响协作，`collab_index {action:"rebuild",confirm:true}` 可重建 |
+| `gate`           | `"enforce"`        | **0.9.2 闸门模式**：`enforce` 要求 `collab_accept` 带 `scopeCheck` 表态（`inScope:false` 且无人类 override → 拒绝）；`warn` 降为提示（表态照常审计）；`off` 完全跳过（不拒绝、不提醒、不写 audit）。写错的值回落 `enforce` |
 | `aliases`        | `{}`               | 别名表：`collab_send {target:"schema"}`                                                            |
 | `report.to`      | 未配置             | 缺陷上报的**主通道**：别名或 `ses_…`，插件把证据摘要当 `note`（`queue`）投给它；未配置只落盘 |
 | `report.enabled` | `true`             | `false` = 关闭投递（仍落盘），回滚开关                                                             |
@@ -305,7 +317,7 @@ opencode plugin remove @inf-studio/collab     # 包安装
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.9.x` | `2.3.x`  | `>=22.18` | **0.9.1** 新增会话契约（`collab_mission` / `collab_progress` / `collab_todo`，23 → 26 个工具）+ 每轮五段注入（`[mission]/[todo]/[drift]/[scope]/[progress]`，≤12 行，不写 `injected[]`）+ 主线锚解析 + evidence 校验（commit/file/test/decision）+ `[未收尾]` 回溯标记；**0.9.0** 新增消息历史 + 可重建索引：每条投递写一行 `Envelope` 到 `collab-messages.jsonl`（全文，>1MB 分片），并投影到 `collab.db`（8 表 + FTS5，WAL）；新增 `collab_index`（`stats`/`rebuild`/`backfill`，22 → 23 个工具）；`storage:"json"` 回滚开关不 import sqlite；现有工具输出契约不变（读路径仍以 JSON 为真源，看板只多一个 `[索引不可用]` 标记） |
+| `0.9.x` | `2.3.x`  | `>=22.18` | **0.9.2** 新增协作闸门（`src/core/gate.ts` / `audit.ts`）：**接单前模型表态**（`collab_accept` 的 `scopeCheck`，插件不做语义判断）+ 每次表态写 `collab-audit.jsonl`（`inScope`/`verifiedBy`/`approvedBy`）+ 人类 `override{reason,approvedBy}` + `openTodos ≥ 8` 只提醒不拦 + `broadcast`/`handoff` 永不拒绝 + `reply`/`send` 不校验 + `gate:"warn"|"off"` 回滚开关；删除关键词/别名匹配（连同注入里的 `[scope]`，五段→四段）；工具数不变（26）；**0.9.1** 新增会话契约（`collab_mission` / `collab_progress` / `collab_todo`，23 → 26 个工具）+ 每轮五段注入（`[mission]/[todo]/[drift]/[scope]/[progress]`，≤12 行，不写 `injected[]`）+ 主线锚解析 + evidence 校验（commit/file/test/decision）+ `[未收尾]` 回溯标记；**0.9.0** 新增消息历史 + 可重建索引：每条投递写一行 `Envelope` 到 `collab-messages.jsonl`（全文，>1MB 分片），并投影到 `collab.db`（8 表 + FTS5，WAL）；新增 `collab_index`（`stats`/`rebuild`/`backfill`，22 → 23 个工具）；`storage:"json"` 回滚开关不 import sqlite；现有工具输出契约不变（读路径仍以 JSON 为真源，看板只多一个 `[索引不可用]` 标记） |
 | `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.3** 快照改为按「会话所属服务器」取 client（远端会话读远端 `server.client`，跨服务器切换不串台、迟到回包丢弃）+ 探针/面板标出数据源服务器 + 文档写明 Desktop 必须装在本机；**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
 | `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |

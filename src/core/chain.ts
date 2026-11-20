@@ -1099,7 +1099,8 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           lines.push(
             `- 群组广播 ${record.bid}：${truncate(record.title ?? '(untitled)', 80)}` +
               `（提案 ${record.issuePath}，期望 ${record.expected}，影响面 ${files}）` +
-              ` → 相关请 collab_accept {bid:"${record.bid}"}；没余力就不领取（勿占用）。`
+              ` → 相关请 collab_accept {bid:"${record.bid}", confirm:true}` +
+              `（你的 outOfScope 非空时它会先要求 scopeCheck 表态）；没余力就不领取（勿占用）。`
           );
           const seen = readBroadcast(record.bid) ?? record;
           writeBroadcast({ ...seen, seenBy: dedupe([...(seen.seenBy ?? []), sessionID]) });

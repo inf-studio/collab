@@ -73,6 +73,13 @@ export const BUILTIN_PROTECT = ['ses_e1eb91cebffeTv1467ubJLKebk', 'ses_e23a4a23f
 export const DEFAULT_READONLY_AGENTS = ['explore', 'plan'];
 
 /**
+ * 0.9.2 (`11-20-collab-gate`, declared before `DEFAULTS` on purpose — `DEFAULTS`
+ * reads it at module-evaluation time). `collab.json` → `gate`; anything else
+ * falls back to `enforce`.
+ */
+export const DEFAULT_GATE_MODE = 'enforce';
+
+/**
  * Only inbox admissions matter for the unread queue. Event names come from the
  * server's own `V2Event` union, verified live by a probe plugin.
  */
@@ -113,7 +120,13 @@ export const DEFAULTS = {
    */
   storage: 'sqlite' as 'sqlite' | 'json',
   /** 0.9.0 (R2): where the projection lives (`dbPath` in `collab.json`). */
-  dbPath: DB_FILE
+  dbPath: DB_FILE,
+  /**
+   * 0.9.2 (`11-20-collab-gate`): the collaboration gate. `enforce` (default)
+   * refuses an out-of-scope `accept` / a new job while 8+ todos are open;
+   * `warn` / `off` are the rollback switches.
+   */
+  gate: DEFAULT_GATE_MODE as 'enforce' | 'warn' | 'off'
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -506,10 +519,10 @@ export const CONTRACT_VERSION = 1;
 
 /** `[mission] oneLine` is one line (whitespace collapsed) — cut here. */
 export const CONTRACT_ONE_LINE_LIMIT = 300;
-/** `inScope` / `outOfScope` are keyword lists: bounded so the injection stays readable. */
+/** `inScope` / `outOfScope` are plain text lists (no matching in 0.9.2): bounded so the injection stays readable. */
 export const CONTRACT_SCOPE_ITEMS = 20;
 export const CONTRACT_SCOPE_CHARS = 100;
-/** `handoffTo` maps an out-of-scope keyword to the session that owns it (0.9.2 reads it). */
+/** `handoffTo` maps an out-of-scope item to the session that owns it (0.9.2 reads it when `inScope:false`). */
 export const CONTRACT_HANDOFF_ITEMS = 20;
 /** One todo subject is one line — cut here. */
 export const CONTRACT_TODO_SUBJECT_LIMIT = 200;
@@ -534,22 +547,40 @@ export const CONTRACT_WAKE_CHARS = 120;
 export const CONTRACT_TODO_LIST_MAX = 20;
 
 /**
- * 0.9.1 (R5): the five-section injection. Fixed order, accumulated, **stop at
- * 12 lines** — a section that does not fit is dropped whole (never half shown).
- * Todo is one header + top-3; mission is head + boundary + confirm hint.
- * `drift` is a placeholder in this version (0.9.3 fills it), `scope` appears only
- * on a keyword hit, `progress` only while milestones exist.
+ * 0.9.1 (R5, revised 0.9.2): the **four-section** injection. Fixed order,
+ * accumulated, **stop at 12 lines** — a section that does not fit is dropped
+ * whole (never half shown). Todo is one header + top-3; mission is head +
+ * boundary + confirm hint. `drift` is a placeholder in this version (0.9.3 fills
+ * it); `progress` appears only while milestones exist.
+ *
+ * 0.9.2 removed the `[scope]` section together with the keyword matcher behind
+ * it: the plugin no longer guesses whether a message is out of scope — the
+ * session states it itself on `collab_accept` (`scopeCheck`, `core/gate.ts`).
  */
 export const INJECT_MAX_LINES = 12;
 export const INJECT_SECTION_LIMITS = {
   mission: 3,
   todo: 4,
   drift: 2,
-  scope: 2,
   progress: 2
 } as const;
 /** How many open todos the `[todo]` section lists before "还有 N 条". */
 export const INJECT_TODO_TOP = 3;
 
+// ------------------------------------------- collaboration gate (0.9.2, `11-20-collab-gate`)
+
+/**
+ * R5 (revised): an open todo count at or above this appends **one reminder line**
+ * to `accept` / `broadcast` / `handoff` — it never refuses. Handing work out is
+ * how a list gets shorter; blocking it because the list is long would protect the
+ * backlog instead of the mainline.
+ *
+ * Counting is the contract's open rows (`open / doing / blocked / suspended`);
+ * storage keeps its own, higher hard cap (`CONTRACT_TODO_MAX_OPEN = 50`).
+ */
+export const GATE_TODO_LIMIT = 8;
+/** `collab.json` → `gate`; anything else falls back to `enforce`. */
+export const GATE_MODES: string[] = ['enforce', 'warn', 'off'];
+
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.1';
+export const PLUGIN_VERSION = '0.9.2';

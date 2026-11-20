@@ -168,7 +168,7 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   `run()` 在任何 `await` **之前**捕获目标 sid——否则对话框开着时切换，动作会落到新会话。
 - `boardActions:false` 只隐藏按钮，RPC 仍可用（文档写清）。
 
-## 2.13 会话契约 / 五段注入 / 闸门 / 漂移（0.9.x）
+## 2.13 会话契约 / 四段注入 / 闸门（表态）/ 漂移（0.9.x）
 
 ### 契约真源
 - `~/.config/opencode/collab-contract/<sid>.json`，五面 `mission / plan / todos / peers`（+ `turn` 计数位）。
@@ -179,23 +179,38 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - **`turn.count` 每请求无条件推进**（契约存在即推进），不要和「有没有 todo 可比较」耦合；推进判定用 `>=`（同毫秒下严格 `>` 会漏计）。
 - `[未收尾]` 判定用「本轮开始时间」比较（`updatedAt <= startedAt`），语义是「本轮开始前未更新」；渲染发生在工具调用之前，本轮新建的行不会出现在本轮块里。
 
-### 五段注入（硬上限 12 行）
+### 四段注入（硬上限 12 行）
 固定顺序累加，超限即停，被截断的段落**不出现**：
 
 ```
-[mission] ≤3  [todo] ≤4  [drift] ≤2  [scope] ≤2  [progress] ≤2
+[mission] ≤3  [todo] ≤4  [drift] ≤2  [progress] ≤2
 ```
 
 - **每轮重算、不注销**：绝不写 `injected[]`（这是 0.5.x 一次性注入的教训——展示过就永久消失）。
 - `[todo]`：`N open · M 需要你 · K 等对方` + top3（`blockingOn=me` 优先，其次最老 `since`）。
-- `[scope]`：仅当本条消息命中 `mission.outOfScope` 时出现，必须给出「转交/拒绝/问 owner」三条路。
+- **没有 `[scope]` 段**（0.9.2 删除）：插件不从消息文本推断边界；`outOfScope` 只在 `[mission]` 作为声明展示，
+  接单判断由会话在 `collab_accept` 的 `scopeCheck` 里作出。
 - `[drift]`：仅触发时出现（连续 5 轮无 evidence，或挂起 >2h，或 suspended 超 24h）。
 - 插件**没有 idle 钩子**：`[未收尾]` 靠下一轮回溯判定，不要在文档里承诺 idle 写入。
 
-### 闸门（只拦协作层）
-- 拦 `accept`（越界/溢出）与 `broadcast|handoff`（溢出）；**`reply|send` 永不校验 scope**（回复不扩大边界）。
-- `outOfScope` 为空 = 永不越界（误伤 0）；`gate:'warn'|'off'` 是回滚开关。
-- override 必须 `{reason, approvedBy}`，`approvedBy` 不得以 `ses_` 开头，通过后写 `collab-audit.jsonl`。
+### 闸门（只拦接单；**不推断语义**）
+- **不写关键词 / 别名 / 子串匹配**：`mission.outOfScope` 与 bid 文案之间没有任何自动比对
+  （`redis` 既是 ws 集群别名也是排钟缓存键的词，匹配必然误伤；领域词不进通用插件）。
+  判断权在会话自己的模型，插件只**逼表态 + 记录**。
+- `accept`：本会话 `outOfScope` 非空 → 必须带 `scopeCheck:{inScope:boolean, reason?}`；
+  缺表态（或 `inScope` 非布尔）→ 拒绝，文案说明「插件不做语义判断」并给两种可复制调用；
+  `inScope:false` → 拒绝并给 `handoffTo`（`mission.handoffTo`）；`inScope:true` → 正常接单。
+  `outOfScope` 为空 / 无契约 → 不需要表态，行为与 0.9.1 一致。
+- **每一次表态都写 `collab-audit.jsonl`**：`{at,sid,kind,bid,inScope,reason,verifiedBy:'model'|'override',approvedBy?}`；
+  未表态的拒绝、溢出提醒、`gate:'off'`、预览都不写。写失败只记日志。
+- override 只在 `inScope:false` 时有意义：`{reason, approvedBy}` 必填，`approvedBy` 不得以 `ses_` 开头；
+  单独给 override 而没有 `scopeCheck` 仍算未表态。
+- `broadcast|handoff` **永不要求表态、永不拒绝**（派活是清账手段）；`reply|send` 不校验。
+- 溢出（`openTodos ≥ 8`）**只提醒不拦**：`accept`/`broadcast`/`handoff` 返回末尾一行 `[溢出提醒]`，
+  不改状态、不写 audit。
+- 顺序：`guards → refresh（读）→ evaluate → persistRefresh → 只读分支`；拒绝时记录**零变化**
+  （`state/claim/asked/attempts` 与 `<bid>.lock`），「已被领取」「spawn 自领 ACK」「已闭环/已过期」不经过闸门。
+- `gate:'enforce'|'warn'|'off'`：`warn` 把拒绝降为提示（表态照常审计）；`off` 完全跳过；写错回落 `enforce`。
 - **诚实边界**：拦不住 bash 层跨仓写；文档不得暗示能拦。
 
 ### 漂移三选一

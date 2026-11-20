@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮五段注入（[mission]/[todo]/[drift]/[scope]/[progress]，≤12 行、不写 injected[]），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），接单前模型表态（collab_accept 的 scopeCheck + 审计），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -33,7 +33,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_handoff` | `target?, text, expected?, origin?, blocked?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承）；`blocked?` = 把「卡住了」的结构化三段一起交给下一跳 | 发消息 |
 | `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
 | `collab_request_owner` | `target?, text?, issuePath?, id?, revoke?, confirm` | **受保护目标请求队列**：只写队列文件（非保护 → 受保护），0 投递 | 写本地队列（旁路） |
-| `collab_accept` | `bid, confirm` | 原子领取广播（只有一个 winner） | 写交接记录 |
+| `collab_accept` | `bid, confirm, scopeCheck?, override?` | 原子领取广播（只有一个 winner）；0.9.2 闸门：`mission.outOfScope` 非空时必须表态 `scopeCheck:{inScope,reason?}`（插件不做语义判断），`inScope:false` 拒绝并给 `handoffTo`，人类 `override{reason,approvedBy}` 是唯一通道；每次表态写 audit | 写交接记录 |
 | `collab_grant` | `target, revoke?, confirm` | 给**一个会话**加 5 条 `collab_*` 会话级权限 | 写会话权限 |
 | `collab_promote` | `target, agent?, revert?, confirm` | 把会话 agent 切 `build`/`plan` | 写会话 agent |
 | `collab_followup` | `bid, issuePath?, confirm` | **闭环后追加**：只登记结构化指针（不投递、不改 state） | 写交接记录（本单领取人） |
@@ -335,7 +335,7 @@ A → B → C 时，B→C 的记录 `from` 只能是 B。没有 `origin` 时 C �
 - `origin` 只是展示：指向 `[protected*]` 也不会产生任何投递，护栏不因它放宽。
 - 人工转达时照三行写：`提案：<路径>` / `bid：b_…` / `对接人（非本单发起方）：ses_… @ <dir>`。
 
-## 一点十三、会话契约与五段注入（0.9.1）
+## 一点十三、会话契约与四段注入（0.9.1；0.9.2 移除 `[scope]`）
 
 主线 / 边界 / 进度 / 待办过去只活在对话里：会话 323 轮、人类只说 6 句时，主线 10.8h 零推进、零提醒；
 旧注入展示一次就注销，compaction 后什么都不剩。0.9.1 把任务层写成契约文件，并**每轮**重新注入。
@@ -367,13 +367,13 @@ collab_todo { action:"close", id:"T1", evidence:"test:reports/e2e.txt", confirm:
 [todo] 10 open · 4 需要你 · 2 等对方 · 最老 T2 6.2h · 还有 7 条
   T2 decide dev/prod 键空间 → 需要你
   T3 reply t_mwnmtb97 D1 记入 PRD → 等 ses_e176…
-[scope] 本条属「ws集群实施」→ outOfScope；正确动作：转交 ses_edc3… / 拒绝 / 问 owner
 [progress] 2/5 · 下一里程碑 M3「双写验证」需要 evidence
 ```
 
-- 顺序固定：`mission ≤3 · todo ≤4 · drift ≤2 · scope ≤2 · progress ≤2`；放不下的段落**整段丢弃**；
+- 顺序固定：`mission ≤3 · todo ≤4 · drift ≤2 · progress ≤2`；放不下的段落**整段丢弃**；
 - **每轮重算、不写 `injected[]`**：第二轮、第三轮仍能看到 `[mission]` 与 `[todo]`；
-- `[scope]` 只在**本轮最新消息**命中 `outOfScope` 时出现（`|` 分隔别名，如 `"ws集群实施|ws 集群"`）；
+- 0.9.2 删掉了 `[scope]` 小节（连同关键词/别名匹配）：边界只在 `[mission]` 作为**声明**展示，
+  接单时由你自己在 `collab_accept` 的 `scopeCheck` 里判断这条是否在边界内；
 - `[drift]` 本版预留（0.9.3 才触发）；
 - `[未收尾]`：上一轮结束时 `doing` 且本轮前没被更新的 todo 会被标出——插件**没有 idle 钩子**，
   这是下一轮回溯，不是「空闲时写入」；
@@ -385,6 +385,76 @@ collab_todo { action:"close", id:"T1", evidence:"test:reports/e2e.txt", confirm:
 - 不要用 `collab_progress` 点亮「我觉得做完了」——没有 evidence 会被拒绝，硬凑一个不存在的 commit 也会被拒；
 - 不要 `suspend` 一条没有唤醒条件的待办（会被拒绝）：写「等谁/等什么」；
 - 不要手改 `confirmedBy` 来绕确认：`set` 覆盖必须 `reconfirm:true` + `by`，这是为了让「谁改的主线」可追溯。
+
+## 一点十四、协作闸门：接单前自己表态（0.9.2）
+
+排钟那晚：13:00 → 00:52 的主要精力进了 ws 集群，22 个工具**没有一个会拒绝**越界动作。
+
+但「插件猜越界」走不通：初版用关键词/别名匹配，复核当场把 `排钟 Redis 缓存键设计` 判成越界
+（`redis` 既是 ws 集群别名，也是排钟缓存键的词）。**结论：插件不判断，只逼你表态并记录。**
+
+### 什么时候必须表态
+
+只有当**你自己的** `mission.outOfScope` 非空、而且你要 `collab_accept` 接单时：
+
+```text
+collab_accept { bid:"b_…", confirm:true,
+                scopeCheck:{ inScope:true } }                       # 在边界内
+collab_accept { bid:"b_…", confirm:true,
+                scopeCheck:{ inScope:false, reason:"本会话主线是排钟" } }  # 在边界外 → 被拒
+```
+
+| 情况 | 结果 |
+|---|---|
+| 缺 `scopeCheck` | **拒绝**：文案给两种可复制调用 + override 形式（插件不做语义判断） |
+| `inScope:true` | 正常接单；写 audit（`verifiedBy:"model"`） |
+| `inScope:false` | **拒绝接单**：给 `handoffTo`；写 audit（`inScope:false`） |
+| `inScope:false` + 人类 `override` | 放行；写 audit（`verifiedBy:"override"`） |
+| `outOfScope` 为空 / 没契约 | 不需要表态，行为与 0.9.1 完全一致 |
+
+- `override:{ reason, approvedBy }` 两者必填，`approvedBy` **不得以 `ses_` 开头**；单独给 override 而没有
+  `scopeCheck` 仍算未表态；
+- 拒绝时记录**零变化**（state / claim / asked / attempts / lock 全不动）；「已被领取」「spawn 自领 ACK」
+  「已闭环 / 已过期」都不经过闸门；
+- `collab_broadcast` / `collab_handoff` **永不要求表态、永不拒绝**（派活是清账手段）；
+  `collab_reply` / `collab_send` 不校验（回复不扩大边界）。
+
+### 溢出只是提醒
+
+`open todos ≥ 8`（open/doing/blocked/suspended）时，`accept` / `broadcast` / `handoff` 的返回**末尾**多一行，
+不拒绝、不改状态、不写 audit：
+
+```text
+[溢出提醒] 你已有 8 条协作待办；若这次接单/派活会把它们挂起，先处理再继续。
+```
+
+### 审计
+
+每次表态一行 `~/.config/opencode/collab-audit.jsonl`：
+
+```json
+{"at":0,"sid":"ses_…","kind":"accept","bid":"b_…","inScope":true,"reason":"排钟主线内","verifiedBy":"model"}
+```
+
+未表态的拒绝、溢出提醒、`gate:"off"`、预览都不写。写失败只记日志、不阻断动作。
+
+### 误伤 / 回滚
+
+```json
+// ~/.config/opencode/collab.json
+{ "gate": "warn" }
+```
+
+- `enforce`（默认）→ `warn`（拒绝降为提示，表态照常审计）→ `off`（完全跳过：不要求、不拒绝、不提醒、不写 audit）；
+  改完即时生效（配置按 mtime 重读）；
+- 模型自己判断错了（把边界内的活儿说成 outOfScope）→ 改口重发 `scopeCheck:{ inScope:true }`；
+  真被闸门卡住且必须做 → 找人类批 `override`（留痕），不要用 `gate:"off"` 绕过。
+
+### 别做
+
+- 不要以为闸门能拦 shell：跨仓写仍然只能靠自觉 + 只读约束；
+- 不要用 `gate:"off"` 当日常配置——临时降级用完改回 `enforce`；
+- 不要把 `override` 当「先接了再说」的快捷键：它要求人类批准，且每一笔都留审计行。
 
 ## 二、同工作区（local）
 

@@ -8,6 +8,8 @@ import {
   writeBroadcast
 } from '../core/claim.ts';
 import { invalid } from '../core/errors.ts';
+import { readContract } from '../core/contract.ts';
+import { evaluate } from '../core/gate.ts';
 import { freezeDenyText, freezeHintText, frozenBy } from '../core/freeze.ts';
 import { createLineage } from '../core/lineage.ts';
 import { broadcastID, extractPaths, normalizeExpected, summarizeProposal } from '../core/score.ts';
@@ -43,7 +45,10 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
       'Hand a task to another session of *this* workspace (local scope) over the existing thread protocol: ' +
       'kind=request, mode=queue, reply with collab_reply. Without `target` the plugin picks one: a single ' +
       'available session is used directly, several are ranked with the same 0–100 score as collab_broadcast ' +
-      '(threshold 80, `why` breakdown). Requires confirm:true; otherwise it only previews the choose/deliver plan.',
+      '(threshold 80, `why` breakdown). Requires confirm:true; otherwise it only previews the choose/deliver plan. ' +
+      '0.9.2 gate: a hand-off is never refused and never requires a scope statement (the target states its own ' +
+      'boundary when it calls collab_accept); 8+ open todos only appends one [溢出提醒] line. ' +
+      'gate:"warn"|"off" in collab.json is the rollback switch.',
     input: jsonInput({
       properties: {
         target: {
@@ -240,6 +245,12 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
         };
       }
 
+      // 0.9.2 (`11-20-collab-gate`): a hand-off is never refused and never
+      // requires a statement (R3); only the overflow reminder is appended. The
+      // target states its own boundary when it accepts.
+      const gate = evaluate('handoff', {}, me ? readContract(me) : undefined, readConfig(), { sid: me });
+      const reminderLines = gate.reminder ? [gate.reminder] : [];
+
       if (input?.confirm !== true) {
         const config = readConfig();
         const guard = await lineage.protectedAncestor(target.sessionID, config.protect);
@@ -260,6 +271,7 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
               : []),
             ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
             ...notes.map(note => `注: ${note}`),
+            ...reminderLines,
             ...(ranking
               ? [
                   `候选（阈值 ${BCAST_THRESHOLD}）:`,
@@ -360,7 +372,8 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
           `bid=${bid}  thread=${threadID}（local scope，回执用 collab_reply {threadID}）`,
           ...(originNote ? [originNote] : []),
           ...(capabilityNote(target.info?.agent, expected) ? [capabilityNote(target.info?.agent, expected)!] : []),
-          `等结果: collab_wait {threadID:"${threadID}", timeoutMs:…}`
+          `等结果: collab_wait {threadID:"${threadID}", timeoutMs:…}`,
+          ...reminderLines
         ].join('\n')
       };
     }

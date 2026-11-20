@@ -6,7 +6,6 @@ import {
   effectiveMission,
   emptyContract,
   formatAge,
-  matchScope,
   normalizeContract,
   openTodos,
   readContract,
@@ -18,7 +17,10 @@ import {
   writeContract
 } from './core/contract.ts';
 import { checkEvidence } from './core/evidence.ts';
-import { firstHumanInstruction, latestRequestText, messageTextOf, resolveMissionAnchor } from './core/mission-resolve.ts';
+import { appendGateAudit, gateAuditFile } from './core/audit.ts';
+import { evaluate as evaluateGate, normalizeGateMode } from './core/gate.ts';
+import { GATE_TODO_LIMIT } from './constants.ts';
+import { firstHumanInstruction, messageTextOf, resolveMissionAnchor } from './core/mission-resolve.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { appendAudit, archiveAction, escalateAction, freezeAction, sanitizeReason as sanitizeActionReason } from './core/actions.ts';
@@ -599,11 +601,17 @@ export const __internals = {
   unfinishedTodos,
   stampTurn,
   openTodos,
-  matchScope,
   formatAge,
   resolveMissionAnchor,
-  latestRequestText,
   messageTextOf,
   firstHumanInstruction,
-  checkEvidence
+  checkEvidence,
+  // 0.9.2 (`11-20-collab-gate`): the collaboration gate is pure except for its
+  // one audit line, so the harness drives the real function (statement parsing,
+  // override validation, the overflow reminder) instead of a re-implementation.
+  evaluateGate,
+  normalizeGateMode,
+  appendGateAudit,
+  gateAuditFile,
+  GATE_TODO_LIMIT
 };
