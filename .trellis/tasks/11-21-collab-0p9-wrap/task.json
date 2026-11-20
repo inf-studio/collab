@@ -1,0 +1,30 @@
+{
+  "id": "collab-0p9-wrap",
+  "name": "collab-0p9-wrap",
+  "title": "0.9.x 复盘、看板契约与收尾",
+  "description": "3→2→1：先固化复盘与提案，再看板显示契约（徽标+详情，GUI+TUI），最后收尾（rebuild 重算 metrics + mac 验证 + 24h 对比）",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "@长久同学^v^",
+  "assignee": "@长久同学^v^",
+  "createdAt": "2026-11-21",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "11-21-collab-0p9-retro",
+    "11-21-collab-board-contract",
+    "11-21-collab-0p9-close"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
