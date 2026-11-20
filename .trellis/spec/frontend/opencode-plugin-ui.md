@@ -172,8 +172,12 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 
 ### 契约真源
 - `~/.config/opencode/collab-contract/<sid>.json`，五面 `mission / plan / todos / peers`（+ `turn` 计数位）。
-- `mission.confirmedBy` 一旦写入，`set` 必须带 `--reconfirm` 且 `by` 非空，否则拒绝——**自动推断永不覆盖人工确认**。
-- 主线锚解析顺序：会话指针 → 同工作区唯一 `in_progress` 任务 → 空（标 `[未确认]`）。**不要**用会话标题猜。
+- `mission.confirmedBy` 一旦写入，`set` 必须带 `--reconfirm` 且 `by` 非空，否则拒绝——**自动推断永不覆盖人工确认**。`confirm`/`reconfirm` 本身也必须带 `by`（缺省拒绝），否则人类确认与模型自确认不可区分。
+- 主线锚解析顺序：会话指针 → 同工作区唯一 `in_progress` 任务 → 空（标 `[未确认]`）。**不要**用会话标题猜；**2+ in_progress 时不猜**，无契约时静默、有契约时在 `[mission]` 行写明歧义并给可执行命令。
+- **序号分配必须在 per-session 串行段内**：`T<n>` / `M<n>` 的 `nextID` 与上限判断要放进 `updateContract(sid, mutate)` 里算，不能先读快照再 append——并发 tool call 会撞 id，`close` 会一次关两条（实测 `[T1,T1,T1]`）。
+- **读侧永不按总数截断 active 行**：只淘汰已关闭的历史（`KEEP_CLOSED`）；`MAX_OPEN` 与 `KEEP_CLOSED` 分开命名。写入前用返回值自检「刚写的行读得回」，否则拒绝静默丢行；`todoSeq` 记录历史最大序号（迁移取未裁剪原始行），保证 id 不复用。
+- **`turn.count` 每请求无条件推进**（契约存在即推进），不要和「有没有 todo 可比较」耦合；推进判定用 `>=`（同毫秒下严格 `>` 会漏计）。
+- `[未收尾]` 判定用「本轮开始时间」比较（`updatedAt <= startedAt`），语义是「本轮开始前未更新」；渲染发生在工具调用之前，本轮新建的行不会出现在本轮块里。
 
 ### 五段注入（硬上限 12 行）
 固定顺序累加，超限即停，被截断的段落**不出现**：
