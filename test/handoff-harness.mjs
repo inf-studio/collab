@@ -307,6 +307,13 @@ const collabConfigPath = join(dir, 'collab.json');
 // Must be set before the plugin module is imported: the path is read once at
 // module load, exactly like `COLLAB_BROADCAST_DIR`.
 process.env.COLLAB_CONFIG = collabConfigPath;
+// 0.9.6 (`11-20-collab-pacing`): this harness asserts "one send = one prompt"
+// on 274 checks, so it runs with the two pacing switches off. The batching /
+// no-increment behaviour has its own suite (`test/pacing.mjs`), and `windowMs:0`
+// is the documented rollback switch, so this also keeps it exercised.
+const PACING_OFF = { windowMs: 0, suppressNoDelta: false };
+writeFileSync(collabConfigPath, JSON.stringify(PACING_OFF, null, 2));
+process.env.COLLAB_PACING_FILE = join(dir, 'collab-pacing.json');
 
 // 0.6.0 (`collab_freeze`): the freeze file is global too. Read once at module
 // load, so it must be set before the plugin import (same as the config path).
@@ -852,7 +859,9 @@ const reportCount = () => allReports().length;
 const reportOf = sig => reportsOf(sig)[0];
 /** Write the plugin's `collab.json`; the config reader is mtime-cached. */
 const writeConfig = async config => {
-  writeFileSync(collabConfigPath, JSON.stringify(config, null, 2));
+  // 0.9.6: every dynamic config keeps the pacing switches off (see PACING_OFF);
+  // the harness is a delivery regression suite, not a batching one.
+  writeFileSync(collabConfigPath, JSON.stringify({ ...PACING_OFF, ...config }, null, 2));
   await settle(5);
 };
 /** `score` on the ranking line of `<sid>` (preview/confirmed broadcasts). */
@@ -8156,7 +8165,7 @@ expect(
 );
 // `dedupeWindowMs: 0` is the rollback switch.
 await settle(10);
-writeFileSync(collabConfigPath, JSON.stringify({ dedupeWindowMs: 0 }));
+writeFileSync(collabConfigPath, JSON.stringify({ ...PACING_OFF, dedupeWindowMs: 0 }));
 const s95OffBase = prompts.length;
 const S95_THREAD_OFF = 't_s95_off';
 await call(
@@ -8174,7 +8183,7 @@ expect(
   prompts.length === s95OffBase + 2 && s95OffSecond.startsWith('已投递'),
   `${prompts.length - s95OffBase} deliveries`
 );
-writeFileSync(collabConfigPath, JSON.stringify({}));
+writeFileSync(collabConfigPath, JSON.stringify(PACING_OFF));
 const s95Desc = String(tool('collab_send').description);
 expect(
   'S95 the collab_send description states the dedupe window and the 0 switch',
@@ -12139,7 +12148,7 @@ expect(
 );
 
 // --- S108i: `boardActions:false` hides the row but keeps the RPC callable.
-writeFileSync(collabConfigPath, JSON.stringify({ boardActions: false }));
+writeFileSync(collabConfigPath, JSON.stringify({ ...PACING_OFF, boardActions: false }));
 const s108SnapOff = await rpcHandlers.snapshot({});
 const s108J = await rpcHandlers.escalate({ target: S108_RO, reason: 'S108 关掉动作行仍可调用', session: S108_ME });
 expect(
@@ -12147,7 +12156,7 @@ expect(
   s108SnapOff.actions === false && s108J.ok === true,
   `actions=${s108SnapOff.actions} / escalate.ok=${s108J.ok}`
 );
-writeFileSync(collabConfigPath, JSON.stringify({}));
+writeFileSync(collabConfigPath, JSON.stringify(PACING_OFF));
 
 // --- S108j: a snapshot stays read-only (no audit line, no prompt, no write).
 const s108AuditMtime = statSync(auditFile).mtimeMs;

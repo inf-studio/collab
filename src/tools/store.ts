@@ -30,10 +30,12 @@ import type { ToolKit } from './shared.ts';
  * Actual ownership: `facts` is the 0.9.4 workspace ledger, whose truth is
  * `collab-facts.json` (**not projected here in 0.9.4**); `todos` / `progress`
  * mirror the workspace task layer but 0.9.1 keeps the contract as a separate
- * JSON truth; `decisions` arrives in 0.9.5, `metrics` in 0.9.6.
+ * JSON truth; `decisions` arrives in 0.9.5. `metrics` is written from 0.9.6 on
+ * (one row per local day, refreshed by the delivery path), so it is a real
+ * count now — not an "empty by design" label.
  */
 const EMPTY_LABEL: Record<string, string> = { facts: '真源在 collab-facts.json' };
-const EMPTY_BY_DESIGN = ['facts', 'todos', 'decisions', 'progress', 'metrics'];
+const EMPTY_BY_DESIGN = ['facts', 'todos', 'decisions', 'progress'];
 const tableLine = (counts: Record<string, number>, keys: string[]): string =>
   keys
     .map(key =>

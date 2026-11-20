@@ -3,6 +3,52 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.6] - 2026-11-20
+
+> **2min 批量投递 + 无增量不发**。消息间隔 p10 **6.6s** / p50 **20s** / p90 **90s**，最长连续 **151 条**
+> （间隔 <2min）；单小时峰值 209 KB（≈10 万 tokens）。每条都带完整状态镜像（431/624，**69%**），**纯短回执 0 条**
+> —— 没有一条消息是「收到，结束」。两条会话各 compaction 2 次，且都落在最忙时段。本版只改**投递时机与合并**：
+> 非紧急消息进 2 分钟窗口合并为一条（`items[]`），无增量只更新状态；`escalate` / `blocked` / 受保护目标 / 交接单
+> 一律直通。工具面 **28 不增**。
+
+### Added
+
+- **批量窗口（R1/D3）**：`src/core/pacing.ts` + `src/core/dispatch.ts` — 按 **target** 缓冲
+  （`~/.config/opencode/collab-pacing.json`，`COLLAB_PACING_FILE` 覆盖），窗口从**首个 item** 起算
+  `windowMs`（默认 **120000**，上限 30min），到期合并为 **一条** envelope（`items[]`）；`tmp+rename` +
+  `<file>.lock` 跨进程互斥；**定时器 `unref`**，`context` 钩子每轮先 `flushDueWindows()`（休眠 / 重载 / 崩溃后补投）。
+- **合并规则（R4）**：同 `thread + factId`（或同 `thread + 归一化正文`）窗口内合并为一条，**保留最后一条、位置不变**；
+  不同 thread 永不合并；合并后 `sentAt` = 首个 item 原始时间，每个 item 的 `sentAt` 原样进 `items[]`；
+  落库仍是**一条** `messages` 行（`msg_count` +1），每个 item 仍各写自己的 thread 行（`collab_wait` 不受影响）。
+- **无增量不发（R3）**：`src/core/delta.ts` — 四类增量（新事实 / 状态变化 / 本轮证据［`collab_progress` 或 `collab_decide answer`］/ 回答未答问题），全为否则不产生
+  消息；`kind=request`、结构化 `blocked`、`[handoff]` 行、`force:true` 一律算增量（不做正文关键词匹配）。
+  抑制时只写 `collab-pacing.json` 的计数 + 契约 `turn.noopCount` / `turn.lastNoopAt`，`collab_status` 多一行
+  「无增量抑制: N 次（最近 …）」。
+- **直通（R2）**：`escalate`（`core/actions.ts` 直接投递，实测 <10s）· 结构化 `blocked` · 受保护目标 ·
+  带 `bid` 的交接单（一个 `cid` 只能 ack 一单）· `force:true` · `windowMs:0`。`directKinds` 默认 **`[]`**：
+  escalate 根本不经 `dispatch`，那几条是**架构直通**，写进配置是死配置（复核 C10）。
+- **失败不丢（R5）**：flush 失败时整窗留在缓冲区（`attempts` / `nextAt`，**线性退避** `60s × attempts`（乘子上限 5）
+  且**无限重试**，不丢 item），下一次 timer / `context` 注入重投；超 5min 的投递记 `late_count`，照常投递、不重发。
+  只有 **`deliverPrompt` 抛错**才算投递失败；`recordMessage` / thread 写入 / memo / 指标刷新是**逐条 best-effort**，
+  失败只记日志 —— 否则一次记账失败会把已投出的整窗重新投一遍（复核 C2）。
+- **指标（R6）**：`metrics` 每日一行 `msg_count`（按 id 形状 `msg_…_r<n>` **排除重发行**）/ `noop_count` /
+  `late_count` / `median_gap_ms`（当天**全机**相邻消息间隔中位数）；`metrics` 表新增 `noop_count` / `late_count`
+  两列（`ensureSchema` 迁移）。
+
+### Changed
+
+- `PLUGIN_VERSION` / `package.json` / 桌面探针 → **0.9.6**；工具面 **28 不增**。
+- `collab_send` / `collab_reply` 的确认回执在窗口命中时为 `已进入投递窗口 → …`（`position` / `flush`），
+  **没有** `delivery` 字段（投递在 flush 时发生）；`collab_handoff` / `collab_escalate` 仍是立即投递 + `delivery`。
+- `collab_status` 无参模式新增只读的「投递窗口 / 无增量抑制」两行；`collab_index stats` 的 `metrics` 不再标「本版不写入」。
+- 既有测试套件（`facts` / `decide` / `gate` / `delivery-history` / `readonly-default` / `handoff-harness`）以
+  `windowMs:0` + `suppressNoDelta:false` 运行（逐条投递口径），批量行为由新增的 `test/pacing.mjs` 覆盖。
+
+### 回滚
+
+`collab.json` → `"windowMs": 0` + `"suppressNoDelta": false`（恢复 0.9.5 逐条投递）；删 `collab-pacing.json`；
+`git restore -- src/core/dispatch.ts src/core/pacing.ts src/core/delta.ts src/tools/{shared,send,reply,handoff,status}.ts src/config.ts src/hooks/context.ts`。
+
 ## [0.9.5] - 2026-11-20
 
 > **决策载具 + 角色四元组**。24 条交接的 `decisions[]` **全空**、`collab_decisions` 一次没用过；两条最大的

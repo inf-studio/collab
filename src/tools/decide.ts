@@ -24,7 +24,8 @@ import {
   derivePeerRoles,
   peerRolesOf,
   readContract,
-  recordPeers
+  recordPeers,
+  updateContractIfExists
 } from '../core/contract.ts';
 import {
   answerDecision,
@@ -314,6 +315,17 @@ export function decideTool(kit: ToolKit): ToolDefinition {
           };
         }
         const answered = await answerDecision({ key, id, answer, by: me, now });
+        // 0.9.6 (R3): an answered decision is an increment for the next message —
+        // stamp it so the delta gate does not suppress the report (best-effort:
+        // a session without a contract file keeps the `decision:` token path).
+        try {
+          await updateContractIfExists(me, current => ({
+            ...current,
+            turn: { ...current.turn, decisionAt: answered.decision.at || now }
+          }));
+        } catch {
+          /* the ledger write already happened; the stamp is only a hint */
+        }
         return {
           content: [
             `已回答 ${answered.decision.id}（key=${key}，by ${me}）`,

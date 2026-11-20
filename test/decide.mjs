@@ -54,6 +54,9 @@ process.env.COLLAB_DB_FILE = join(root, 'collab.db');
 process.env.COLLAB_BROADCAST_DIR = join(root, 'broadcast');
 process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_CONFIG = join(root, 'collab.json');
+// 0.9.6: one prompt per send (the pacing switches are covered by test/pacing.mjs).
+writeFileSync(process.env.COLLAB_CONFIG, JSON.stringify({ windowMs: 0, suppressNoDelta: false }));
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = join(root, 'locks');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(root, 'owner-queue');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
@@ -186,8 +189,8 @@ const THREAD_REMOTE = 't_decide_remote';
 // ============================================================ 1) surface
 section('1) surface: 28 tools + collab_decide');
 expect(
-  'PLUGIN_VERSION / package.json agree (0.9.5)',
-  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5',
+  'PLUGIN_VERSION / package.json agree (0.9.6)',
+  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
 expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);

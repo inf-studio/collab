@@ -257,10 +257,32 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `metrics.retracted` 要计 `settle` 覆盖（design 口径是 retract + supersede）；`retract` 不得清空已有 `supersededBy`。
 - 「stale 回复 ≤30% 原文」是**行为约定，不是闸门**（插件不生成模型回复，无法机器判定）：只保证注入逐字带指令，并把每次 stale 投递记入 `metrics.staleDeliveries` 供人工抽检。
 
-### 投递节奏
-- 非紧急消息进 2min 窗口合并；`escalate` / `blocked` / protected 直通（<10s）。
-- 无增量（无新事实、无状态变化、非回答）→ **不产生消息**，只写 `collab_status`。
-- 时效承诺 ≤5min；超时记 `metrics.late_count`，不重发。
+### 投递节奏（0.9.6 落地）
+- **窗口按 target**：`src/core/pacing.ts` + `src/core/dispatch.ts`；`windowMs` 默认 **120000**，从**首个 item** 起算；
+  合并成**一条** envelope（`items[]`，每条保留原始 `sentAt`；落库 1 行 = `msg_count` +1）。`windowMs:0` = 逐条（回滚）。
+- **直通**：`escalate` · 结构化 `blocked` · protected（含血缘）· 带 `bid` 的交接单（一个 `cid` 只能 ack 一单）·
+  `force:true` · `windowMs:0`。别把「同 thread 的重复回执」做成第二个投递通道——它在窗口内本来就合并。
+- **合并键**：`thread + factId`，否则 `thread + 归一化正文`；**命中时替换在原地**（保留最后一条、位置不变）；
+  不同 thread 永不合并正文。没有 thread 的 item 不参与合并。
+- **缓冲区是文件**（`collab-pacing.json`，`tmp+rename` + `<file>.lock`）：`setTimeout` **必须 `unref`**，
+  `context` 钩子每轮 `flushDueWindows()` 是**持久路径**（休眠 / 重载 / 崩溃后补投）。只靠内存变量会在 reload 时丢消息。
+- **失败不丢**：flush 抛错 → 整窗回缓冲区（`attempts` / `nextAt`，`PACING_RETRY_MS` 退避），不重发已投的窗。
+- **无增量不发**：`src/core/delta.ts` 四类（新事实 / 状态指纹变化 / `lastAdvancedAt` 前进 / 回答未答问题）；
+  `request` / `blocked` / `[handoff]` / `force` 一律算增量；**不做正文关键词匹配**（`[handoff]` 是协议标记）。抑制时
+  **不写 thread、不写消息历史**，只写 `collab-pacing.json` 计数 + 契约 `turn.noopCount/lastNoopAt`（`collab_status` 可见）。
+- **基线只在投递成功后推进**（`lastSent`）：被抑制 / 还在窗口里的条目不能推进基线，否则下一轮真增量会被误判为旧。
+- **时效承诺 ≤5min**：晚于 `首个 item + 5min` 记 `metrics.late_count`，照常投递，不重发。
+- **基线按对端各一份**（`lastSent` 键 = `${from}\u0000${target}`）：同一事实先发给 B 再发给 C **必须都投递**；
+  用 session 级键会静默丢掉第二个对端（复核 C1）。`todoHash` / `advancedAt` 也因此天然按对端各自比较。
+- **只有 `deliverPrompt` 抛错才是投递失败**；`recordMessage` / `threads.update` / memo / 指标刷新逐条 try/catch ——
+  否则一次记账失败会让已投出的整窗重投一遍（复核 C2）。
+- **`context` 钩子零窗口时不得写缓冲文件**（先无锁读，无到期窗口直接返回）；`flushAll` 之外不要为了「扫一遍」加锁。
+- **指标**：`metrics` 每日一行 `msg_count`（按 id 形状 `_r<n>` **排除重发行**）/ `noop_count` / `late_count` /
+  `median_gap_ms`（当天**全机**相邻间隔中位数）；
+  刷新由投递路径触发、≤1 分钟一次（`PACING_METRICS_TTL_MS`），`storage:"json"` 跳过。
+- 测试：`test/pacing.mjs`（120s 用注入时钟，不等真实 2 分钟）；变异 `PACING_TEST_WINDOW_MS=0` 必须让「10 条合并为 1」变红。
+  回放数字是**合成数据估计**（按 PRD gap 分位 + 151 连发重建、**两 target 轮转**）：25% 增量率 → 5.11× / p50 410s；
+  31% 是上界参考（4.46×），**不跨口径比较临界值**。
 
 ### 存储
 - JSON 是唯一真源（`collab-messages.jsonl` 存全文，超 1MB 分片）；`collab.db` 是**可重建投影**，删了不影响协作。

@@ -12,6 +12,7 @@ import {
   updateContractIfExists
 } from '../core/contract.ts';
 import { decideLine, expireConflictDecisions, openConflictDecision } from '../core/decisions.ts';
+import { flushDueWindows } from '../core/dispatch.ts';
 import { isAckText } from '../core/ack.ts';
 import { evaluate as evaluateDrift, markDrifted } from '../core/drift.ts';
 import { factInjection, markFactSeen, noteStaleDeliveries, readFactSeen, workspaceFacts, workspaceOf } from '../core/facts.ts';
@@ -478,6 +479,17 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
   return async function contextHook(event) {
     try {
       if (!event?.sessionID || !Array.isArray(event?.system)) return;
+      // 0.9.6 (`11-20-collab-pacing`, R1/R5): the durable half of the window.
+      // The timer is only a hint — a reload, a sleeping process or a failed
+      // flush leaves items in the buffer file, and this hook is where they are
+      // delivered. Runs before any block is built so a delivered batch is
+      // already part of this turn's world. Never throws (the outer catch).
+      try {
+        const flushed = await flushDueWindows();
+        if (flushed.failed) log(`pacing: ${flushed.failed} window(s) could not be delivered; kept for retry`);
+      } catch (error) {
+        log('pacing flush failed:', (error as Error)?.message ?? error);
+      }
       const blocks: string[] = [];
       // 0.9.1: the contract block leads — the mainline anchor and the open
       // todos are the frame the rest of the request should be read in. Its own

@@ -301,6 +301,10 @@ export function handoffTool(kit: ToolKit): ToolDefinition {
             body,
             ...(blockedText.length ? ['', ...blockedText] : [])
           ].join('\n'),
+          // 0.9.6 (`11-20-collab-pacing`): the `bid` is what keeps a hand-off out
+          // of the batching window — one `cid` can only ack one hand-off, and the
+          // record's `delivery` receipt must be written by the same call.
+          bid,
           confirm: true
         },
         kind: 'request',

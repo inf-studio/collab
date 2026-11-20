@@ -32,7 +32,16 @@ import { evaluate as evaluateDrift, markDrifted, driftUnresolved } from './core/
 import { normalizeWakeWhen, parseWakeWhen, wakeExpired, wakeLabel, wakePhrase } from './core/wake.ts';
 import { firstHumanInstruction, messageTextOf, resolveMissionAnchor } from './core/mission-resolve.ts';
 import { createConfigReader } from './config.ts';
-import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
+import {
+  COLLAB_TOOL_ACTIONS,
+  EVENT_TYPES,
+  PACING_FILE,
+  PACING_MAX_ITEMS,
+  PACING_RETRY_MS,
+  PACING_SLA_MS,
+  PACING_WINDOW_MAX_MS,
+  PACING_WINDOW_MS
+} from './constants.ts';
 import { appendAudit, archiveAction, escalateAction, freezeAction, sanitizeReason as sanitizeActionReason } from './core/actions.ts';
 import type { ActionContext } from './core/actions.ts';
 import { createHandoffChain } from './core/chain.ts';
@@ -43,6 +52,55 @@ import { allLocks, lockFile, normalizeResource, normalizeTtl, sanitizeReason, to
 import { countsOf, pendingCountOf } from './core/counts.ts';
 import { freezeFor, freezeNotice, freezeNoticeText, markFreezeNotified, mergeFreezes, readFreezes } from './core/freeze.ts';
 import { createLineage } from './core/lineage.ts';
+// 0.9.6 (`11-20-collab-pacing`): the window buffer + delta gate (exported for
+// the pacing test; the runtime itself is registered by `createToolKit`).
+import {
+  armedFlushes,
+  armFlush,
+  batchKind,
+  batchThread,
+  bumpCounter,
+  clearFlushTimers,
+  counterOf,
+  dayKey,
+  dayMessageTimes,
+  emptyPacingState,
+  isResendID,
+  medianGapMs,
+  mergeIntoWindow,
+  nextFlushAt,
+  normalizePacingState,
+  pacingBodyKey,
+  pacingDedupeKey,
+  pacingMetrics,
+  readPacing,
+  refreshMetrics,
+  renderWindow,
+  updatePacing,
+  windowDue,
+  windowFlushAt,
+  windowFor,
+  windowIsLate,
+  windowItems,
+  writePacing
+} from './core/pacing.ts';
+import {
+  configurePacingRuntime,
+  pacingRuntime,
+  enqueueWindow,
+  flushAllWindows,
+  flushDueWindows,
+  lastSentOf,
+  pacingCounters,
+  pacingPolicy,
+  pendingWindows,
+  noopInfo,
+  recordNoop,
+  recordSentBaseline,
+  resetPacingRuntime
+} from './core/dispatch.ts';
+import { computeDelta, deltaSnapshot, noDeltaLine, todoStatusHash } from './core/delta.ts';
+import { upsertMetrics } from './core/index-db.ts';
 import { allQueueItems, mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
@@ -765,5 +823,60 @@ export const __internals = {
   upsertPeers,
   deciderOf,
   recordPeers,
-  roleLine
+  roleLine,
+  // 0.9.6 (`11-20-collab-pacing`): the window buffer, the delta gate and the
+  // delivery policy. The pacing test drives the real functions with an injected
+  // clock (no waiting 2 minutes) and a temp state file.
+  PACING_FILE,
+  PACING_WINDOW_MS,
+  PACING_WINDOW_MAX_MS,
+  PACING_SLA_MS,
+  PACING_RETRY_MS,
+  PACING_MAX_ITEMS,
+  emptyPacingState,
+  normalizePacingState,
+  readPacing,
+  writePacing,
+  updatePacing,
+  windowFor,
+  mergeIntoWindow,
+  pacingDedupeKey,
+  pacingBodyKey,
+  windowDue,
+  windowFlushAt,
+  windowIsLate,
+  renderWindow,
+  windowItems,
+  batchKind,
+  batchThread,
+  medianGapMs,
+  dayKey,
+  dayMessageTimes,
+  pacingMetrics,
+  refreshMetrics,
+  isResendID,
+  counterOf,
+  bumpCounter,
+  armFlush,
+  armedFlushes,
+  clearFlushTimers,
+  nextFlushAt,
+  pacingPolicy,
+  configurePacingRuntime,
+  pacingRuntime,
+  resetPacingRuntime,
+  enqueueWindow,
+  flushDueWindows,
+  flushAllWindows,
+  pendingWindows,
+  noopInfo,
+  lastSentOf,
+  recordSentBaseline,
+  recordNoop,
+  pacingCounters,
+  computeDelta,
+  deltaSnapshot,
+  todoStatusHash,
+  noDeltaLine,
+  upsertMetrics
 };

@@ -327,6 +327,9 @@ opencode plugin add @inf-studio/collab@0.1.0
   "dedupeWindowMs": 60000,
   "awareness": "line",
   "boardActions": true,
+  "windowMs": 120000,
+  "directKinds": [],
+  "suppressNoDelta": true,
   "storage": "sqlite",
   "dbPath": "~/.config/opencode/collab.db",
   "report": { "to": "collab-maintainer" }
@@ -352,6 +355,16 @@ opencode plugin add @inf-studio/collab@0.1.0
 （空白折叠）完全一致的正文在窗口内重复提交时，`collab_send` / `collab_reply` 只投递第一次，后续**不投递、
 不追加 thread 消息**，回执写明「60s 内已有同文，未重复投递」并给出它在哪个 thread 发过（§11.9.4）。
 确需再发一条同样的正文 → 传 `force:true`（回执标注 `dedupeOverridden`）。
+
+`windowMs`（默认 **120000 = 2 分钟**，`0` 关闭）是**批量投递窗口**（§11.27）：非紧急消息按 target 进窗口，
+在**首个 item** 起算 2 分钟后合并为一条（`items[]`）投递；`0` 恢复 0.9.5 的逐条投递（回滚开关）。
+写错的值（`"2m"`、`-1`）回落默认，不会悄悄关掉窗口；上限 30 分钟（再宽是打字错误而不是策略）。
+
+`directKinds`（默认 **`[]`**）是**额外**的「不进窗口」kind 列表，只给调用方自己的 kind 用。**架构直通不靠它**：
+`escalate` 根本不经 `dispatch`（`core/actions.ts` 直接投递，<10s），`blocked` / 受保护目标 / 交接单 `bid` / `force`
+由 `pacingPolicy` 判定 —— 把 `"escalate"` 写进这个列表是死配置（0.9.6 复核 C10 已改默认值）。
+`suppressNoDelta`（默认 `true`）是「无增量不发」开关（§11.27）：本轮没有新事实 / 状态变化 / 证据，且不是在回答
+未答问题时，**不产生消息**，只把 `noopCount` / `lastNoopAt` 记进状态；`false` 恢复逐条发送。
 
 `awareness`（默认 **`"line"`**，`"off"` 关闭）是**自动感知**提示：`context` 注入末尾每会话每 10 分钟最多
 一行「本工作区候选 N · 其它工作区候选 M」，只读、不写记录、不投递（§11.15）。
@@ -2504,6 +2517,105 @@ conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **co
 旧 `decisions[]` 兼容 / `collab_todo close` 使用它）。
 **变异（强制）**：去掉 `normalizeQuestion`（hash 直接 sha1 原文）→ 「同问变体被拒」与「重复 open 0 写入」两条必红
 （实测退出码 1）；去掉 `.normalize('NFKC')` → 「全角数字同问被拒」必红（该行为由 S9 用例固定）。
+
+### 11.27 投递节奏与增量（0.9.6）
+
+> 问题（PRD）：消息间隔 **p10 6.6s / p50 20s / p90 90s**，最长连续 **151 条**（间隔 <2min）；单小时峰值 209 KB
+> （≈10 万 tokens）。每条消息都带完整状态镜像（431/624，**69%**），**纯短回执 0 条** —— 没有一条消息是
+> 「收到，结束」。两条会话各 compaction 2 次，且都落在最忙时段（12:02 / 00:46）。
+
+本版只改**投递时机与合并策略**：消息语义、闸门、存储格式都不变。
+
+#### 4 个问题
+
+| 问题 | 答案 |
+| --- | --- |
+| 什么时候发？ | 非紧急消息进 **`windowMs`（默认 120s）** 窗口；窗口从**首个 item** 起算，到期合并为 **1 条** envelope（`items[]`） |
+| 什么直接发？ | `escalate`（<10s）· 结构化 `blocked` · 受保护目标 · 带 `bid` 的交接单 · `force:true` · `windowMs:0` |
+| 什么不发？ | **无增量**：本轮没有新事实 / 状态变化 / 证据，且不是在回答未答问题 → 只记状态。告警 / BLOCKED / `[handoff]` 一律算增量 |
+| 发送失败怎么办？ | 整个窗口**留在缓冲区**（`nextAt` / `attempts`），下一次 timer / `context` 注入重投；**不丢 item、不重发已投的 item** |
+
+#### 存储
+
+```
+~/.config/opencode/collab-pacing.json     # 缓冲区 + 计数（COLLAB_PACING_FILE 覆盖）
+{ "v": 1,
+  "windows": [{ "target": "ses_…", "openedAt": 1763000000000,
+                "items": [{ "id": "msg_…", "threadId": "t_…", "kind": "note", "body": "…",
+                            "sentAt": 1763000000000, "from": "ses_…", "fromLabel": "A",
+                            "factId": "F3", "baseline": { "facts": ["F3"], "todoHash": "…", "advancedAt": 0 } }],
+                "attempts": 0, "nextAt": 0 }],
+  "counters": { "2026-11-20": { "noop": 3, "late": 0 } },
+  "lastSent": { "ses_a\u0000ses_b": { "facts": ["F1"], "todoHash": "a1b2", "advancedAt": 0, "at": 0 } },
+  "noops":    { "ses_…": { "count": 3, "at": 1763000000000 } } }
+```
+
+- 全局文件（窗口按 **target 会话**，target 可能在别的 workspace）；`tmp + rename` + `<file>.lock`（跨进程互斥）；
+  坏文件降级为空，不抛错；
+- **定时器 `unref`**：一个待发窗口不是进程活下去的理由；`context` 钩子是**持久兜底**（进程休眠 / 重载 / 崩溃后补投）；
+- `lastSent` 是**增量基线**（对方真正收到了什么），只在投递成功后推进 —— 被抑制或被窗口合并的条目不推进。
+
+#### 合并规则（`items[]`）
+
+- 同一 `thread + factId`（或同 `thread + 归一化正文`）在窗口内合并为**一条**：保留**最后一条**的内容，
+  **位置不变**（顺序不打乱）；不同 thread 永远是不同 item（绝不跨 thread 合并正文）；
+- 合并后的 envelope `sentAt` = **首个 item 的原始时间**，每个 item 自己的 `sentAt` 原样进 `items[]`；
+- 落库仍是**一条** `messages` 行（`msg_count` +1，不是 +N），`items[]` 跟着信封进 JSONL 与投影；
+- 每个 item 仍然**各自写 thread 行**（原 `sentAt`、各自 cid），所以 `collab_wait` / `collab_inbox` 照常可用；
+- 端点文案：`已进入投递窗口 → <target>`（`position` / `flush` / `window-dedupe=…`），**没有** `delivery` 字段
+  ——真正投递发生在 flush。
+
+#### 无增量不发（`suppressNoDelta`）
+
+四类增量（全为否 → 不发）：
+
+| 来源 | 判定 |
+| --- | --- |
+| 新事实 | `factIds` 里有 `lastSent.facts` 没发过的 id |
+| 状态变化 | 契约 todo 状态 / 里程碑 / 任务状态指纹（`todoStatusHash`）与上次投递不同 |
+| 本轮证据 | `plan.lastAdvancedAt` 前进（`collab_progress` 只认 evidence）**或** `turn.decisionAt` 前进（`collab_decide answer` 由本会话回答） |
+| 回答未答问题 | 本条是 `kind=reply`，且该 thread 仍是 `open`（最后一次是请求） |
+
+**保守三条**：`kind=request`（派活就是新信息）、结构化 `blocked`、正文含 `[handoff]`、`force:true` 一律放行；
+判定不做任何**正文关键词**匹配（只有 `[handoff]` 这个协议标记）。被抑制时：
+
+- **不投递、不写 thread、不写消息历史**；
+- 写 `collab-pacing.json` 的 `noops` + 当日 `counters.noop`，并在契约上记 `turn.noopCount` / `turn.lastNoopAt`（文件存在才写）；
+- `collab_status` 无参模式多一行：`无增量抑制: N 次（最近 …；确有新消息用 force:true 或先 settle 事实）`；
+- 端点回执给出四类口径与两条出路（`force:true` / 先 `collab_fact settle`）。
+
+#### 时效与指标
+
+- 承诺 **≤5min**（`windowMs` 120s + 投递/处理余量）：窗口实际投递晚于 `首个 item + 5min` → 记 `late_count`，
+  **照常投递、不重发**；
+- `collab.db` 的 `metrics` 每日一行：`msg_count`（按 id 形状 `msg_…_r<n>` **排除重发行**，与派生列
+  `messages.resend_of` 同一判据）· `noop_count` · `late_count` ·
+  `median_gap_ms`（当天**全机**相邻消息间隔中位数 —— 不分会话/对端）。刷新由投递路径触发，**最多 1 分钟一次**（`PACING_METRICS_TTL_MS`），
+  `storage:"json"` 时跳过（没有投影）；
+- `msg_count` 是**消息数**（一条批量 = 1），不是 item 数 —— 这正是「消息总量」的口径；
+- `rebuild` 不重建 `metrics`（它是可重建投影的派生值）：删库后当天那一行会在下一次投递刷新时重算。
+
+#### 回滚
+
+`collab.json` → `"windowMs": 0`（逐条投递）+ `"suppressNoDelta": false`（每条都发）即恢复 0.9.5 行为；
+缓冲里剩下的条目会在下一次 `context` 注入时按「过期窗口」补投。删 `collab-pacing.json` 只丢缓冲与计数
+（`metrics` 可从消息日志重建）。
+
+#### 验收
+
+`test/pacing.mjs`（**89 项**）：10 条非紧急 → 1 条（`items=10`、原始 `sentAt`、thread 顺序、每条各自 thread 行）·
+`escalate` 实测延迟 <10s 且不进窗口 · `blocked` 直通 · 同 thread+factId 合并（保留最后一条、位置不变）·
+同 thread 同文合并 / 不同 factId 不合并 / 跨 thread 不合并 · 无增量不发 + `collab_status` 计数 + `noop_count` + `decision:`/`[handoff]`/决策 answer 三条保守放行 ·
+**增量基线按对端**（同一事实 B 之后仍发给 C，再发 B 才抑制）· **记账失败不重投**（storage 写失败仍只投 1 次）·
+**零窗口时 `context` 不建缓冲文件** · `collab_wait` 对窗口内 thread 给 flush 时间 · 失败重放保留更早 `openedAt` ·
+窗口 item 上限（201 → 提前 flush，不丢 item）· 过期窗口由 `context` 补齐 · 超 5min 迟到仍投递且只投一次（`late_count`）· 直通四例（escalate / blocked / protected / bid）+ `windowMs:0` · 失败 flush 保留 item 并重投 ·
+`metrics` 四字段落库 + `resend_of` 排除 · 624 条回放（per-target p50 间隔、总量降幅）。
+**变异（强制）**：`PACING_TEST_WINDOW_MS=0 node test/pacing.mjs` → 「10 条合并为 1」必红（实测退出码 1）。
+
+**回放口径（合成数据估计，非线上实测）**：624 条按 PRD 的 gap 分位数（p10 6.6s / p50 20s / p90 90s）+
+「最长 151 条连续」的分簇结构重建，**两个 target 轮转**（单 target 会得到虚高上界），增量率按 **25%**
+（69% 是状态镜像）：per-target **p50 410s**、总量 **5.11×**。上界参考：把「所有非镜像消息都算增量」（31%）时为
+**4.46×** —— 两个口径的增量率不同，**不跨口径比较临界值**；降幅跟着**增量率**走（抑制才是主因，窗口只是把剩下的合并）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

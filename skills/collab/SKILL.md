@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork）、决策账本与角色（collab_decide：open/answer/supersede/list，key 是 threadID 或 bid，owner 独占 answer、提问方为当事人，同问去重、手工 open ≤3（conflict 单独配额），conflict 自动开决策且该 thread/bid 只读（任一方可 supersede，24h 自动解除），静态 [role:…] 并入 [mission]、[decide] 一行，decision:<key>#D# 单一 resolver），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork）、决策账本与角色（collab_decide：open/answer/supersede/list，key 是 threadID 或 bid，owner 独占 answer、提问方为当事人，同问去重、手工 open ≤3（conflict 单独配额），conflict 自动开决策且该 thread/bid 只读（任一方可 supersede，24h 自动解除），静态 [role:…] 并入 [mission]、[decide] 一行，decision:<key>#D# 单一 resolver）、投递节奏（0.9.6：非紧急消息 2 分钟窗口合并为一条 items[]，escalate/blocked/protected/交接单/force 直通，无增量不发只记 noopCount，定时器 unref + context 每轮补投），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -28,7 +28,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_threads` | `target`, `includeClosed?` | **与一个 target 的全部 thread**：threadID / kind（handoff\|messages）/ 状态 / 最近出入站摘要 / 唯一「← 建议继续」；默认只列未闭环，≤20 条 | 只读 |
 | `collab_escalate` | `bid?` / `threadID?` / `session?`, `reason`, `mode?`, `confirm` | **加急**：默认 `delivery:steer` 进对方当前轮；只读 agent → `queue(forced)`；受保护目标 → 0 投递 + urgent 队列项；回执打印**实际** delivery | 发消息 / 写队列 |
 | `collab_freeze` | `scope`(`session`/`workspace`/`bid`), `target?`, `reason`, `until?`, `freeze?`, `confirm` | **临时冻结**：对它的**新建**协作（handoff/broadcast/accept/escalate）可读拒绝，`until` 到期自动失效；通知一次；`freeze:false` 解冻；读取类只标 `[frozen]` | 写本地冻结文件 + 通知 |
-| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, blocked?, confirm` | 投递消息；`kind=request/reply/note`；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`）；`blocked?` 结构化 BLOCKED（0.7.0，见一点八·再补） | 发消息 |
+| `collab_send` | `target, text, kind?, threadID?, mode?, origin?, force?, blocked?, confirm` | 投递消息；`kind=request/reply/note`；**0.9.6 非紧急消息进 2min 窗口合并**（回执 `已进入投递窗口`，没有 `delivery`；`blocked`/`bid`/`force`/protected 直通；**无增量不发**，只记状态）；`origin?` 在正文首行写对接人（0.7.0）；`force?` 跳过正文去重（回执标 `dedupeOverridden`）；`blocked?` 结构化 BLOCKED（0.7.0，见一点八·再补） | 发消息 |
 | `collab_reply` | `threadID, text, force?, confirm` | 回执糖，target 由 thread 解析；`force?` 同上 | 发消息 |
 | `collab_handoff` | `target?, text, expected?, origin?, blocked?, confirm` | **同工作区**交接：选人 + 开 thread；`origin?` = 转发链起点（缺省继承）；`blocked?` = 把「卡住了」的结构化三段一起交给下一跳 | 发消息 |
 | `collab_broadcast` | `workspace, issuePath, expected?, agent?, agentConfirm?, origin?, confirm` | **跨工作区**交接：读提案 → 打分 → 全局交接文件 → 问 top-1 / 必要时拉新 | 发消息 + 可能建会话 |
@@ -593,6 +593,66 @@ collab_decide { action:"list", key:"t_mwoy…" }
 
 - **逃生口**：该 thread 的任一方都能 `supersede` 解除；**24h 未回答自动作废**（`by=system`），不会永久只读；
 - 不要在 thread 里继续争论——那正是这个开关要停掉的行为；有分歧就 `answer` 或 `supersede` 后重开。
+
+## 一点十七、投递节奏与增量（0.9.6）
+
+消息不是越勤越好：实测 p50 间隔 20s、最长 151 条连续（<2min），69% 是完整状态镜像，**纯短回执 0 条**。
+所以从 0.9.6 起有两条规则 —— **2 分钟合并** 与 **无增量不发**。
+
+### 什么时候会自动合并
+
+非紧急消息按 **target 会话**进窗口（默认 `windowMs=120000`），窗口从**第一条**起算，到期合并成 **1 条**
+（`items[]`，每条保留自己的 `sentAt` 与 thread 顺序）：
+
+```text
+collab_send { target:"ses_…", kind:"note", threadID:"t_…", text:"…", factIds:["F3"], confirm:true }
+  → 已进入投递窗口 → …  position=3  flush=12:02:00  window-dedupe=新条目
+```
+
+回执里**没有** `delivery` —— 投递发生在 flush，`collab_wait {threadID}` 在 flush 后才有内容。
+同一 `thread + factId`（或同 thread 同一句话）在窗口内**合并为一条**（保留最后一条，位置不变）。
+
+### 什么时候立即发（直通，不进窗口）
+
+| 情况 | 为什么 |
+| --- | --- |
+| `collab_escalate` | 加急承诺 <10s |
+| 结构化 `blocked` | 告警不是状态镜像 |
+| 目标在 `protect`（含血缘） | 缓冲不能变成「延迟进入封闭线」的通道 |
+| 带 `bid` 的交接单（`collab_handoff` / 回执） | 一个 `cid` 只能 ack 一单 |
+| `force:true` | 「我知道重复，现在发」 |
+| `windowMs:0` | 回滚开关（逐条投递） |
+
+### 「无增量不发」怎么判定（插件只看结构化信号）
+
+四类全为否才不发：**新事实**（`factIds` 里有没发过的 id）· **状态变化**（todo/里程碑/主线指纹变了）·
+**本轮证据**（`collab_progress` 点亮）· **回答未答问题**（`kind=reply` 且 thread 仍是 open）。
+`kind=request`、结构化 `blocked`、正文含 `[handoff]`、`force:true` **一律算增量**（不做正文关键词匹配）。
+
+不发时：
+
+- **不投递、不写 thread、不写消息历史**；
+- `collab_status`（无参）多一行：`无增量抑制: N 次（最近 …）`；
+- 要真发：`force:true`，或先留下结构化增量（`collab_fact settle` / `collab_todo` / `collab_progress`）。
+
+### 你要改的行为习惯
+
+- **别再发状态镜像**（「还在跑」「同上」「已同步」）：这类消息现在不产生消息。真有新信息就 `collab_fact settle` 一条；
+- **增量是「对端」维度的**：同一个事实先告诉 B、再告诉 C —— **两条都会发**（每个对端各收一次）；
+  只有「同一个对端」已经收到过才会抑制。多对端并行时不要以为「说过一次就够了」；
+- 纯短回执（「收到」）不必发 —— 不发就是正确回执，需要留痕时用 `collab_fact`；
+- 要立刻送达就 `collab_escalate`（或 `force:true`），不要用重复 `collab_send` 刷屏；
+- 窗口失败（宿主 5xx）时条目**留在缓冲区**重投，不会丢；超过 5min 的投递记 `late_count`。
+
+### 定时与补投
+
+缓冲区是文件（`~/.config/opencode/collab-pacing.json`），不是进程变量：定时器 `unref`，**每轮 `context` 注入
+先补投到期窗口**（休眠 / 重载 / 崩溃后都一样）。所以「窗口里的消息没到」先看 `collab_status` 的「投递窗口」行，
+再等下一轮注入，不要重发。
+
+### 回滚
+
+`collab.json` → `"windowMs": 0` + `"suppressNoDelta": false`（恢复 0.9.5 逐条投递）。
 
 ## 二、同工作区（local）
 

@@ -61,6 +61,9 @@ process.env.COLLAB_DB_FILE = join(root, 'collab.db');
 process.env.COLLAB_BROADCAST_DIR = join(root, 'broadcast');
 process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_CONFIG = join(root, 'collab.json');
+// 0.9.6 (`11-20-collab-pacing`): the window buffer is a global file too — keep
+// the operator's real one untouched (this suite never exercises batching).
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = join(root, 'locks');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(root, 'owner-queue');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
@@ -166,7 +169,7 @@ const blockLines = text => text.split('\n').filter(line => line.trim().length > 
 
 // ================================================================ 1) surface
 section('1) tool surface + version');
-expect('PLUGIN_VERSION / package.json agree (0.9.5)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
 for (const name of ['collab_mission', 'collab_progress', 'collab_todo']) {
   const registrations = tools.filter(definition => definition.name === name).length;

@@ -18,7 +18,7 @@
  */
 import { createHash } from 'node:crypto';
 import { MESSAGE_PART_BYTES } from '../constants.ts';
-import type { EnvelopeGrade, EnvelopeKind, MessageEnvelope } from '../types.ts';
+import type { EnvelopeGrade, EnvelopeItem, EnvelopeKind, MessageEnvelope } from '../types.ts';
 
 const KINDS: EnvelopeKind[] = ['request', 'reply', 'note', 'notify', 'ack'];
 const GRADES: EnvelopeGrade[] = ['measured', 'inferred', 'relayed', 'unknown'];
@@ -71,6 +71,8 @@ export function makeEnvelope(input: {
   grade?: EnvelopeGrade;
   factIds?: string[];
   deltaOnly?: boolean;
+  /** 0.9.6: the items a 2-minute batch merged into this one message. */
+  items?: EnvelopeItem[];
 }): MessageEnvelope {
   const sentAt = Number(input.sentAt) || Date.now();
   const kind = (KINDS as string[]).includes(input.kind) ? (input.kind as EnvelopeKind) : 'note';
@@ -88,8 +90,30 @@ export function makeEnvelope(input: {
     basedOn: input.basedOn ?? { facts: 0 },
     grade,
     ...(input.factIds?.length ? { factIds: [...input.factIds] } : {}),
-    ...(input.deltaOnly ? { deltaOnly: true } : {})
+    ...(input.deltaOnly ? { deltaOnly: true } : {}),
+    ...(input.items?.length ? { items: input.items.map(normalizeItem) } : {})
   };
+}
+
+/** One batch item, defensively normalised (a foreign `items[]` must not leak). */
+function normalizeItem(raw: EnvelopeItem): EnvelopeItem {
+  const threadId = String(raw?.threadId ?? '').trim();
+  return {
+    id: String(raw?.id ?? ''),
+    ...(threadId ? { threadId } : {}),
+    kind: String(raw?.kind ?? 'note'),
+    body: String(raw?.body ?? ''),
+    sentAt: Number(raw?.sentAt) || 0,
+    ...(Array.isArray(raw?.factIds) && raw.factIds.length ? { factIds: raw.factIds.map(String) } : {})
+  };
+}
+
+/** Keep only items that can be ordered and traced (an id and a real `sentAt`). */
+function normalizeItems(raw: unknown): EnvelopeItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(item => normalizeItem(item as EnvelopeItem))
+    .filter(item => Boolean(item.id) && item.sentAt > 0);
 }
 
 /**
@@ -187,6 +211,7 @@ function normalizeEnvelope(raw: unknown): MessageEnvelope | undefined {
     grade,
     ...(Array.isArray(value.factIds) ? { factIds: value.factIds.map(String) } : {}),
     ...(value.deltaOnly === true ? { deltaOnly: true } : {}),
+    ...(normalizeItems(value.items).length ? { items: normalizeItems(value.items) } : {}),
     ...(typeof value.sha256 === 'string' && value.sha256 ? { sha256: value.sha256 } : {}),
     ...(part ? { part } : {})
   };
@@ -224,7 +249,19 @@ export function mergeEnvelopeParts(parts: MessageEnvelope[]): MessageEnvelope | 
   return { ...rest, body };
 }
 
-/** What the `messages` row keeps in its `envelope` column: the head, no body copy. */
+/**
+ * What the `messages` row keeps in its `envelope` column: the head, **no body
+ * copy**. 0.9.6: a batched envelope carries `items[]`, whose bodies are already
+ * part of the rendered `body` — keeping them twice would double the projection
+ * for the exact messages this version exists to shrink. The item *identity*
+ * (id / thread / kind / sentAt / factIds) is kept, which is what queries need.
+ */
 export function envelopeHead(envelope: MessageEnvelope): string {
-  return JSON.stringify({ ...envelope, body: '', sha256: sha256(envelope.body) });
+  const items = envelope.items?.map(item => ({ ...item, body: '' }));
+  return JSON.stringify({
+    ...envelope,
+    body: '',
+    ...(items?.length ? { items } : {}),
+    sha256: sha256(envelope.body)
+  });
 }

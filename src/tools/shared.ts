@@ -11,6 +11,17 @@ import {
 import { deliveryLine, deliveryOf, deliveryVisible } from '../core/ack.ts';
 import type { HandoffChain } from '../core/chain.ts';
 import { allBroadcasts, mergeDelivery, readBroadcast, writeBroadcast } from '../core/claim.ts';
+import { readContract, updateContractIfExists } from '../core/contract.ts';
+import { computeDelta, deltaSnapshot, noDeltaLine } from '../core/delta.ts';
+import {
+  configurePacingRuntime,
+  enqueueWindow,
+  lastSentOf,
+  pacingPolicy,
+  pendingWindows,
+  recordNoop,
+  recordSentBaseline
+} from '../core/dispatch.ts';
 import { GuardConflictError, classify, deliveryFailure, invalid } from '../core/errors.ts';
 import { openConflictOf } from '../core/decisions.ts';
 import { recordMessage } from '../core/index-db.ts';
@@ -20,6 +31,7 @@ import { conflictRefusal, defineTerm, pairKey, recordConflict } from '../core/gl
 import { workspaceFacts, workspaceOf } from '../core/facts.ts';
 import { localSnapshot } from '../core/tri-state.ts';
 import { createLineage } from '../core/lineage.ts';
+import { batchKind, batchThread, refreshMetrics, renderWindow, windowFlushAt, windowItems } from '../core/pacing.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
@@ -32,14 +44,20 @@ import { errText, log } from '../log.ts';
 import type {
   BroadcastRecord,
   CollabContext,
+  DeltaSnapshot,
+  EnvelopeGrade,
+  EnvelopeItem,
   JsonObject,
+  MessageEnvelope,
+  PacingItem,
+  PacingWindow,
   SessionInfoLike,
   SessionPromptInput,
   SessionPromptResult,
   ToolContext,
   ToolResult
 } from '../types.ts';
-import { asObject, fmtTime, sessionState, shortID, truncate, truncateRaw } from '../util.ts';
+import { asObject, dedupe, fmtTime, sessionState, shortID, truncate, truncateRaw } from '../util.ts';
 
 /** `jsonInput` — the object schema every tool declares (extra keys refused). */
 export function jsonInput(schema: JsonObject): JsonObject {
@@ -511,6 +529,221 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     return undefined;
   }
 
+  /**
+   * One admitted message: prompt + message log + thread + memos + thread index.
+   * Extracted from `dispatch` in 0.9.6 so the batching path (`admitBatch`) and
+   * the direct path share **one** writer — a second implementation of this
+   * bookkeeping is exactly how a message ends up in the log but not in its
+   * thread.
+   */
+  async function admitOne(input: {
+    target: string;
+    from: string;
+    fromSession: string;
+    name?: string;
+    kind: string;
+    threadID?: string;
+    delivery: string;
+    body: string;
+    cid: string;
+    sentAt: number;
+    grade: EnvelopeGrade;
+    factIds: string[];
+    basedOn: MessageEnvelope['basedOn'];
+    bid?: string;
+  }): Promise<{ admitted?: SessionPromptResult; thread?: Awaited<ReturnType<ThreadStore['update']>> }> {
+    const config = readConfig();
+    const text = envelope({
+      from: input.from,
+      name: input.name,
+      kind: input.kind,
+      threadID: input.threadID,
+      body: input.body
+    });
+    const admitted = await deliverPrompt({
+      sessionID: input.target,
+      text,
+      delivery: input.delivery,
+      metadata: {
+        collab: {
+          from: input.from,
+          fromSessionID: input.fromSession,
+          cid: input.cid,
+          kind: input.kind,
+          threadID: input.threadID,
+          ts: input.sentAt,
+          grade: input.grade,
+          basedOn: input.basedOn,
+          ...(input.factIds.length ? { factIds: input.factIds } : {})
+        }
+      }
+    });
+    // 0.9.0 (`11-20-collab-store`, R1/R2): JSONL first (the truth), then the
+    // projection. Both are side paths — the host already admitted the message.
+    await recordMessage(
+      makeEnvelope({
+        id: `msg_${input.cid}`,
+        threadId: input.threadID,
+        from: input.fromSession,
+        to: input.target,
+        sentAt: input.sentAt,
+        kind: input.kind,
+        body: input.body,
+        basedOn: input.basedOn,
+        grade: input.grade,
+        ...(input.factIds.length ? { factIds: input.factIds } : {})
+      }),
+      { dbPath: config.dbPath, storage: config.storage }
+    );
+    const thread = input.threadID
+      ? await threads.update(input.threadID, current =>
+          appendThreadMessage(current, {
+            threadID: input.threadID!,
+            cid: input.cid,
+            kind: input.kind,
+            text: truncateRaw(input.body, INBOX_TEXT_LIMIT),
+            ts: Date.now(),
+            from: input.from,
+            fromSession: input.fromSession,
+            toSession: input.target
+          })
+        )
+      : undefined;
+    if (input.threadID) {
+      rememberSend(input.threadID, input.body, input.sentAt);
+      recordThread({
+        threadID: input.threadID,
+        target: input.target,
+        from: input.fromSession,
+        kind: 'messages',
+        text: input.body,
+        bid: input.bid || undefined,
+        now: input.sentAt
+      });
+    }
+    rememberTargetSend(input.target, input.threadID ?? '', input.body, input.sentAt, input.bid || undefined);
+    void refreshMetrics({ dbPath: config.dbPath, storage: config.storage }).catch(error =>
+      log('metrics refresh failed:', errText(error))
+    );
+    return { admitted, thread };
+  }
+
+  /**
+   * 0.9.6 (R1/R4/R5): deliver **one** window as **one** prompt carrying
+   * `items[]`. Every item keeps its own original `sentAt`, its own thread row
+   * and its own de-dup memo; the batch itself is one `msg_count` unit.
+   *
+   * A failure is reported, not swallowed: `flushDueWindows` puts the whole
+   * window back (older items first) and retries — no item is ever dropped.
+   */
+  async function admitBatch(window: PacingWindow): Promise<{ ok: boolean; reason?: string }> {
+    const config = readConfig();
+    const first = window.items[0];
+    const kind = batchKind(window.items);
+    const threadID = batchThread(window.items);
+    const cid = newCorrelationID();
+    const body = renderWindow(window, config.windowMs);
+    const sentAt = window.openedAt;
+    const items: EnvelopeItem[] = windowItems(window);
+    const factIds = dedupe(window.items.flatMap(item => item.factIds ?? []).map(String));
+
+    // 1) The delivery itself. **Only this** decides `ok:false` — a failure here
+    //    means the counterpart really received nothing, so the window goes back
+    //    to the buffer and is retried (0.9.6 C2).
+    try {
+      await deliverPrompt({
+        sessionID: window.target,
+        text: envelope({ from: first.fromLabel, name: first.name, kind, threadID, body }),
+        delivery: first.mode || 'queue',
+        metadata: {
+          collab: {
+            from: first.fromLabel,
+            fromSessionID: first.from,
+            cid,
+            kind,
+            threadID,
+            ts: sentAt,
+            grade: first.grade,
+            basedOn: first.basedOn,
+            ...(factIds.length ? { factIds } : {}),
+            batch: items.length
+          }
+        }
+      });
+    } catch (error) {
+      return { ok: false, reason: errText(error) };
+    }
+
+    // 2) Bookkeeping after a successful admission. A failure here must **never**
+    //    turn into `ok:false`: the message is already out, and returning a
+    //    failure would re-buffer the whole window and deliver it twice (the
+    //    0.9.5 behaviour was one try/catch around everything — review C2).
+    const note = (step: string, error: unknown): void =>
+      log(`pacing bookkeeping failed (${step}) for ${window.target}: ${errText(error)}; the batch was already delivered`);
+    try {
+      await recordMessage(
+        makeEnvelope({
+          id: `msg_${cid}`,
+          threadId: threadID,
+          from: first.from,
+          to: window.target,
+          sentAt,
+          kind,
+          body,
+          basedOn: first.basedOn,
+          grade: first.grade as EnvelopeGrade,
+          ...(factIds.length ? { factIds } : {}),
+          items
+        }),
+        { dbPath: config.dbPath, storage: config.storage }
+      );
+    } catch (error) {
+      note('message log', error);
+    }
+    for (const item of window.items) {
+      if (item.threadId) {
+        try {
+          await threads.update(item.threadId, current =>
+            appendThreadMessage(current, {
+              threadID: item.threadId!,
+              cid: item.id,
+              kind: item.kind,
+              text: truncateRaw(item.body, INBOX_TEXT_LIMIT),
+              ts: item.sentAt,
+              from: item.fromLabel,
+              fromSession: item.from,
+              toSession: window.target
+            })
+          );
+        } catch (error) {
+          note(`thread ${item.threadId}`, error);
+        }
+        try {
+          rememberSend(item.threadId, item.body, item.sentAt);
+          recordThread({
+            threadID: item.threadId,
+            target: window.target,
+            from: item.from,
+            kind: 'messages',
+            text: item.body,
+            now: item.sentAt
+          });
+        } catch (error) {
+          note(`thread index ${item.threadId}`, error);
+        }
+      }
+      try {
+        rememberTargetSend(window.target, item.threadId ?? '', item.body, item.sentAt);
+      } catch (error) {
+        note('de-dup memo', error);
+      }
+    }
+    void refreshMetrics({ dbPath: config.dbPath, storage: config.storage }).catch(error =>
+      log('metrics refresh failed:', errText(error))
+    );
+    return { ok: true };
+  }
+
   /** Delivery + thread bookkeeping shared by `collab_send` and `collab_reply`. */
   async function dispatch({
     context,
@@ -759,84 +992,133 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       ...localSnapshot({ workspace, epoch: workspaceFacts(workspace).epoch }),
       ...(factIds.length ? { factIds } : {})
     };
-    const admitted = await deliverPrompt({
-      sessionID,
-      text,
-      delivery,
-      metadata: {
-        collab: {
-          from,
-          fromSessionID: context?.sessionID ?? 'unknown',
-          cid,
-          kind,
-          threadID,
-          ts: admittedAt,
-          grade,
-          basedOn,
-          ...(factIds.length ? { factIds } : {})
+
+    // 0.9.6 (`11-20-collab-pacing`, R3): "no increment → no message". The gate is
+    // computed **after** every guard and de-dup (a refused / duplicate message
+    // must keep its own receipt) and **before** the delivery. A request, a
+    // structured BLOCKED, a `[handoff]` line and `force:true` are deltas by
+    // definition — the suppression only ever hits a status mirror.
+    const me0 = String(context?.sessionID ?? '').trim();
+    const contract = me0 ? readContract(me0) : undefined;
+    const answersOpen =
+      kind === 'reply' && threadID ? (await threads.read(threadID))?.status === 'open' : false;
+    const last = lastSentOf(me0, sessionID);
+    const delta = computeDelta({
+      kind,
+      factIds,
+      body,
+      contract,
+      ...(last ? { last } : {}),
+      answersOpen,
+      urgent: kind === 'request' || Boolean(input?.blocked) || Boolean(bid) || force
+    });
+    if (config.suppressNoDelta && !delta.any) {
+      await recordNoop(me0, admittedAt);
+      if (me0) {
+        try {
+          await updateContractIfExists(me0, current => ({
+            ...current,
+            turn: {
+              ...current.turn,
+              noopCount: (Number(current.turn?.noopCount) || 0) + 1,
+              lastNoopAt: admittedAt
+            }
+          }));
+        } catch (error) {
+          log('noop stamp failed:', errText(error));
         }
       }
+      return {
+        content: noDeltaLine({
+          kind,
+          ...(threadID ? { threadID } : {}),
+          target: sessionID,
+          ...(factIds.length ? { factIds } : {}),
+          windowMs: config.windowMs
+        }),
+        delivery: undefined
+      };
+    }
+    const baseline: DeltaSnapshot = deltaSnapshot({
+      contract,
+      factIds: dedupe([...(last?.facts ?? []), ...factIds]),
+      now: admittedAt
     });
 
-    // 0.9.0 (`11-20-collab-store`, R1/R2): the message history — JSONL first
-    // (the truth, full body), then the rebuildable SQLite projection. Both are
-    // side paths: the host already admitted the message, so a history failure is
-    // logged and can never turn a successful delivery into an error (R7). The
-    // `id` derives from the delivery `cid`, so a repeat of the same delivery
-    // (a re-sent `deliverAsk`) is one row, not two.
-    await recordMessage(
-      makeEnvelope({
+    // 0.9.6 (R1/R2): the window / direct decision. `blocked`, a `bid`, a
+    // protected target, `escalate` and `force:true` never enter the buffer —
+    // see `pacingPolicy`.
+    const policy = pacingPolicy({
+      kind,
+      blocked: Boolean(input?.blocked),
+      protectedTarget: Boolean(guard),
+      ...(bid ? { bid } : {}),
+      force,
+      mode: delivery,
+      windowMs: config.windowMs,
+      directKinds: config.directKinds
+    });
+    if (policy === 'window') {
+      const item: PacingItem = {
         id: `msg_${cid}`,
-        threadId: threadID,
-        from: context?.sessionID ?? from,
-        to: sessionID,
-        sentAt: admittedAt,
+        target: sessionID,
+        from: me0 || from,
+        fromLabel: from,
+        ...(name ? { name } : {}),
+        ...(threadID ? { threadId: threadID } : {}),
         kind,
         body,
-        basedOn,
+        sentAt: admittedAt,
         grade,
-        ...(factIds.length ? { factIds } : {})
-      }),
-      { dbPath: config.dbPath, storage: config.storage }
-    );
-
-    const thread = threadID
-      ? await threads.update(threadID, current =>
-          appendThreadMessage(current, {
-            threadID,
-            cid,
-            kind,
-            text: truncateRaw(body, INBOX_TEXT_LIMIT),
-            ts: Date.now(),
-            from,
-            fromSession: context?.sessionID ?? 'unknown',
-            toSession: sessionID
-          })
-        )
-      : undefined;
-
-    // R5 (0.6.0): remember this body for the in-process half of the check. A
-    // thread message is the persistent half and needs no memo.
-    if (threadID) rememberSend(threadID, body, admittedAt);
-    // 0.7.0 (`11-19-collab-threads`, R1): the thread index — written **only**
-    // here (a message the host really admitted), never for a preview / refusal.
-    // `collab_handoff` re-marks the same thread as `handoff` after its record
-    // exists; nothing else writes this file. A failure is a log line, not a
-    // delivery failure: the message is already out.
-    if (threadID) {
-      recordThread({
-        threadID,
-        target: sessionID,
-        from: context?.sessionID ?? 'unknown',
-        kind: 'messages',
-        text: body,
-        bid: bid || undefined,
-        now: admittedAt
-      });
+        basedOn,
+        mode: delivery,
+        ...(factIds.length ? { factIds } : {}),
+        ...(factIds.length ? { factId: factIds[0] } : {}),
+        ...(bid ? { bid } : {}),
+        baseline
+      };
+      const queued = await enqueueWindow(item, { windowMs: config.windowMs });
+      if (queued.queued) {
+        const flushAt = Number(queued.flushAt) || admittedAt + config.windowMs;
+        const position = queued.window?.items.length ?? 1;
+        return {
+          content: [
+            `已进入投递窗口 → ${targetLine}`,
+            `kind=${kind}  thread=${threadID}  status=-（尚未投递）`,
+            `mode=window(${Math.round(config.windowMs / 1000)}s)  position=${position}  flush=${fmtTime(flushAt)}  ` +
+              (queued.deduped ? 'window-dedupe=合并（同 thread + factId / 同文，保留最后一条）' : 'window-dedupe=新条目'),
+            ...tailNotes.map(note => `注: ${note}`),
+            '到期后合并为 **1 条** 消息（items[] 保留每条原始 sentAt 与先后顺序）；' +
+              '本条不计入已投递，也不写 thread（flush 时才写）。',
+            '直通（不进窗口）：escalate / blocked / 受保护目标 / 交接单（bid）/ force:true。' +
+              '要立即发送：force:true，或把 collab.json 的 windowMs 设为 0。'
+          ].join('\n'),
+          delivery: undefined
+        };
+      }
+      tailNotes.push(`投递窗口不可用（${queued.reason ?? '原因未知'}）：本条改为立即投递。`);
     }
-    // R1 (0.7.0, `11-19-collab-dedupe-target`): the target half — whichever
-    // thread carried it, this body just reached this session.
-    rememberTargetSend(sessionID, threadID ?? '', body, admittedAt, bid || undefined);
+
+    const { admitted, thread } = await admitOne({
+      target: sessionID,
+      from,
+      fromSession: me0 || from,
+      ...(name ? { name } : {}),
+      kind,
+      ...(threadID ? { threadID } : {}),
+      delivery,
+      body,
+      cid,
+      sentAt: admittedAt,
+      grade,
+      factIds,
+      basedOn,
+      ...(bid ? { bid } : {})
+    });
+
+    // 0.9.6: the counterpart has now really received this turn — the next delta
+    // is measured against what it knows, not against what we tried to send.
+    await recordSentBaseline(me0, sessionID, baseline);
 
     if (dedupeForced) {
       // R3: a forced repeat is delivered *and* marked — never a silent override.
@@ -888,6 +1170,20 @@ export function createToolKit(deps: ToolDeps): ToolKit {
 
     const initial = await threads.read(threadID);
     if (!initial) {
+      // 0.9.6 (C6): a `collab_send` / `collab_reply` inside the batching window
+      // has **not written its thread row yet** — saying "threadID 可能拼错"
+      // sends the caller hunting for a typo that does not exist.
+      const pending = pendingWindows().find(window =>
+        window.items.some(item => String(item.threadId ?? '') === threadID)
+      );
+      if (pending) {
+        const flushAt = windowFlushAt(pending, readConfig().windowMs);
+        throw invalid(
+          `thread ${threadID} 还在投递窗口（首条 ${fmtTime(pending.openedAt)} 起算，` +
+            `预计 ${fmtTime(flushAt)} 前投递）：flush 之后 thread 行才会写入。` +
+            `等一会儿再 collab_wait，或用 collab_status { threadID:"${threadID}" } 看窗口状态。`
+        );
+      }
       throw invalid(
         `没有 thread ${threadID}：threadID 可能拼错，或该 thread 由别的项目/目录（不同 location）创建。` +
           `请用 collab_inbox 核对 threadID；若请求刚发出，稍后重试。`
@@ -1067,6 +1363,15 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       .filter(record => deliveryVisible(record, now))
       .map(record => `${record.bid} ${deliveryLine(record, now)}`);
   }
+
+  // 0.9.6 (`11-20-collab-pacing`): the window's delivery path is this kernel
+  // (thread store, message log, memos). Registering it here means a flush — from
+  // the timer or from any `context` hook — writes exactly what a direct send
+  // writes, with no second implementation.
+  configurePacingRuntime({
+    windowMs: () => readConfig().windowMs,
+    deliverWindow: admitBatch
+  });
 
   return {
     deps,

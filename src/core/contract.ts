@@ -156,6 +156,20 @@ export interface ContractTurn {
    * next block say `[未处置]` even when the original trigger is gone.
    */
   driftAt?: number;
+  /**
+   * 0.9.6 (`11-20-collab-pacing`, R3): how many turns of this session were
+   * **withheld** because they carried no increment, and when the last one
+   * happened. The suppressed turn is not silent — `collab_status` shows it.
+   */
+  noopCount?: number;
+  lastNoopAt?: number;
+  /**
+   * 0.9.6 (R3): when this session last **answered** a decision as its owner.
+   * A message reporting that answer is an increment by definition (the PRD
+   * lists 「决策 answer」 explicitly), and this stamp is how the delta gate knows
+   * without matching prose.
+   */
+  decisionAt?: number;
 }
 
 export interface Contract {
@@ -560,7 +574,10 @@ export function normalizeContract(raw: unknown, sessionID: string): Contract {
       startedAt: num(turn.startedAt),
       lastAdvancedAt: num(turn.lastAdvancedAt),
       noAdvanceTurns: num(turn.noAdvanceTurns),
-      driftAt: num(turn.driftAt)
+      driftAt: num(turn.driftAt),
+      noopCount: num(turn.noopCount),
+      lastNoopAt: num(turn.lastNoopAt),
+      decisionAt: num(turn.decisionAt)
     }
   };
 }

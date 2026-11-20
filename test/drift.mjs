@@ -54,6 +54,9 @@ process.env.COLLAB_DB_FILE = join(root, 'collab.db');
 process.env.COLLAB_BROADCAST_DIR = join(root, 'broadcast');
 process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_CONFIG = join(root, 'collab.json');
+// 0.9.6 (`11-20-collab-pacing`): the window buffer is a global file too — keep
+// the operator's real one untouched (this suite never exercises batching).
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = join(root, 'locks');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(root, 'owner-queue');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
@@ -567,7 +570,7 @@ expect(
   !tools.some(definition => /drift|wake/.test(definition.name)),
   tools.map(definition => definition.name).join(',')
 );
-expect('PLUGIN_VERSION is 0.9.5', internals.PLUGIN_VERSION === '0.9.5' && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION is 0.9.6', internals.PLUGIN_VERSION === '0.9.6' && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect(
   'the drift threshold is 5 and the fallback 24h',
   internals.DRIFT_NO_ADVANCE_TURNS === 5 && internals.SUSPEND_FALLBACK_MS === 24 * 3_600_000,

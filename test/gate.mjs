@@ -56,13 +56,18 @@ process.env.COLLAB_MESSAGES_FILE = join(root, 'collab-messages.jsonl');
 process.env.COLLAB_DB_FILE = join(root, 'collab.db');
 process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_CONFIG = configFile;
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = join(root, 'locks');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(root, 'owner-queue');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
 process.env.COLLAB_GRANT_DIR = join(root, 'grants');
 process.env.COLLAB_REPORT_DIR = join(root, 'reports');
 for (const dir of ['locks', 'owner-queue', 'grants', 'reports']) mkdirSync(join(root, dir), { recursive: true });
-writeFileSync(configFile, JSON.stringify({}));
+// 0.9.6 (`11-20-collab-pacing`): one prompt per send — the pacing switches are
+// covered by `test/pacing.mjs`; this suite asserts delivery, not batching.
+writeFileSync(configFile, JSON.stringify({ windowMs: 0, suppressNoDelta: false }));
+// 0.9.6: one prompt per send (the pacing switches are covered by test/pacing.mjs).
+
 writeFileSync(join(peer, 'docs', 'issues', 'fix-peer.md'), '# fix-peer\n\n一条测试提案，没有文件路径。\n');
 
 const dist = resolve(import.meta.dirname, '../dist/index.js');
@@ -217,7 +222,7 @@ const eight = [...Array(4).fill('open'), ...Array(4).fill('doing'), 'closed', 'd
 
 // ================================================================ 1) surface
 section('1) tool surface 26 → 27 (the facts ledger)');
-expect('PLUGIN_VERSION / package.json agree (0.9.5)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
 expect('the gate is exported for direct testing', typeof internals.evaluateGate === 'function');
 expect('GATE_TODO_LIMIT is 8', internals.GATE_TODO_LIMIT === 8, String(internals.GATE_TODO_LIMIT));

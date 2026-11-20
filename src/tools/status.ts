@@ -25,6 +25,8 @@
 import { BCAST_DONE_STATES, STORAGE_ALIASES, THREAD_STATUS_MESSAGES, THREAD_SUMMARY_CHARS } from '../constants.ts';
 import { deliveryOf, unackedDue } from '../core/ack.ts';
 import { allBroadcasts, isValidBid, leaseVerdict, readBroadcast } from '../core/claim.ts';
+import { readContract } from '../core/contract.ts';
+import { noopInfo, pendingWindows } from '../core/dispatch.ts';
 import { preferredBroadcasts, preferredHandoff } from '../core/index-sync.ts';
 import { invalid } from '../core/errors.ts';
 import { createLineage } from '../core/lineage.ts';
@@ -80,6 +82,43 @@ function addresseeOf(record: BroadcastRecord, items: OwnerQueueItem[]): string {
   const to = String(deliveryOf(record).to ?? '');
   if (to) return to;
   return String(items[items.length - 1]?.target ?? '');
+}
+
+/**
+ * 0.9.6 (`11-20-collab-pacing`, R1/R3): the two read-only pacing facts of a
+ * session — what is waiting in its own outbound window, and how many turns were
+ * withheld as "no increment". Read-only: the window is *reported*, not flushed
+ * (a status query is not a delivery, the same rule as the rest of this tool).
+ */
+function pacingLines(sessionID: string, now: number, windowMs: number): string[] {
+  const lines: string[] = [];
+  try {
+    const windows = pendingWindows().filter(window => window.items.some(item => item.from === sessionID));
+    if (windows.length) {
+      const items = windows.reduce((sum, window) => sum + window.items.length, 0);
+      const first = windows[0];
+      lines.push(
+        `  投递窗口: ${windows.length} 个（${items} 条待合并，最早 ${fmtTime(first.openedAt)} 起算，` +
+          `${Math.round(Math.max(0, windowMs) / 1000)}s 合并；下一次 context 注入会补投到期窗口）`
+      );
+    }
+  } catch {
+    /* an unreadable buffer is "no window", never a failed status */
+  }
+  // The pacing file is the authoritative counter (a session that never used a
+  // contract tool still has one); the contract stamp is the same number for a
+  // session that does have one.
+  const contract = readContract(sessionID);
+  const paced = noopInfo(sessionID);
+  const noopCount = Math.max(Number(contract.turn?.noopCount) || 0, paced.count);
+  const noopAt = Math.max(Number(contract.turn?.lastNoopAt) || 0, paced.at);
+  if (noopCount) {
+    lines.push(
+      `  无增量抑制: ${noopCount} 次（最近 ${fmtTime(noopAt)}；` +
+        '只更新状态、未产生消息；确有新消息用 force:true 或先 settle 事实）'
+    );
+  }
+  return lines;
 }
 
 /** `第 1/3 位` of the target's unread queue, or the read/finished wording. */
@@ -504,10 +543,15 @@ export function statusTool(kit: ToolKit): ToolDefinition {
       } else {
         const related = me ? records.filter(record => involved(record, me)) : [];
         const open = related.filter(record => !isClosed(record)).sort(newestFirst).slice(0, MAX_NO_INPUT);
+        // 0.9.6 (`11-20-collab-pacing`, R3/R1): the batching state is part of
+        // "where is this session" — a suppressed turn is visible here instead of
+        // being a message. Read-only: no flush, no state change.
+        const pacing = me ? pacingLines(me, now, config.windowMs) : [];
         if (!open.length) {
           return {
             content: [
               '当前没有未闭环交接。',
+              ...pacing,
               me ? '' : '（没有会话上下文：无法判断「本会话」，可显式传 bid / threadID / session。）',
               footer
             ]
@@ -517,6 +561,7 @@ export function statusTool(kit: ToolKit): ToolDefinition {
         }
         picks = await Promise.all(open.map(describe));
         header = `本会话相关的未闭环交接 ${picks.length} 条（按 updatedAt 倒序，最多 ${MAX_NO_INPUT} 条）:`;
+        if (pacing.length) header = [header, ...pacing].join('\n');
       }
 
       const blocks = picks.map(pick => formatBlock(pick, now));

@@ -9,7 +9,8 @@ import {
   DEFAULT_READONLY_AGENTS,
   LEGACY_ALIAS_PATH,
   LOCK_WAITER_TTL_MAX_MS,
-  LOCK_WAITER_TTL_MIN_MS
+  LOCK_WAITER_TTL_MIN_MS,
+  PACING_WINDOW_MAX_MS
 } from './constants.ts';
 import { homedir } from 'node:os';
 import type { CollabConfig } from './types.ts';
@@ -147,6 +148,24 @@ export function loadConfig(options: unknown): CollabConfig {
   const gate: 'enforce' | 'warn' | 'off' =
     rawGate === 'warn' || rawGate === 'off' ? rawGate : DEFAULTS.gate;
 
+  // 0.9.6 (`11-20-collab-pacing`, R1/R2/R3): the batching window + the two
+  // switches around it. Same rule as `waiterTtlMs`: a numeric option is checked
+  // before it is clamped, because `clamp("2m")` → NaN → **0** would silently
+  // disable batching, and `clamp(-1)` would too. `0` is a legal value (the
+  // rollback switch), so `> 0` is not required — only a finite non-negative
+  // number is accepted.
+  const rawWindow = file.windowMs ?? fromOptions.windowMs;
+  const windowMs =
+    typeof rawWindow === 'number' && Number.isFinite(rawWindow) && rawWindow >= 0
+      ? clamp(rawWindow, 0, PACING_WINDOW_MAX_MS)
+      : DEFAULTS.windowMs;
+  const rawDirect = file.directKinds ?? fromOptions.directKinds;
+  const directKinds = Array.isArray(rawDirect)
+    ? dedupe(rawDirect.map(kind => String(kind ?? '').trim()).filter(Boolean))
+    : [...DEFAULTS.directKinds];
+  const rawSuppress = file.suppressNoDelta ?? fromOptions.suppressNoDelta;
+  const suppressNoDelta = typeof rawSuppress === 'boolean' ? rawSuppress : DEFAULTS.suppressNoDelta;
+
   return {
     aliases,
     autoDeliver,
@@ -164,6 +183,9 @@ export function loadConfig(options: unknown): CollabConfig {
     storage,
     dbPath,
     gate,
+    windowMs,
+    directKinds,
+    suppressNoDelta,
     ...(reportTo || reportEnabled !== undefined
       ? { report: { ...(reportTo ? { to: reportTo } : {}), ...(reportEnabled !== undefined ? { enabled: reportEnabled } : {}) } }
       : {})

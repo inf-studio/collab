@@ -310,6 +310,68 @@ export async function recordMessage(envelope: MessageEnvelope, options: StoreOpt
   await indexInsert(envelope, options);
 }
 
+/**
+ * 0.9.6 (`11-20-collab-pacing`, R6): one row per local day in `metrics`.
+ *
+ * A partial row is a **merge**, not a replace (`COALESCE(excluded.x, metrics.x)`):
+ * the pacing path owns `msg_count` / `noop_count` / `late_count` /
+ * `median_gap_ms`, while the facts path writes `retract_count`. Two writers on
+ * the same day must not erase each other's fields — an omitted field keeps what
+ * is stored. Never throws: a failed metrics write is a log line, and the
+ * projection is rebuildable anyway.
+ */
+export interface MetricsRowInput {
+  day: string;
+  msg_count?: number;
+  fact_count?: number;
+  retract_count?: number;
+  idle_count?: number;
+  drift_ms?: number;
+  median_gap_ms?: number;
+  noop_count?: number;
+  late_count?: number;
+}
+
+const METRIC_FIELDS = [
+  'msg_count',
+  'fact_count',
+  'retract_count',
+  'idle_count',
+  'drift_ms',
+  'median_gap_ms',
+  'noop_count',
+  'late_count'
+] as const;
+
+export async function upsertMetrics(row: MetricsRowInput, options: StoreOptions = {}): Promise<boolean> {
+  const day = String(row?.day ?? '').trim();
+  if (!day) return false;
+  const dbPath = dbPathOf(options);
+  await waitForRebuild(dbPath);
+  const handle = await openIndex(options);
+  if (!handle) return false;
+  const values = METRIC_FIELDS.map(field => {
+    const value = row[field];
+    return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+  });
+  const columns = ['day', ...METRIC_FIELDS].join(', ');
+  const placeholders = ['?', ...METRIC_FIELDS.map(() => '?')].join(', ');
+  const updates = METRIC_FIELDS.map(field => `${field} = COALESCE(excluded.${field}, metrics.${field})`).join(', ');
+  try {
+    await withRetry(() =>
+      runSerial(`db:${handle.path}`, () =>
+        handle
+          .prepare(`INSERT INTO metrics (${columns}) VALUES (${placeholders}) ON CONFLICT(day) DO UPDATE SET ${updates}`)
+          .run(day, ...values)
+      )
+    );
+    return true;
+  } catch (error) {
+    log(`metrics insert failed (${errText(error)}); the projection can be rebuilt`);
+    return false;
+  }
+}
+
 /** Per-table checksum used by the idempotency test (`rebuild` twice). */
 export function tableChecksums(handle: DbHandle): Record<string, string> {
   const out: Record<string, string> = {};

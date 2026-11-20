@@ -66,6 +66,9 @@ process.env.COLLAB_CONTRACT_DIR = join(root, 'contract');
 process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 process.env.COLLAB_THREAD_INDEX_FILE = threadIndexFile;
 process.env.COLLAB_CONFIG = configFile;
+// 0.9.6 (`11-20-collab-pacing`): the window buffer is a global file too — keep
+// the operator's real one untouched (this suite never exercises batching).
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = lockDir;
 process.env.COLLAB_OWNER_QUEUE_DIR = ownerQueueDir;
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
@@ -168,8 +171,8 @@ expect(
   indexDescription.slice(0, 140)
 );
 expect(
-  'PLUGIN_VERSION 与 package.json 一致（0.9.5）',
-  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5',
+  'PLUGIN_VERSION 与 package.json 一致（0.9.6）',
+  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
 const runIndexTool = input => indexDefinition.execute(input, { sessionID: 'ses_tool' });
@@ -604,7 +607,8 @@ const p12 = spawnSync(process.execPath, ['--input-type=module', '-e', p12Code], 
     COLLAB_LOCK_DIR: join(p12Dir, 'locks'),
     COLLAB_OWNER_QUEUE_DIR: join(p12Dir, 'owner-queue'),
     COLLAB_THREAD_INDEX_FILE: join(p12Dir, 'collab-threads.json'),
-    COLLAB_CONFIG: join(p12Dir, 'collab.json')
+    COLLAB_CONFIG: join(p12Dir, 'collab.json'),
+    COLLAB_PACING_FILE: join(p12Dir, 'collab-pacing.json')
   },
   encoding: 'utf8'
 });

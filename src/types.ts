@@ -764,10 +764,115 @@ export interface MessageEnvelope {
   grade: EnvelopeGrade;
   factIds?: string[];
   deltaOnly?: boolean;
+  /**
+   * 0.9.6 (`11-20-collab-pacing`, R1): the items a 2-minute batch merged. A
+   * batch is **one** message (one prompt, one id, one `msg_count`) that carries
+   * `N` items, each with its own original `sentAt` — the receiver's ordering
+   * within a thread is the array order, never the flush time.
+   */
+  items?: EnvelopeItem[];
   /** sha256 of this line's body chunk (hex). */
   sha256?: string;
   /** 0-based part index + total, only for a split body. */
   part?: { i: number; n: number };
+}
+
+/** One member of a batched message (0.9.6). */
+export interface EnvelopeItem {
+  /** `msg_…` — the id the item would have carried as a standalone message. */
+  id: string;
+  threadId?: string;
+  kind: string;
+  body: string;
+  /** The moment the item was handed to `collab_send` (never the flush time). */
+  sentAt: number;
+  factIds?: string[];
+}
+
+/**
+ * One buffered item of a per-target pacing window (0.9.6).
+ *
+ * It is *prepared* by `dispatch` (every guard / de-dup / delta decision has
+ * already run) and only delivered at flush, so the window can merge several
+ * items into one prompt without re-running any policy.
+ */
+export interface PacingItem extends EnvelopeItem {
+  /** Target session id. */
+  target: string;
+  /** Sender session id (`ses_…`). */
+  from: string;
+  /** Display label of the sender (alias / short id). */
+  fromLabel: string;
+  /** Sender title for the message header (already resolved, cached). */
+  name?: string;
+  grade: string;
+  basedOn: { repo?: Record<string, string>; env?: Record<string, string>; facts: number };
+  mode: string;
+  /** First cited fact — the second half of the window de-dup key (`thread+factId`). */
+  factId?: string;
+  /** Hand-off this item closes; a `bid` item is never windowed (lease + ack chain). */
+  bid?: string;
+  /** The delta baseline to record once this item is *delivered* (0.9.6 R3). */
+  baseline?: DeltaSnapshot;
+}
+
+/** One open window of the pacing buffer. */
+export interface PacingWindow {
+  target: string;
+  /** First item's send time — the flush timer starts here (design §3). */
+  openedAt: number;
+  items: PacingItem[];
+  /** Failed-flush retry moment (`0` = a normal window); never drops an item. */
+  nextAt?: number;
+  attempts?: number;
+}
+
+/** Per-day counters the `metrics` row cannot derive from the message log alone. */
+export interface PacingDayCounters {
+  noop: number;
+  late: number;
+}
+
+/** The pacing buffer + counters + the "last delivered" baselines (delta). */
+export interface PacingState {
+  v: 1;
+  windows: PacingWindow[];
+  counters: Record<string, PacingDayCounters>;
+  /** Per-session baseline of the last *delivered* message (0.9.6 R3). */
+  lastSent: Record<string, DeltaSnapshot>;
+  /**
+   * Per-session count of turns whose message was withheld as "no increment"
+   * (0.9.6 R3). It lives here — not only in the contract — because a session
+   * that never used a contract tool must still *see* that its turn was
+   * suppressed (`collab_status`), without this path creating a contract file.
+   */
+  noops: Record<string, { count: number; at: number }>;
+  /** Last metrics refresh (`0` = never) — the refresh is throttled. */
+  metricsAt?: number;
+}
+
+/** What the delta gate compares the current turn against (per session). */
+export interface DeltaSnapshot {
+  facts: string[];
+  todoHash: string;
+  advancedAt: number;
+  at: number;
+  /** When the session last answered a decision as its owner (0.9.6 R3). */
+  decisionAt?: number;
+}
+
+/** The four increment sources of 0.9.6 R3. */
+export interface DeltaVerdict {
+  hasNewFact: boolean;
+  hasStatusChange: boolean;
+  hasEvidence: boolean;
+  hasAnswer: boolean;
+  /** An alert / hand-off / blocked report — never suppressed. */
+  urgent: boolean;
+  /** `false` = nothing new: only `collab_status` is updated, no message. */
+  any: boolean;
+  /** Why it was kept (`fact:F1` / `todo` / `advance` / `answer` / `urgent`), for the receipt. */
+  why: string[];
 }
 
 /** One durable row of `collab.db`'s `messages` table (read-back shape). */
@@ -873,6 +978,24 @@ export interface CollabConfig {
    * `handoff` / `reply` / `send` never require a statement.
    */
   gate: 'enforce' | 'warn' | 'off';
+  /**
+   * 0.9.6 (`11-20-collab-pacing`, R1): the batching window in ms (default
+   * 120000). `0` = one message per send (the rollback switch, 0.9.5 behaviour).
+   */
+  windowMs: number;
+  /**
+   * 0.9.6 (R2): extra kinds that bypass the window (default `[]`). The
+   * architectural direct paths — `escalate` (never enters `dispatch`),
+   * structured `blocked`, a protected target, a hand-off `bid`, `force` — are
+   * decided by `pacingPolicy`, not by this list.
+   */
+  directKinds: string[];
+  /**
+   * 0.9.6 (R3): when true (default), a message whose turn carries no increment
+   * (no new fact, no status change, no evidence, not an answer) is **not**
+   * delivered — only `collab_status` records the suppressed turn.
+   */
+  suppressNoDelta: boolean;
   report?: ReportConfig;
 }
 

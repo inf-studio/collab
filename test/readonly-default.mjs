@@ -22,7 +22,7 @@
  * Runs in its own process with temp broadcast/grant dirs, so it never touches
  * `~/.config/opencode/collab-*`.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -32,6 +32,10 @@ process.env.COLLAB_GRANT_DIR = join(dir, 'grants');
 // Ignore the operator's real `collab.json`: this file tests the built-in
 // defaults, and a machine-local `allowWrite:true` would mask a regression.
 process.env.COLLAB_CONFIG = join(dir, 'collab.json');
+// 0.9.6 (`11-20-collab-pacing`): one prompt per send; the batching behaviour is
+// covered by `test/pacing.mjs`.
+writeFileSync(process.env.COLLAB_CONFIG, JSON.stringify({ windowMs: 0, suppressNoDelta: false }));
+process.env.COLLAB_PACING_FILE = join(dir, 'collab-pacing.json');
 // Defect evidence must not land in the operator's real report directory.
 process.env.COLLAB_REPORT_DIR = join(dir, 'reports');
 // Resource leases are global as well; keep them in the temp dir.

@@ -80,6 +80,40 @@ export const DEFAULT_READONLY_AGENTS = ['explore', 'plan'];
 export const DEFAULT_GATE_MODE = 'enforce';
 
 /**
+ * 0.9.6 (`11-20-collab-pacing`, R1–R5) — declared before `DEFAULTS` for the same
+ * module-evaluation reason as `DEFAULT_GATE_MODE`.
+ *
+ * The 2-minute batching window (D3): a non-urgent message is buffered per target;
+ * the window starts at its **first** item and flushes `windowMs` later as one
+ * envelope carrying `items[]`. `windowMs:0` is the rollback switch — every
+ * message goes out on its own, exactly as 0.9.5 did.
+ *
+ * The buffer lives in a global file (like the broadcast directory) so a plugin
+ * reload / a sleeping process does not lose it: the next `context` hook flushes
+ * every window that is past due. `COLLAB_PACING_FILE` overrides the path
+ * (harness / sandbox runs).
+ */
+export const PACING_FILE = process.env.COLLAB_PACING_FILE || join(homedir(), '.config', 'opencode', 'collab-pacing.json');
+/** Default window (D3). Config `windowMs`; `0` = off. */
+export const PACING_WINDOW_MS = 120_000;
+/** A window wider than this is a typo, not a batching policy (30min). */
+export const PACING_WINDOW_MAX_MS = 30 * 60 * 1000;
+/**
+ * The delivery promise (D11): a message reaches its target within 5 minutes.
+ * A window flushed later than `first.sentAt + PACING_SLA_MS` is counted in
+ * `metrics.late_count` — it is delivered anyway, never dropped and never re-sent.
+ */
+export const PACING_SLA_MS = 5 * 60 * 1000;
+/** A failed flush keeps its items and retries after this (no item is ever lost). */
+export const PACING_RETRY_MS = 60_000;
+/** Bound on one window: past this the flush is pulled forward (never dropped). */
+export const PACING_MAX_ITEMS = 200;
+/** Day-counter retention in `collab-pacing.json` (the DB keeps the real rows). */
+export const PACING_COUNTER_KEEP_DAYS = 30;
+/** Metrics are recomputed at most once per minute (cheap, but not per message). */
+export const PACING_METRICS_TTL_MS = 60_000;
+
+/**
  * Only inbox admissions matter for the unread queue. Event names come from the
  * server's own `V2Event` union, verified live by a probe plugin.
  */
@@ -126,7 +160,23 @@ export const DEFAULTS = {
    * refuses an out-of-scope `accept` / a new job while 8+ todos are open;
    * `warn` / `off` are the rollback switches.
    */
-  gate: DEFAULT_GATE_MODE as 'enforce' | 'warn' | 'off'
+  gate: DEFAULT_GATE_MODE as 'enforce' | 'warn' | 'off',
+  /**
+   * 0.9.6 (`11-20-collab-pacing`, R1): the batching window in ms. `0` restores
+   * the 0.9.5 behaviour (one prompt per message).
+   */
+  windowMs: PACING_WINDOW_MS,
+  /**
+   * 0.9.6 (R2): extra `kind`s that never enter the window. **Empty by default**
+   * on purpose: `escalate` / structured `blocked` / a protected target / a
+   * hand-off (`bid`) / `force` are *architectural* direct paths inside
+   * `pacingPolicy` — `escalate` does not even flow through `dispatch`
+   * (`core/actions.ts` delivers it), so listing it here would be dead config.
+   * The list exists for a caller that wants its own kind to bypass batching.
+   */
+  directKinds: [] as string[],
+  /** 0.9.6 (R3): suppress a message that carries no increment (default on). */
+  suppressNoDelta: true
 };
 
 // ------------------------------------------------- hand-off chain (broadcast)
@@ -393,6 +443,8 @@ export const DEDUPE_WINDOW_MAX_MS = 24 * 60 * 60 * 1000;
 export const DEDUPE_REPLY_LOOKBACK = 3;
 /** The in-process memo (records without a bid) is pruned above this size. */
 export const DEDUPE_MEMO_LIMIT = 200;
+
+// --------------------------------------------------------- pacing (0.9.6, R1–R5)
 
 // ------------------------------------------------------- delivery / ack (0.1.6)
 
@@ -697,4 +749,4 @@ export const DECISION_LIST_MAX = 20;
 export const CONFLICT_DECISION_OPTIONS = ['以我方为准', '以对方为准', '重新测量'];
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.5';
+export const PLUGIN_VERSION = '0.9.6';

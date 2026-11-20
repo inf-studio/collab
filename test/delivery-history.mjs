@@ -18,7 +18,7 @@
  *
  *   node test/delivery-history.mjs      # after `pnpm build`
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -48,6 +48,9 @@ process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
 process.env.COLLAB_AUDIT_FILE = join(root, 'collab-audit.jsonl');
 process.env.COLLAB_CONFIG = join(root, 'collab.json');
+// 0.9.6: one prompt per send (the pacing switches are covered by test/pacing.mjs).
+writeFileSync(process.env.COLLAB_CONFIG, JSON.stringify({ windowMs: 0, suppressNoDelta: false }));
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 // B1: a delivery test must never touch the operator's real history.
 const realMessages = join(homedir(), '.config', 'opencode', 'collab-messages.jsonl');
 const realDb = join(homedir(), '.config', 'opencode', 'collab.db');

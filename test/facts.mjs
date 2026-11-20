@@ -11,7 +11,7 @@
  * no `~/.config/opencode/collab-*`. `compare` is clock/git free (an explicit
  * local state), so the fresh/stale/conflict cases need no repository.
  *
- *   1. surface: 28 tools, `collab_fact` once, four actions, version 0.9.5
+ *   1. surface: 28 tools, `collab_fact` once, four actions, version 0.9.6
  *   2. settle + list: sequential ids, active visible, grade required,
  *      explicit `unknown` is listable as `grade=unknown`
  *   3. `relayed` / `unknown` facts are refused as evidence (by text and by
@@ -65,6 +65,12 @@ process.env.COLLAB_DB_FILE = join(root, 'collab.db');
 process.env.COLLAB_BROADCAST_DIR = join(root, 'broadcast');
 process.env.COLLAB_THREAD_INDEX_FILE = join(root, 'collab-threads.json');
 process.env.COLLAB_CONFIG = join(root, 'collab.json');
+// 0.9.6 (`11-20-collab-pacing`): this suite asserts one prompt per send, so it
+// runs with the two pacing switches off (`windowMs:0` = 0.9.5 behaviour,
+// `suppressNoDelta:false` = every message is a message). The pacing behaviour
+// itself is covered by `test/pacing.mjs`.
+writeFileSync(process.env.COLLAB_CONFIG, JSON.stringify({ windowMs: 0, suppressNoDelta: false }));
+process.env.COLLAB_PACING_FILE = join(root, 'collab-pacing.json');
 process.env.COLLAB_LOCK_DIR = join(root, 'locks');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(root, 'owner-queue');
 process.env.COLLAB_FREEZE_FILE = join(root, 'freeze.json');
@@ -197,7 +203,7 @@ const seedInbox = (sid, messages) =>
 
 // ============================================================ 1) surface
 section('1) surface: 28 tools + collab_fact');
-expect('PLUGIN_VERSION / package.json agree (0.9.5)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.5', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
 expect(
   'collab_fact is registered exactly once',
