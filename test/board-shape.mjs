@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 process.env.COLLAB_MESSAGES_FILE = join(tmpdir(), 'collab-test-messages.jsonl');
 process.env.COLLAB_DB_FILE = join(tmpdir(), 'collab-test.db');
+process.env.COLLAB_CONTRACT_DIR = join(tmpdir(), 'collab-test-contract');
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const built = await import(`file://${entry}`);

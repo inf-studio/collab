@@ -62,6 +62,7 @@ const lockDir = join(root, 'locks');
 const ownerQueueDir = join(root, 'owner-queue');
 process.env.COLLAB_MESSAGES_FILE = messagesFile;
 process.env.COLLAB_DB_FILE = dbPath;
+process.env.COLLAB_CONTRACT_DIR = join(root, 'contract');
 process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 process.env.COLLAB_THREAD_INDEX_FILE = threadIndexFile;
 process.env.COLLAB_CONFIG = configFile;
@@ -143,8 +144,8 @@ const dispose = await plugin.setup(host);
 const byName = name => registered.find(definition => definition.name === name);
 const indexDefinition = byName('collab_index');
 expect(
-  '工具面 22 → 23：collab_index 只注册一次，其余 22 个仍在',
-  registered.length === 23 && Boolean(indexDefinition),
+  '工具面 23 → 26：collab_index 只注册一次，0.9.1 的三个工具也在',
+  registered.length === 26 && Boolean(indexDefinition),
   `${registered.length} tool(s)`
 );
 expect(
@@ -167,8 +168,8 @@ expect(
   indexDescription.slice(0, 140)
 );
 expect(
-  'PLUGIN_VERSION 与 package.json 一致（0.9.0）',
-  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.0',
+  'PLUGIN_VERSION 与 package.json 一致（0.9.1）',
+  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.1',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
 const runIndexTool = input => indexDefinition.execute(input, { sessionID: 'ses_tool' });
@@ -598,6 +599,7 @@ const p12 = spawnSync(process.execPath, ['--input-type=module', '-e', p12Code], 
     P12_DIR: p12Dir,
     COLLAB_DB_FILE: join(p12Dir, 'collab.db'),
     COLLAB_MESSAGES_FILE: join(p12Dir, 'collab-messages.jsonl'),
+    COLLAB_CONTRACT_DIR: join(p12Dir, 'contract'),
     COLLAB_BROADCAST_DIR: p12Dir,
     COLLAB_LOCK_DIR: join(p12Dir, 'locks'),
     COLLAB_OWNER_QUEUE_DIR: join(p12Dir, 'owner-queue'),

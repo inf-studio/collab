@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十三个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储各一组）
+### 11.2 二十六个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -284,6 +284,9 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 | `collab_archive` | `{ bid?, session?, restore?, confirm }` | **归档 spawn 会话（0.5.0，归档 ≠ 删除）**：`PATCH /api/session/{id} { archived:true }`（宿主无 `session.update` 时走 `COLLAB_SERVER_URL` HTTP），会话与消息保留、记录 `state/receipt` 不变，`restore:true` → `archived:false` 并清 `archivedAt`。`bid` 只认得**本插件拉起的**会话（`claim.by`；spawn 租约过期后才被领取的取 `expiredClaim.by`），别的单一律报错并提示改用 `session` 直指；`confirm:false` 只预览。自动路径还有 10 分钟防抖（默认）/idle/未决引用/未读队列等门（见 §11.13），**手动工具跳过这些门**，但 `[protected*]` 一律拒绝 |
 | `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
+| `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by? }` | **会话契约主线（0.9.1）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 |
+| `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
+| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；上一轮未动的 `doing` 项标 `[未收尾]`。见 §11.22 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -1927,6 +1930,101 @@ collab_index { action:"backfill", confirm:true }             # 回填历史状�
 
 回滚：`rm -f ~/.config/opencode/collab.db* ~/.config/opencode/collab-messages*.jsonl`，或把
 `collab.json` 的 `storage` 设为 `"json"`（不删任何文件，纯 JSON 运行）。
+
+### 11.22 会话契约与五段注入（0.9.1）
+
+**为什么**：主线、边界、进度、待办过去只存在于对话里。会话 323 轮、人类只说 6 句时，
+主线 13:00 → 00:52 **10.8h 零推进、零提醒**；而旧注入是**一次性**的（展示后进 `injected[]` 注销），
+compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**契约文件**，并让模型**每轮**都看得到。
+
+#### 存储
+
+`~/.config/opencode/collab-contract/<sid>.json`（`COLLAB_CONTRACT_DIR` 可覆盖，测试/沙箱用）：
+
+```jsonc
+{
+  "v": 1, "sid": "ses_…", "updatedAt": 0,
+  "mission": { "taskPath": ".trellis/tasks/…", "oneLine": "…",
+               "inScope": [], "outOfScope": [], "handoffTo": {},
+               "state": "active|idle|suspended|done",
+               "confirmedBy": null, "confirmedAt": null },
+  "plan": { "milestones": [{ "id": "M1", "title": "…", "done": false,
+                             "evidence": null, "at": null }],
+            "lastAdvancedAt": 0 },
+  "todos": [{ "id": "T1", "kind": "mainline|collab", "subject": "…",
+              "status": "open|doing|blocked|suspended|closed|dropped",
+              "blockingOn": "me|<sid>", "parkedBy": null, "parkedAt": null,
+              "wakeWhen": null, "since": 0, "closedAt": null, "evidence": null }],
+  "peers": [],
+  "turn": { "count": 0, "lastAt": 0, "lastAdvancedAt": 0, "noAdvanceTurns": 0 }
+}
+```
+
+- 写路径 **tmp + rename**；读路径**惰性创建**——只读永远不落盘，第一次 `set/confirm/add/light/close/...` 才建文件；
+- 文件可手工编辑：读时逐字段归一化（未知字段丢弃、长度截断、枚举回落），坏文件不会让一次请求失败；
+- `mission.confirmedBy` 一旦写入，`set` 必须 `reconfirm:true` **且** `by` 非空——**自动推断永不覆盖人工确认**（D7）。
+
+#### 主线锚（`collab_mission get`）
+
+1. `<workspace>/.trellis/.runtime/sessions/<platform>_<sid>.json` 的 `current_task`（或 `task_path`，两种都收）；
+2. 该工作区 **恰好一个** `.trellis/tasks/<slug>/task.json` 且 `status:"in_progress"`；
+3. 都没有 → 空，注入显示 `[mission] … [未确认]`，提示 `collab_mission set`。
+
+不做标题猜测、不调用 `task.py`（每轮请求都跑 python 太重；指针文件是同一信息且已在磁盘上）。
+多个 `in_progress` → 明确报「多个候选，不猜」，要求手工指定。
+
+#### 进度只认证据（D20/D21）
+
+`collab_progress { action:"light", milestone:"M3", evidence:"commit:<sha>", confirm:true }`
+
+| 形式 | 校验 |
+| --- | --- |
+| `commit:<sha>` | `git cat-file -e <sha>^{commit}` 成功，且 `git merge-base --is-ancestor <sha> HEAD`（未合入不算） |
+| `file:<path>:<line>` | 文件存在且行数 ≥ `line`（`line` 可省 = 仅存在性） |
+| `test:<path>` | 测试报告 / 输出文件存在 |
+| `decision:<id>` | 某个 hand-off 记录的 `decisions[]` 里有该 id（`collab_decisions` 写入即为已决策；独立决策账本在 0.9.5） |
+
+- 无 evidence → **拒绝**；校验失败 → 拒绝并返回原因；不写入任何字段。
+- 点亮后 `plan.lastAdvancedAt = now`、`turn.noAdvanceTurns = 0`；同一 evidence 重复点亮**不重复推进**时间。
+- `close` 一个 todo 同样必填 evidence；四类可校验形式会先校验，自由文本只记录、不推进里程碑。
+- `suspend` 必填 `wakeWhen`（没有唤醒条件的挂起 = 工作永久消失）。
+
+#### 五段注入（每轮重算，不注销）
+
+固定顺序累加，**硬上限 12 行**，放不下的段落**整段丢弃**（不出现半截）：
+
+```
+[mission]  ≤3 行    一句话主线 · 任务路径 · [未确认] / 边界 · 状态 · 推进于 N 前 / 确认命令
+[todo]     ≤4 行    N open · M 需要你 · K 等对方 · 最老 T2 6.2h · 还有 7 条；随后 top3
+[drift]    ≤2 行    0.9.1 预留（不触发；0.9.3 填）
+[scope]    ≤2 行    仅当本轮消息命中 mission.outOfScope 时出现
+[progress] ≤2 行    done/total · 下一里程碑需要 evidence；或「未设置里程碑」
+```
+
+- **每轮重新计算、绝不写 `injected[]`**：这是与 0.5.x 一次性注入的关键差别，也是本版最重要的回归用例
+  （「连续两轮，第二轮仍含 `[mission]` 与 `[todo]`」）。
+- `[todo]` 只列 **top3**（`blockingOn=me` 优先，其次最老 `since`），头部给总数与「还有 N 条」；
+- `[scope]`：把**本轮最新一条消息正文**与 `outOfScope` 做关键词匹配；`|`（或 `｜`）分隔别名，
+  如 `"ws集群实施|ws 集群"`。命中才出现，行内给「转交（`mission.handoffTo[关键词]`）/ 拒绝 / 问 owner」三条路；
+- `[未收尾]`：插件**没有 idle 钩子**，改为**下一轮回溯**——上一轮结束时 `status:"doing"`、且本轮前未被更新
+  （`updatedAt ≤ turn.lastAt`）的 todo 标 `[未收尾]`。语义等价于「上一轮没收尾」，不承诺 idle 写入；
+- `turn` 计数器只在**契约文件已存在且有 todo** 时写（每轮一次 tmp+rename），没有契约的会话不会被 hook 建文件；
+- 该块排在注入最前（主线/待办是整体框架），失败独立兜底，不影响未读消息 / 交接 / 感知行。
+
+#### 配置与回滚
+
+- 目录固定为 `~/.config/opencode/collab-contract`，`COLLAB_CONTRACT_DIR` 覆盖（测试/沙箱）；
+- 回滚：`rm -rf ~/.config/opencode/collab-contract`，并 `git restore -- src/hooks/context.ts src/tools/index.ts`、
+  删除 `src/core/contract.ts` / `mission-resolve.ts` / `evidence.ts` / `src/tools/{mission,progress,todo}.ts`。
+
+#### 验收
+
+`test/contract-inject.mjs`（49 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
+无 evidence / 假 commit 拒绝 · 真 commit 点亮并推进时间 · 同 evidence 不重复推进 · confirm 后 set 拒绝 / reconfirm+by 通过 ·
+无任务仍显示 `[mission] … [未确认]` · 10 条 todo 只列 3 条 + 「还有 7 条」且整块 ≤12 行 ·
+suspend 缺 `wakeWhen` 拒绝 · close 缺 evidence / 文件不存在拒绝 · 截断时 `[progress]` 被整段丢弃 ·
+`[未收尾]` 下一轮标记 · 主线锚（指针 > 唯一任务 > 多任务不猜）· `get` 用会话首条人类指令作建议且不写盘。
+
 
 ## 12. 协作链路（handoff chain：local + peer）
 

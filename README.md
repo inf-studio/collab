@@ -41,6 +41,9 @@
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
 | `collab_archive`   | 归档/恢复某个会话（**不是删除**）：`PATCH { archived }`，会话与消息保留；spawn 会话在交接终态 10 分钟后自动归档（可 `archiveSpawned:false` 关闭） | 写会话归档位      |
 | `collab_index`     | **消息历史 / 可重建索引（0.9.0）**：`stats` 只读看投影（12 表 + FTS5，行数/backend/大小/`backfilled`，不可用回 `[索引不可用]`）；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建（锁 + tmp → fsync → 原子 rename，**幂等**，失败保留旧库）；`backfill` 只补状态级历史（不伪造正文）。快照 / `collab_status` / `collab_threads` 在投影**新鲜**时优先读它，否则回落 JSON | 读/写本地投影     |
+| `collab_mission`  | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 工作区唯一 `in_progress` 任务 → 空；不猜标题、不跑 python）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象；`confirm` 一次确认后**固定**，再改必须 `reconfirm:true` + `by`（自动推断永不覆盖人工确认） | 写本地契约        |
+| `collab_progress` | **里程碑（0.9.1）**：`list` 只读；`add` 规划 `M1`…；`light` **必须给可校验 evidence**（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），无 evidence 或校验失败一律拒绝；点亮后 `plan.lastAdvancedAt` 推进、`noAdvanceTurns` 归零 | 写本地契约        |
+| `collab_todo`     | **契约待办（0.9.1）**：`add`（`blockingOn`=`me` 或 `ses_…`，可 `status:"doing"`）/ `close`（必填 evidence）/ `defer` / `suspend`（必填 `wakeWhen`）/ `list`；`[todo]` 注入每轮只列 top3 + 计数，上一轮未动的 `doing` 标 `[未收尾]` | 写本地契约        |
 
 0.9.0 起每条投递（`send` / `reply` / 接管请求 / 加急 / 冻结通知 / 回执通知 / ack / 受限重发 / 缺陷上报）
 都会在 `~/.config/opencode/collab-messages.jsonl` 留一行全文信封，并投影到可随时删除重建的 `collab.db`。
@@ -49,6 +52,13 @@
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
+
+0.9.1 起 hook 的**最前面**多一个**五段式会话契约**块（每轮重新计算、**不写 `injected[]`**、硬上限 12 行）：
+`[mission]`（一句话主线 / 边界 / 状态 / 推进时间，未确认标 `[未确认]`）→ `[todo]`（N open · M 需要你 ·
+K 等对方 · 最老 T2 6.2h · 还有 N 条，随后 top3）→ `[drift]`（0.9.1 预留，不触发）→ `[scope]`（本轮消息命中
+`mission.outOfScope` 才出现，`|` 分隔别名）→ `[progress]`（done/total · 下一里程碑需要 evidence）。
+放不下的段落整段丢弃；`[未收尾]` 用「下一轮回溯」标记上一轮未更新的 `doing` 待办（插件没有 idle 钩子，
+不承诺 idle 写入）。契约存 `~/.config/opencode/collab-contract/<sid>.json`，读路径惰性创建、写路径 tmp+rename。
 0.7.0 起它在**末尾**再追加一行只读的**自动感知**提示（每会话每 10 分钟最多一次、预算满时最先让位）：
 `协作：本工作区候选 N（collab_handoff） · 其它工作区候选 M（collab_broadcast，需提案）`——
 只给数量与通道，不猜「该找谁」；`awareness:"off"` 关闭。受保护会话拿不到这一行。
@@ -287,11 +297,15 @@ opencode plugin remove @inf-studio/collab     # 包安装
 `protect` 与 `readonlyAgents` 都是**累加**的：内置项（schema 会话、长驻主线会话、
 `explore`/`plan`）永远生效，配置文件只能加、不能减。
 
+0.9.1 的会话契约目录固定为 `~/.config/opencode/collab-contract/`（一个会话一个 JSON），
+测试 / 沙箱可用 `COLLAB_CONTRACT_DIR` 覆盖；它不是 projection，删掉只丢契约（主线 / 里程碑 / 待办），
+不影响消息历史与协作状态。
+
 ## 版本兼容
 
 | 包版本  | OpenCode | Node      | 说明                                              |
 | ------- | -------- | --------- | ------------------------------------------------- |
-| `0.9.x` | `2.3.x`  | `>=22.18` | **0.9.0** 新增消息历史 + 可重建索引：每条投递写一行 `Envelope` 到 `collab-messages.jsonl`（全文，>1MB 分片），并投影到 `collab.db`（8 表 + FTS5，WAL）；新增 `collab_index`（`stats`/`rebuild`/`backfill`，22 → 23 个工具）；`storage:"json"` 回滚开关不 import sqlite；现有工具输出契约不变（读路径仍以 JSON 为真源，看板只多一个 `[索引不可用]` 标记） |
+| `0.9.x` | `2.3.x`  | `>=22.18` | **0.9.1** 新增会话契约（`collab_mission` / `collab_progress` / `collab_todo`，23 → 26 个工具）+ 每轮五段注入（`[mission]/[todo]/[drift]/[scope]/[progress]`，≤12 行，不写 `injected[]`）+ 主线锚解析 + evidence 校验（commit/file/test/decision）+ `[未收尾]` 回溯标记；**0.9.0** 新增消息历史 + 可重建索引：每条投递写一行 `Envelope` 到 `collab-messages.jsonl`（全文，>1MB 分片），并投影到 `collab.db`（8 表 + FTS5，WAL）；新增 `collab_index`（`stats`/`rebuild`/`backfill`，22 → 23 个工具）；`storage:"json"` 回滚开关不 import sqlite；现有工具输出契约不变（读路径仍以 JSON 为真源，看板只多一个 `[索引不可用]` 标记） |
 | `0.5.x` | `2.3.x`  | `>=22.18` | 只加**只读入口**：**0.5.3** 快照改为按「会话所属服务器」取 client（远端会话读远端 `server.client`，跨服务器切换不串台、迟到回包丢弃）+ 探针/面板标出数据源服务器 + 文档写明 Desktop 必须装在本机；**0.5.2** 修 R-7（切会话时在飞的请求会吞掉重载，`queue` 最多滞留 2 s 旧会话数字）+ 新增标题栏 `collab` pill 探针（无会话点击弹「已加载」toast）；0.5.1 新增 Desktop `collab.open` 命令（`mod+shift+l` / `/collab`）+ 会话头计数条（`session.header`）+ TUI 侧栏摘要点击展开/折叠；0.5.0 新增 spawn 会话自动归档。契约 / 工具 / RPC 形状不变 |
 | `0.4.x` | `2.3.x`  | `>=22.18` | 新增 `collab_request_owner`（受保护目标请求队列，pull 模型）+ `expected:"research"`；同工作区 `collab_broadcast` 改为拒绝（用 `collab_handoff`）；0.4.1 受保护注入按提案去重（追加提示与队列行合计 ≤3 行、只显示最新一条）；**0.4.2** 修复 GUI 首启看不到侧栏（入口判定死锁）+ 新增 TUI 状态视图（`./tui`，`/collab`）+ 快照增加 `queue`（本人提交给受保护会话的请求） |
 | `0.3.x` | `2.3.x`  | `>=22.18` | 新增**只读**桌面侧栏（`./gui-experimental`，experimental API）；工具与存储不变 |

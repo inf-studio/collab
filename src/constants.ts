@@ -487,6 +487,58 @@ export const REBUILD_SINCE_DAYS = 180;
 /** The two storage modes (`collab.json` → `storage`); anything else = `sqlite`. */
 export const STORAGE_MODES: string[] = ['sqlite', 'json'];
 
-/** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.0';
+// ------------------------------------------- session contract (0.9.1, `11-20-collab-contract`)
 
+/**
+ * 0.9.1 (R1): one JSON file per session holding the five faces
+ * (`mission / plan / todos / peers` + the `turn` counter). Like every other
+ * global path here it is a **global** directory (a session may work across
+ * workspaces) and `COLLAB_CONTRACT_DIR` overrides it for harness / sandbox runs.
+ *
+ * The file is created **lazily**: reading a contract never writes, only the
+ * first `collab_mission set/confirm` / `collab_progress` / `collab_todo` write
+ * creates it (design §3).
+ */
+export const CONTRACT_DIR =
+  process.env.COLLAB_CONTRACT_DIR || join(homedir(), '.config', 'opencode', 'collab-contract');
+/** The file shape this build writes; an unknown `v` is treated as empty + rewritten. */
+export const CONTRACT_VERSION = 1;
+
+/** `[mission] oneLine` is one line (whitespace collapsed) — cut here. */
+export const CONTRACT_ONE_LINE_LIMIT = 300;
+/** `inScope` / `outOfScope` are keyword lists: bounded so the injection stays readable. */
+export const CONTRACT_SCOPE_ITEMS = 20;
+export const CONTRACT_SCOPE_CHARS = 100;
+/** `handoffTo` maps an out-of-scope keyword to the session that owns it (0.9.2 reads it). */
+export const CONTRACT_HANDOFF_ITEMS = 20;
+/** One todo subject is one line — cut here. */
+export const CONTRACT_TODO_SUBJECT_LIMIT = 200;
+/** Hard cap on open todos: a full list refuses a new one (readable error, never evicts). */
+export const CONTRACT_TODO_LIMIT = 50;
+/** Milestones are 3–8 in practice; a typo must not grow the file forever. */
+export const CONTRACT_MILESTONE_LIMIT = 30;
+/** `wakeWhen` / `parkedBy` are one-liners shown in the injection. */
+export const CONTRACT_WAKE_CHARS = 120;
+/** `collab_todo list` renders at most this many open rows, then "还有 N 条". */
+export const CONTRACT_TODO_LIST_MAX = 20;
+
+/**
+ * 0.9.1 (R5): the five-section injection. Fixed order, accumulated, **stop at
+ * 12 lines** — a section that does not fit is dropped whole (never half shown).
+ * Todo is one header + top-3; mission is head + boundary + confirm hint.
+ * `drift` is a placeholder in this version (0.9.3 fills it), `scope` appears only
+ * on a keyword hit, `progress` only while milestones exist.
+ */
+export const INJECT_MAX_LINES = 12;
+export const INJECT_SECTION_LIMITS = {
+  mission: 3,
+  todo: 4,
+  drift: 2,
+  scope: 2,
+  progress: 2
+} as const;
+/** How many open todos the `[todo]` section lists before "还有 N 条". */
+export const INJECT_TODO_TOP = 3;
+
+/** Keep in sync with `package.json` (`the harness asserts equality`). */
+export const PLUGIN_VERSION = '0.9.1';

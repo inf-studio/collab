@@ -39,6 +39,7 @@ mkdirSync(broadcastDir, { recursive: true });
 
 process.env.COLLAB_MESSAGES_FILE = messagesFile;
 process.env.COLLAB_DB_FILE = dbPath;
+process.env.COLLAB_CONTRACT_DIR = join(root, 'contract');
 process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 process.env.COLLAB_LOCK_DIR = lockDir;
 process.env.COLLAB_OWNER_QUEUE_DIR = ownerQueueDir;

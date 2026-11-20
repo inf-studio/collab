@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十三个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮五段注入（[mission]/[todo]/[drift]/[scope]/[progress]，≤12 行、不写 injected[]），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -41,6 +41,9 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_report` | `note?, bid?, threadID?, confirm` | 上报疑似插件缺陷（证据脱敏落盘 + 可投递维护方） | 写本地证据（旁路） |
 | `collab_archive` | `bid?` / `session?`, `restore?`, `confirm` | **归档 ≠ 删除**：把 spawn 会话藏起来（`PATCH {archived:true}`，消息全留），`restore:true` 恢复；交接终态 10 分钟后自动归档 | 写会话归档位 |
 | `collab_index` | `action`（`rebuild`/`backfill`/`stats`）, `sinceDays?`, `confirm` | **消息历史索引（0.9.0）**：`stats` 只读；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 幂等重建 `collab.db`（失败保留旧库）；`backfill` 只补状态级历史（不伪造正文）。JSON 是真源，删库不影响协作；`storage:"json"` 时显示 `[索引不可用]` | 读/写本地投影 |
+| `collab_mission` | `action`(`get`/`set`/`confirm`), `oneLine?`, `taskPath?`, `inScope?`, `outOfScope?`, `handoffTo?`, `state?`, `reconfirm?`, `by?` | **会话契约主线（0.9.1）**：`get` 只读（主线锚：会话指针 → 唯一 `in_progress` 任务 → 空；不猜标题）；`set` 写主线/边界；`confirm` 一次固定，之后 `set` 必须 `reconfirm:true` + `by` | 写本地契约 |
+| `collab_progress` | `action`(`list`/`add`/`light`), `milestone`, `title?`, `evidence?`, `confirm` | **里程碑（0.9.1）**：`light` 必须给可校验 evidence（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`）；无 evidence 不点亮；点亮才推进 `lastAdvancedAt` | 写本地契约 |
+| `collab_todo` | `action`(`add`/`close`/`defer`/`suspend`/`list`), `id?`, `subject?`, `kind?`, `blockingOn?`, `status?`, `wakeWhen?`, `evidence?`, `reason?`, `until?`, `confirm` | **契约待办（0.9.1）**：`close` 必填 evidence；`suspend` 必填 `wakeWhen`；`add` 可 `status:"doing"`；注入只列 top3 + 计数，上一轮未动的 doing 标 `[未收尾]` | 写本地契约 |
 
 默认值：`kind=request`、`mode=queue`（不打断）、匹配分门槛 **80**、租约 **5 分钟**、`attempts>3` 转 `expired`。
 `expected` 三值：`implement`（默认，改代码）/ `review`（确认）/ **`research`**（只读排查 + 结论，对 `build` 也合法）。
@@ -332,7 +335,59 @@ A → B → C 时，B→C 的记录 `from` 只能是 B。没有 `origin` 时 C �
 - `origin` 只是展示：指向 `[protected*]` 也不会产生任何投递，护栏不因它放宽。
 - 人工转达时照三行写：`提案：<路径>` / `bid：b_…` / `对接人（非本单发起方）：ses_… @ <dir>`。
 
+## 一点十三、会话契约与五段注入（0.9.1）
+
+主线 / 边界 / 进度 / 待办过去只活在对话里：会话 323 轮、人类只说 6 句时，主线 10.8h 零推进、零提醒；
+旧注入展示一次就注销，compaction 后什么都不剩。0.9.1 把任务层写成契约文件，并**每轮**重新注入。
+
+### 怎么用（三条命令）
+
+```text
+# 1) 主线：有 Trellis 任务时会自动解析；没有就手工写 + 确认一次
+collab_mission { action:"get" }
+collab_mission { action:"set", oneLine:"排钟 B4 接线", inScope:["排钟"], outOfScope:["ws集群实施"], handoffTo:{"ws集群实施":"ses_…"} }
+collab_mission { action:"confirm", by:"human" }
+
+# 2) 进度：先规划，再用证据点亮（没有证据不亮）
+collab_progress { action:"add", milestone:"M1", title:"双写验证", confirm:true }
+collab_progress { action:"light", milestone:"M1", evidence:"commit:<sha>", confirm:true }
+
+# 3) 待办：close 必填 evidence；suspend 必填 wakeWhen
+collab_todo { action:"add", subject:"decide dev/prod 键空间", blockingOn:"me", confirm:true }
+collab_todo { action:"suspend", id:"T2", wakeWhen:"等 owner 回 D3", confirm:true }
+collab_todo { action:"close", id:"T1", evidence:"test:reports/e2e.txt", confirm:true }
+```
+
+### 注入长什么样（每轮，硬上限 12 行）
+
+```text
+[mission] 排钟 B4 接线 · .trellis/tasks/11-19-b4-wiring [未确认]
+  边界: 做 排钟 · 不做 ws集群实施 · 状态 active · 推进于 3.1h 前
+  确认: collab_mission { action:"confirm", by:"<你>" }
+[todo] 10 open · 4 需要你 · 2 等对方 · 最老 T2 6.2h · 还有 7 条
+  T2 decide dev/prod 键空间 → 需要你
+  T3 reply t_mwnmtb97 D1 记入 PRD → 等 ses_e176…
+[scope] 本条属「ws集群实施」→ outOfScope；正确动作：转交 ses_edc3… / 拒绝 / 问 owner
+[progress] 2/5 · 下一里程碑 M3「双写验证」需要 evidence
+```
+
+- 顺序固定：`mission ≤3 · todo ≤4 · drift ≤2 · scope ≤2 · progress ≤2`；放不下的段落**整段丢弃**；
+- **每轮重算、不写 `injected[]`**：第二轮、第三轮仍能看到 `[mission]` 与 `[todo]`；
+- `[scope]` 只在**本轮最新消息**命中 `outOfScope` 时出现（`|` 分隔别名，如 `"ws集群实施|ws 集群"`）；
+- `[drift]` 本版预留（0.9.3 才触发）；
+- `[未收尾]`：上一轮结束时 `doing` 且本轮前没被更新的 todo 会被标出——插件**没有 idle 钩子**，
+  这是下一轮回溯，不是「空闲时写入」；
+- 契约存 `~/.config/opencode/collab-contract/<sid>.json`，只读不建文件，写才 tmp+rename；
+  `COLLAB_CONTRACT_DIR` 可覆盖（测试）。
+
+### 别做
+
+- 不要用 `collab_progress` 点亮「我觉得做完了」——没有 evidence 会被拒绝，硬凑一个不存在的 commit 也会被拒；
+- 不要 `suspend` 一条没有唤醒条件的待办（会被拒绝）：写「等谁/等什么」；
+- 不要手改 `confirmedBy` 来绕确认：`set` 覆盖必须 `reconfirm:true` + `by`，这是为了让「谁改的主线」可追溯。
+
 ## 二、同工作区（local）
+
 
 ```text
 1) collab_handoff { text:"<要做什么 + 相关文件路径>", expected:"implement", confirm:true }

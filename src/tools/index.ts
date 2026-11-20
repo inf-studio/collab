@@ -8,6 +8,9 @@ import { grantTool } from './grant.ts';
 import { handoffTool } from './handoff.ts';
 import { inboxTool } from './inbox.ts';
 import { listTool } from './list.ts';
+import { missionTool } from './mission.ts';
+import { progressTool } from './progress.ts';
+import { todoTool } from './todo.ts';
 import { lockTool, locksTool, unlockTool } from './locks.ts';
 import { requestOwnerTool } from './owner-queue.ts';
 import { promoteTool } from './promote.ts';
@@ -60,7 +63,13 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     locksTool(kit),
     archiveTool(kit),
     // 0.9.0 (`11-20-collab-store`): the storage/projection commands, 22 → 23.
-    indexTool(kit)
+    indexTool(kit),
+    // 0.9.1 (`11-20-collab-contract`): the session contract, 23 → 26.
+    // `mission` = the anchor, `progress` = evidence-gated milestones,
+    // `todo` = the list the `[todo]` injection renders.
+    missionTool(kit),
+    progressTool(kit),
+    todoTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

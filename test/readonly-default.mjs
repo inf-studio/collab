@@ -58,6 +58,7 @@ const realStamp = () => {
 const realStampBefore = realStamp();
 process.env.COLLAB_MESSAGES_FILE = join(dir, 'collab-messages.jsonl');
 process.env.COLLAB_DB_FILE = join(dir, 'collab.db');
+process.env.COLLAB_CONTRACT_DIR = join(dir, 'contract');
 process.env.COLLAB_OWNER_QUEUE_DIR = join(dir, 'owner-queue');
 process.env.COLLAB_AUDIT_FILE = join(dir, 'collab-audit.jsonl');
 
@@ -167,7 +168,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the twenty-three collab_* tools + collab_report',
+  'R8 the package registers the twenty-six collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -192,7 +193,10 @@ expect(
       'collab_unlock',
       'collab_locks',
       'collab_archive',
-      'collab_index'
+      'collab_index',
+      'collab_mission',
+      'collab_progress',
+      'collab_todo'
     ].join(','),
   readonlyHost.tools.map(definition => definition.name).join(',')
 );

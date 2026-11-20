@@ -1,5 +1,24 @@
 import type { Plugin } from '@opencode/plugin';
 import { createContextHook } from './hooks/context.ts';
+import {
+  contractExists,
+  contractFile,
+  effectiveMission,
+  emptyContract,
+  formatAge,
+  matchScope,
+  normalizeContract,
+  openTodos,
+  readContract,
+  renderInjection,
+  stampTurn,
+  unfinishedTodos,
+  updateContract,
+  updateContractIfExists,
+  writeContract
+} from './core/contract.ts';
+import { checkEvidence } from './core/evidence.ts';
+import { firstHumanInstruction, latestRequestText, messageTextOf, resolveMissionAnchor } from './core/mission-resolve.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
 import { appendAudit, archiveAction, escalateAction, freezeAction, sanitizeReason as sanitizeActionReason } from './core/actions.ts';
@@ -563,5 +582,28 @@ export const __internals = {
   // delivery-history test drives the real functions (no second implementation).
   createHandoffChain,
   createReporter,
-  writeBroadcast
+  writeBroadcast,
+  // 0.9.1 (`11-20-collab-contract`): the contract store + the pure renderers.
+  // The replay test (two requests, both still carrying `[mission]`) and the
+  // truncation test need the real functions, not a re-implementation.
+  contractFile,
+  contractExists,
+  emptyContract,
+  readContract,
+  writeContract,
+  updateContract,
+  updateContractIfExists,
+  normalizeContract,
+  renderInjection,
+  effectiveMission,
+  unfinishedTodos,
+  stampTurn,
+  openTodos,
+  matchScope,
+  formatAge,
+  resolveMissionAnchor,
+  latestRequestText,
+  messageTextOf,
+  firstHumanInstruction,
+  checkEvidence
 };

@@ -1,11 +1,21 @@
 import { allBroadcasts } from '../core/claim.ts';
 import { createAwareness } from '../core/awareness.ts';
+import {
+  contractExists,
+  effectiveMission,
+  readContract,
+  renderInjection,
+  stampTurn,
+  unfinishedTodos,
+  updateContractIfExists
+} from '../core/contract.ts';
 import { isAckText } from '../core/ack.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
 import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
 import { reportDir, reportNoticeLine, takePendingNotice } from '../core/report.ts';
 import { formatStale, markShown, staleFor } from '../core/stale.ts';
+import { latestRequestText, resolveMissionAnchor } from '../core/mission-resolve.ts';
 import { normalizeKind, normalizeText, normalizeThreadID } from '../ids.ts';
 import { log } from '../log.ts';
 import type { ToolDeps } from '../tools/shared.ts';
@@ -36,6 +46,57 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     readConfig,
     listSessions: input => chain.listSessions(input)
   });
+
+  /**
+   * 0.9.1 (R5): the **five-section contract injection**, recomputed from the
+   * contract file on every request. Never writes `injected[]` and never
+   * suppresses a section because it was shown before — that once-only behaviour
+   * is exactly what the 0.5.x injection did wrong (PRD R5).
+   *
+   * Silent when the session has neither a contract file nor a task anchor: a
+   * session in a workspace with no Trellis task has no mainline to remind it of,
+   * and a `[mission] 未设置` line on every request would be noise, not memory.
+   *
+   * The only write is the `turn` stamp (`lastAt`), and only when a contract file
+   * already exists **and** it has todos: `[未收尾]` needs the previous request's
+   * boundary, and a session that never used a contract tool must not get a file
+   * created by the hook (lazy creation, design §3).
+   */
+  async function injectContract(event: ContextHookEvent): Promise<string | undefined> {
+    const sessionID = event?.sessionID;
+    if (!sessionID || !Array.isArray(event?.system)) return undefined;
+    const contract = readContract(sessionID);
+    const hasContract = contractExists(sessionID);
+    // A confirmed / manually set mission never borrows the anchor, so the task
+    // scan is skipped once the contract has one (it reads .trellis/tasks/*).
+    const missionSet = Boolean(contract.mission.confirmedBy) || Boolean(contract.mission.oneLine.trim());
+    const hint =
+      hasContract && missionSet ? undefined : resolveMissionAnchor(deps.ctx?.location?.directory, sessionID);
+    if (!hasContract && (!hint || hint.source === 'none')) return undefined;
+
+    const now = Date.now();
+    const result = renderInjection({
+      contract,
+      mission: effectiveMission(contract, hint),
+      unfinished: unfinishedTodos(contract),
+      // 0.9.3 fills `[drift]`; 0.9.1 reserves the slot and never triggers it.
+      drift: [],
+      messageText: latestRequestText(event),
+      now
+    });
+    if (!result.lines.length) return undefined;
+
+    if (contract.todos.length) {
+      try {
+        await updateContractIfExists(sessionID, current => stampTurn(current, now));
+      } catch (error) {
+        // The block is already built; a failed stamp only means `[未收尾]` is
+        // judged against the previous successful turn. Never fail the request.
+        log('contract turn stamp failed:', (error as Error)?.message ?? error);
+      }
+    }
+    return result.lines.join('\n');
+  }
 
   /**
    * Unread cross-session messages. Only messages that are neither already
@@ -242,6 +303,16 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     try {
       if (!event?.sessionID || !Array.isArray(event?.system)) return;
       const blocks: string[] = [];
+      // 0.9.1: the contract block leads — the mainline anchor and the open
+      // todos are the frame the rest of the request should be read in. Its own
+      // try/catch: a contract failure must not cost the inbox/hand-off lines.
+      let contractText: string | undefined;
+      try {
+        contractText = await injectContract(event);
+      } catch (error) {
+        log('contract injection failed:', (error as Error)?.message ?? error);
+      }
+      if (contractText) blocks.push(contractText);
       const inboxPart = await injectInbox(event);
       if (inboxPart.text) blocks.push(inboxPart.text);
       // Stale classes are computed *before* the chain refresh: that refresh

@@ -3,6 +3,62 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.1] - 2026-11-20
+
+> 主线开始有记忆：`collab-contract/<sid>.json` 存主线 / 里程碑 / 待办，`context` hook **每轮**重新注入五段
+> （`[mission] [todo] [drift] [scope] [progress]`，≤12 行）。旧的一次性注入（展示后进 `injected[]` 注销）
+> 在连续两轮用例下必红。工具面 **23 → 26**。
+
+### Added
+
+- **契约存储（R1）**：`~/.config/opencode/collab-contract/<sid>.json`，五面 `mission / plan / todos / peers`
+  （+ `turn` 计数）。写路径 `tmp + rename`；读路径**惰性创建**（只读不落盘）；坏字段逐项归一化，未知版本视为空。
+  `COLLAB_CONTRACT_DIR` 可覆盖（测试 / 沙箱）。
+- **`collab_mission`（R2）**：`get / set / confirm`。主线锚按「`.trellis/.runtime/sessions/*.json` 的
+  `current_task` → 工作区**恰好一个** `in_progress` 任务 → 空」解析，不猜标题、不跑 `task.py`；
+  多个 `in_progress` 明确报「不猜」。`confirm` 一次后固定，`set` 覆盖必须 `reconfirm:true` + 非空 `by`
+  ——**自动推断永不覆盖人工确认**（D7）。`get` 在无任务时用会话首条人类指令作建议，且不写盘。
+- **`collab_progress`（R3/D20）**：`list / add / light`。里程碑只能被**可校验 evidence** 点亮：
+  `commit:<sha>`（存在且是 HEAD 祖先）/ `file:<path>:<line>` / `test:<path>` / `decision:<id>`
+  （读 hand-off 的 `decisions[]`；独立决策账本在 0.9.5）。无 evidence / 校验失败 → 可读拒绝、0 写入；
+  点亮后 `plan.lastAdvancedAt = now`、`turn.noAdvanceTurns = 0`；同一 evidence 重复点亮不重复推进。
+- **`collab_todo`（R4）**：`add / close / defer / suspend / list`。`close` 必填 evidence（四类形式先校验）；
+  `suspend` 必填 `wakeWhen`；`add` 支持 `status:"doing"`（`[未收尾]` 的输入）。
+- **五段注入（R5）**：`[mission] ≤3 · [todo] ≤4 · [drift] ≤2 · [scope] ≤2 · [progress] ≤2`，固定顺序累加，
+  **超 12 行即停**、放不下的段落整段丢弃。**每轮重算、绝不写 `injected[]`**；`[todo]` 只列 top3 +
+  `还有 N 条`；`[scope]` 用本轮最新消息匹配 `outOfScope`（`|` 分隔别名），命中才出现并给「转交 / 拒绝 / 问 owner」。
+- **`[未收尾]`（R6 的实现偏差）**：插件没有 idle 钩子，改为**下一轮回溯**：上一轮结束时 `doing`、且本轮前
+  未被更新（`updatedAt ≤ turn.lastAt`）的 todo 标 `[未收尾]`。`turn` 只在契约文件已存在**且**有 todo 时写，
+  没有契约的会话不会被 hook 建文件。
+
+### Changed
+
+- `context` hook 的契约块排在最前，独立 try/catch：契约失败不影响未读消息 / 交接 / 感知行。
+- 工具注册顺序追加 `collab_mission` / `collab_progress` / `collab_todo`（`/api/tool` 读顺序，23 → 26）。
+  `collab_progress` / `collab_todo` 的写动作沿用插件约定：`confirm:true` 才写。
+- 版本三处同步：`package.json` / `src/constants.ts` / `src/gui.tsx` 探针（`0.9.1`）。
+
+### Tests
+
+- 新增 `test/contract-inject.mjs`（**49** 项）：工具面 / 连续两轮注入 / 无 evidence 与假 commit 拒绝 /
+  真 commit 点亮 + `lastAdvancedAt` / 同 evidence 不重复推进 / confirm 后 set 拒绝与 reconfirm 通过 /
+  无任务 `[mission] … [未确认]` / 10 条 todo 只列 3 条 + 「还有 7 条」/ suspend 缺 `wakeWhen` 拒绝 /
+  close 缺 evidence 与文件不存在拒绝 / 截断时 `[progress]` 整段丢弃 / `[未收尾]` 回溯 / 主线锚
+  （指针 > 唯一任务 > 多任务不猜）/ `get` 用首条人类指令建议且不写盘。
+- **变异实测**：注入改回「写 `injected[]` 后注销」→ `request 2 still carries [mission]` 等 6 项红（43/49）；
+  还原后 49/49。原始输出见任务报告。
+- **测试隔离**：所有导入 server 模块的套件新增 `COLLAB_CONTRACT_DIR` 固定到临时目录（0.9.0 的 B1 规则延续），
+  真实 `~/.config/opencode/collab-contract/` 不会被测试读写。
+- 回归：**900 + 13 + 20 + 53 + 54 + 30 + 49 + 9 + 60 + 47 + 82 = 1317**；工具数 **26**；
+  全段场景（mission+todo+drift+scope+progress）实测 **12 行**（恰好塞满）；10 条 todo 场景 **8 行**（3 条明细 + 还有 7 条）。
+
+### Notes（与 design 的偏差）
+
+- `decision:` evidence 在 0.9.1 读 hand-off 的 `decisions[]`（`collab_decisions` 写入即已决策）；
+  design §5 提到的独立决策账本要到 0.9.5，拒绝文案里已写明。
+- `[drift]` 本版只预留渲染位（生产路径永远传空）；截断顺序用纯函数 `renderInjection` 注入 drift 行验证。
+- `collab_todo add` 额外接受 `status:"open"|"doing"`：没有它就无法产生 `doing` 待办，`[未收尾]` 无从验证。
+
 ## [0.9.0] - 2026-11-20
 
 > 消息终于存下来了：每条投递写一行 `Envelope`（全文），旁边维护一份**可删可重建**的 SQLite 投影；
