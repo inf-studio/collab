@@ -43,8 +43,16 @@ import {
 } from '../constants.ts';
 import { log } from '../log.ts';
 import { asObject, dedupe, randToken, truncate } from '../util.ts';
+import { formatAge } from './age.ts';
 import { normalizeWakeWhen, wakePhrase } from './wake.ts';
 import type { WakeWhenValue } from './wake.ts';
+
+/**
+ * `3.1h` / `12m` / `2.4d` — the compact age used by the injection. Implemented
+ * in `core/age.ts` (pure, bundle-safe) and re-exported here for the server-side
+ * callers that have always imported it from this module.
+ */
+export { formatAge };
 
 export type MissionState = 'active' | 'idle' | 'suspended' | 'done';
 export type TodoStatus = 'open' | 'doing' | 'blocked' | 'suspended' | 'drifted' | 'closed' | 'dropped';
@@ -672,18 +680,6 @@ export function updateContractIfExists(
 }
 
 /* ---------------------------------------------------------------- derivation */
-
-/** `3.1h` / `12m` / `2.4d` — the compact age used by the injection. */
-export function formatAge(ms: number): string {
-  const value = Math.max(0, Number(ms) || 0);
-  const minutes = value / 60_000;
-  if (minutes < 1) return '<1m';
-  if (minutes < 60) return `${Math.round(minutes)}m`;
-  const hours = minutes / 60;
-  if (hours < 24) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h`;
-  const days = hours / 24;
-  return `${days < 10 ? days.toFixed(1) : Math.round(days)}d`;
-}
 
 /** Open = everything that is neither `closed` nor `dropped`. */
 export function openTodos(contract: Contract): ContractTodo[] {

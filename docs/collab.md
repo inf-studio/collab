@@ -1130,6 +1130,7 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
     └ .collab-detail-pane       （窄屏 ≤640px 时与 sidebar 二选一）
        ├ .collab-back           「← 返回列表」（仅窄屏）
        ├ DetailHeader           标题 / agent / 完整 sid / 徽标
+       ├ ContractSection        `data-collab-slot="contract"`（0.9.7：会话契约，见 §11.11.9；无契约时不渲染）
        ├ GraphSlot              `data-collab-slot="graph"`（0.8.0 `board2-graph`：三级关系图，见 §11.11.8）
        ├ ActionRow              `data-collab-slot="actions"`（空；动作子任务挂这里）
        └ DetailItems            锁 → 交接 → owner 队列 → `↳` 拉起的会话（复用 board.ts 派生）
@@ -1258,6 +1259,68 @@ clampZoom(zoom) / clampPan(pan, zoom) / viewBoxAttr(box)
 
 **回滚**：`git restore -- src/core/graph.ts src/gui.tsx src/tui.tsx src/index.ts test/graph-shape.mjs test/gui-panel.mjs test/tui-render.mjs`，
 再删掉 0.8.2 新增的未跟踪文件 `rm src/core/graph-layout.ts`（`git restore` 对未跟踪文件会整条报错，不能混在一起）。
+
+#### 11.11.9 看板显示会话契约（0.9.7，`11-21-collab-board-contract`）
+
+**为什么**：契约（主线 / 进度 / 待办 / 漂移）已经在 `~/.config/opencode/collab-contract/<sid>.json` 里，
+但看板看不到——排钟会话 10.8 小时无主线推进，界面上**没有任何可见信号**。这一节只做**呈现**：
+数据来源仍是那一份契约文件，工具面 **28 不增**，RPC 不新增方法（`snapshot` 多一个**可选**字段）。
+
+```text
+collab-contract/<sid>.json ──(mtime 缓存, 只读)──▶ snapshot.sessions[].contract?
+                                                   ├ mission  { oneLine, state, confirmed, inScope[], outOfScope[], handoffTo? }
+                                                   ├ progress { lit, total, next? }
+                                                   ├ todos    { open, blocked, suspended, drifted }
+                                                   └ drift    { drifted, reason?, since? }   （仅漂移触发时）
+```
+
+| 规则 | 口径 |
+| --- | --- |
+| 可选（R1/R5） | **无契约 = 没有该键**（不是 `contract:{}`）：无契约会话的 `snapshot` 与 0.9.6 **逐字节一致**（`test/snapshot-shape.mjs` 用 HEAD 构建出的黄金串逐字比对），且读路径**绝不创建**契约文件 |
+| 空面隐藏 | `mission` 无 `oneLine`/边界、`progress` 无里程碑、`todos` 无行、`drift` 未触发时**整面省略**；四面全空则整个 `contract` 省略 |
+| 损坏（R1） | **不可解析**（JSON 坏了 / 截断）：省略字段 + **一条日志**（`ignoring unreadable contract …`）+ 不抛。**可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt:0`）走同一条「没有契约」路径，但**不记日志**——旧文件不是损坏 |
+| 徽标数量 | `◑` 的数字就是 `todos.open`：**`open` 已经是全部未完成**（与注入的 `[todo] N open`、`collab_todo list` 同一口径），`blocked/suspended/drifted` 是它的**分解**，不能再相加（`open=3, blocked=2` → `◑3`，不是 `◑5`） |
+| mtime 缓存 | 2 s 轮询**不重复解析**：`stat` 的 `mtimeMs` 作缓存键（与 `createConfigReader` 同一模式），文件没变直接用内存里的规范化契约；删除文件即淘汰 |
+| 派生位置 | `src/core/contract-view.ts`（纯函数，**不含 `node:` 导入**，GUI/TUI 共用）：徽标 + 详情行 + TUI 摘要行，只有这一份；漂移判定仍调 `core/drift.ts#evaluate`（服务端，纯函数），界面不另算 |
+| 只读（R4） | 徽标 / 详情行都是文本，没有按钮、没有新 RPC；`board.ts` 只把 `contract` 透传进 `BoardSession` |
+
+**列表徽标（R2）**：1 字符 + ≤3 位数字（`>99` → `99+`），插在**第二行末尾**，不新增行：
+
+| 条件（自上而下） | 徽标 | 颜色 | 类 |
+| --- | --- | --- | --- |
+| `drift.drifted` | `◇` | 红 | `collab-tone-danger` |
+| `todos.suspended + todos.drifted > 0` | `◐` | 琥珀 | `collab-tone-warning` |
+| `todos.open > 0` | `◑` + `todos.open` | 蓝 | `collab-tone-info` |
+| 有契约、都正常 | `●` | 灰 | `collab-tone-muted` |
+| 无契约 | 不显示 | — | — |
+
+TUI 的行只有一行，徽标接在同一行末尾（同为 `contract-view.ts` 的派生）；颜色由行 tone 决定（纯文本行没有分段着色）。
+
+**漂移的 `since`** 按触发源取，不是一律 `now`：`no-advance` = 上次已验证推进；`mission-parked` = `mission.parkedAt`；
+`suspended-expired` = 现在 − 最老过期挂起的年龄（注入说「已挂起 4.0d 未醒」，摘要就写 `drift 4.0d`，不是 `drift <1m`）；
+`unresolved` = `turn.driftAt`（reason 本身已含「未处置」，不再追加第二个）。
+
+**详情区（R3）**：GUI 右详情固定顺序 `会话头 → 契约块（data-collab-slot="contract"）→ 图槽 → 动作槽 → items`；
+块内固定 `主线 / 边界 / 进度 / 待办 / 漂移`，缺项隐藏，**无契约整块不渲染**（0.9.6 的子元素顺序不变）。
+TUI 详情（`j`/`k`）在计数行后追加**一行** `主线 … · 2/5 · todo 3 · drift 11h`，按**终端格数**截断（CJK 记 2 格），
+不换行；无契约不追加。
+
+**测试与变异**：`test/snapshot-shape.mjs` 54 → 67（黄金串逐字节、不建文件、四面派生、坏文件一条日志、**版本不认识不记日志**、
+mtime 缓存、`suspended-expired` 的 `since`、`unresolved` 不重复「未处置」、RPC `contract` 可选性、100 会话冷/热耗时）；
+`test/gui-panel.mjs` 82 → 99（五种徽标 + 无契约不显示、**`open=3/blocked=2` → `◑3` 且详情 `3 open`**、
+徽标在第二行末尾且不新增行、`nowrap` 规则、详情五段顺序与文案、缺项隐藏、无契约的 0.9.6 顺序、
+2 s 轮询重派生且保留选中、`639px` 单栏）；`test/tui-render.mjs` 60 → 66（行尾徽标不新增行、无契约不加行、
+详情摘要行、宽 34 截断不换行、**4 天过期挂起 → `drift 4.0d`**）。
+变异实测：M1 徽标移出第二行（变成第三行）→ 面板 1 条红（`body` 出现第三个子元素）；M2 无契约也写 `contract:{}` →
+快照 3 条红（含黄金串逐字节）；M3 `◑` 改回 `open + blocked` → 面板 2 条红（`◑5` vs 详情 `3 open`）；
+M4 `driftSince` 去掉 `suspended-expired` → 快照 1 条 + TUI 1 条红（`drift <1m`，原缺陷复现）；
+M5 `updatedAt:0` 也记日志 / `unresolved` 再追加「未处置」→ 快照各 1 条红。
+
+**100 会话耗时**（本机，5 次均值）：无契约文件 ≈1.5–2.1 ms/次；冷读 100 个文件 3–10 ms；mtime 命中 ≈0.5–1.6 ms/次——
+热路径与「没有契约」同量级，2 s 轮询无感。
+
+**回滚**：`git restore -- src/rpc.ts src/core/snapshot.ts src/core/board.ts src/core/contract.ts src/gui.tsx src/tui.tsx`，
+再删未跟踪文件 `rm src/core/contract-view.ts src/core/age.ts`。
 
 ### 11.12 受保护目标请求队列（`collab_request_owner`，0.4.0）
 

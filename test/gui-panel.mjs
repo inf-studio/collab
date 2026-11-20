@@ -1854,6 +1854,307 @@ async function openBoard({ board = ACTION_BOARD, dialogs, handler, locale = 'zh'
   dispose();
 }
 
+/* ---------------- 14. 0.9.7: the contract badge + the contract detail block -- */
+
+const CT_WORKSPACE = '/data/project/contract';
+/** A contract block the server would derive from `collab-contract/<sid>.json`. */
+const CONTRACT = {
+  at: 1,
+  reachable: true,
+  sessions: [
+    {
+      sid: 'ses_ct_drift01',
+      title: 'drift worker',
+      agent: 'build',
+      busy: true,
+      workspace: CT_WORKSPACE,
+      contract: {
+        mission: {
+          oneLine: '排钟 B4 接线',
+          state: 'active',
+          confirmed: true,
+          inScope: ['排钟'],
+          outOfScope: ['ws集群实施'],
+          handoffTo: { ws集群实施: 'ses_edc3aaaaaaaaaaaa' }
+        },
+        progress: { lit: 2, total: 5, next: 'M3「双写验证」' },
+        todos: { open: 3, blocked: 1, suspended: 1, drifted: 1 },
+        drift: { drifted: true, reason: '连续 6 轮无主线动作（11h）· 未处置', since: Date.now() - 11 * 3_600_000 }
+      }
+    },
+    {
+      sid: 'ses_ct_park01',
+      title: 'parked worker',
+      agent: 'build',
+      busy: false,
+      workspace: CT_WORKSPACE,
+      contract: { todos: { open: 2, blocked: 0, suspended: 1, drifted: 0 } }
+    },
+    {
+      sid: 'ses_ct_open01',
+      title: 'open worker',
+      agent: 'build',
+      busy: false,
+      workspace: CT_WORKSPACE,
+      contract: { todos: { open: 3, blocked: 0, suspended: 0, drifted: 0 } }
+    },
+    {
+      // `open` already counts the blocked row: the badge must say `3`, never `5`.
+      sid: 'ses_ct_mixed01',
+      title: 'mixed worker',
+      agent: 'build',
+      busy: false,
+      workspace: CT_WORKSPACE,
+      contract: { todos: { open: 3, blocked: 2, suspended: 0, drifted: 0 } }
+    },
+    {
+      sid: 'ses_ct_quiet01',
+      title: 'quiet worker',
+      agent: 'explore',
+      busy: false,
+      workspace: CT_WORKSPACE,
+      contract: {
+        mission: { oneLine: '没事干', state: 'active', confirmed: true, inScope: [], outOfScope: [] }
+      }
+    },
+    { sid: 'ses_ct_none01', title: 'plain worker', agent: 'explore', busy: false, workspace: CT_WORKSPACE }
+  ],
+  locks: [],
+  handoffs: [],
+  queue: []
+};
+
+{
+  let contractReply = CONTRACT;
+  const client = {
+    rpc: () => ({
+      snapshot: async () => contractReply
+    })
+  };
+  const SESSION = serverSession('ses_ct_drift01', 'srv-contract', client);
+  const h = harness(SESSION, { locale: 'zh' });
+  const styleItem = () => h.registered.find(entry => entry.registry === 'style')?.item ?? '';
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SESSION);
+  const text = () => el?.textContent ?? '';
+  const byClass = name => findIn(el, node => String(node.className).includes(name));
+  const rowOf = title =>
+    findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes(title));
+  const badgeOf = row => findIn(row, node => String(node.className).includes('collab-contract-badge'));
+  const elementKids = node => (node?.childNodes ?? []).filter(child => child.nodeType === 1);
+
+  // R2: the badge carries the priority the contract implies, one row each.
+  const cases = [
+    ['drift worker', '◇', 'collab-tone-danger', 'drift → ◇ red'],
+    ['parked worker', '◐', 'collab-tone-warning', 'suspended → ◐ amber'],
+    ['open worker', '◑3', 'collab-tone-info', 'open → ◑ blue + count'],
+    ['mixed worker', '◑3', 'collab-tone-info', 'open=3 + blocked=2 counts once → ◑3 (not ◑5)'],
+    ['quiet worker', '●', 'collab-tone-muted', 'a quiet contract → ● grey']
+  ];
+  for (const [title, label, tone, why] of cases) {
+    const badge = badgeOf(rowOf(title));
+    expect(
+      `PN14 the list badge for ${why}: ${label}`,
+      Boolean(badge) &&
+        badge.textContent === label &&
+        String(badge.className).includes('collab-contract-badge') &&
+        String(badge.className).includes(tone),
+      JSON.stringify({ label: badge?.textContent, className: badge?.className })
+    );
+  }
+  expect(
+    'PN14 a session without a contract shows no badge at all',
+    Boolean(rowOf('plain worker')) && !badgeOf(rowOf('plain worker')),
+    JSON.stringify(badgeOf(rowOf('plain worker'))?.className ?? null)
+  );
+
+  // R2: the badge is the **last element of the second line** and adds no line.
+  const body = findIn(rowOf('open worker'), node => String(node.className).includes('collab-row-body'));
+  const main = findIn(rowOf('open worker'), node => String(node.className).includes('collab-row-main'));
+  const meta = findIn(rowOf('open worker'), node => String(node.className).includes('collab-row-meta'));
+  const metaKids = elementKids(meta);
+  expect(
+    'PN14 the badge ends the second line: the row body still has exactly two lines (no new row)',
+    JSON.stringify(elementKids(body).map(node => String(node.className))) ===
+      JSON.stringify(['collab-row-main', 'collab-row-meta']) &&
+      !badgeOf(main) &&
+      metaKids.at(-1) === badgeOf(meta) &&
+      metaKids.at(-1).textContent === '◑3',
+    JSON.stringify({ body: elementKids(body).map(node => node.className), meta: metaKids.map(node => node.textContent) })
+  );
+  expect(
+    'PN14 the badge cannot wrap (CSS `white-space:nowrap`, `flex:none` inside the meta line)',
+    /\.collab-contract-badge\{[^}]*white-space:nowrap/.test(styleItem()) &&
+      /\.collab-row\{[^}]*display:flex/.test(styleItem()) &&
+      !/\.collab-row-meta\{[^}]*flex-wrap:wrap/.test(styleItem()),
+    styleItem().match(/\.collab-contract-badge\{[^}]*\}/)?.[0] ?? '(missing rule)'
+  );
+
+  // R3: selecting the drifted session shows the five faces, in order, between the
+  // header and the graph slot.
+  fireClick(rowOf('drift worker'));
+  await sleep(30);
+  const pane = byClass('collab-detail-pane');
+  expect(
+    'PN14 the detail pane order is header → contract slot → graph slot → actions slot → items',
+    JSON.stringify(elementKids(pane).map(node => String(node.className))) ===
+      JSON.stringify([
+        'collab-detail-header',
+        'collab-detail-section collab-contract-slot',
+        'collab-detail-section collab-graph-slot',
+        'collab-detail-section collab-actions-slot',
+        'collab-items'
+      ]),
+    JSON.stringify(elementKids(pane).map(node => node.className))
+  );
+  const slot = findIn(el, node => node.attrs?.['data-collab-slot'] === 'contract');
+  const contractRows = elementKids(slot).filter(node => String(node.className).includes('collab-contract-row'));
+  const rowParts = contractRows.map(row => ({
+    label: elementKids(row)[0]?.textContent,
+    text: elementKids(row)[1]?.textContent
+  }));
+  expect(
+    'PN14 the contract block renders 主线 / 边界 / 进度 / 待办 / 漂移 in that order',
+    JSON.stringify(rowParts.map(part => part.label)) === JSON.stringify(['主线', '边界', '进度', '待办', '漂移']),
+    JSON.stringify(rowParts)
+  );
+  expect(
+    'PN14 … with the mission, the declared boundary, M2/5 + next milestone, the todo counts and the drift reason',
+    rowParts[0]?.text.includes('排钟 B4 接线（已确认）') &&
+      rowParts[1]?.text.includes('做 排钟') &&
+      rowParts[1]?.text.includes('不做 ws集群实施') &&
+      rowParts[2]?.text === '2/5 · 下一里程碑 M3「双写验证」' &&
+      rowParts[3]?.text === '3 open · 1 blocked · 1 suspended · 1 drifted' &&
+      rowParts[4]?.text.includes('连续 6 轮无主线动作') &&
+      rowParts[4]?.text.includes('未处置'),
+    JSON.stringify(rowParts.map(part => part.text))
+  );
+
+  // R3: 缺项隐藏 — the parked session has no mission/progress, so the block is
+  // shorter (one row: 待办) instead of printing empty faces.
+  fireClick(rowOf('parked worker'));
+  await sleep(30);
+  const parkedSlot = findIn(el, node => node.attrs?.['data-collab-slot'] === 'contract');
+  const parkedRows = elementKids(parkedSlot).filter(node => String(node.className).includes('collab-contract-row'));
+  expect(
+    'PN14 a face with no content is hidden, not rendered empty',
+    JSON.stringify(parkedRows.map(row => elementKids(row)[0]?.textContent)) === JSON.stringify(['待办']),
+    JSON.stringify(parkedRows.map(row => elementKids(row)[0]?.textContent))
+  );
+
+  // (a) `open` is the total, so the badge number and the detail's `N open` are
+  // the **same** number — `blocked` is a breakdown, never an addend.
+  fireClick(rowOf('mixed worker'));
+  await sleep(30);
+  const mixedSlot = findIn(el, node => node.attrs?.['data-collab-slot'] === 'contract');
+  const mixedRows = elementKids(mixedSlot).filter(node => String(node.className).includes('collab-contract-row'));
+  const mixedTodos = mixedRows.find(row => elementKids(row)[0]?.textContent === '待办');
+  expect(
+    'PN14 open=3 + blocked=2: the badge says ◑3 and the detail says 3 open (one number, no double count)',
+    badgeOf(rowOf('mixed worker'))?.textContent === '◑3' &&
+      mixedTodos !== undefined &&
+      elementKids(mixedTodos)[1]?.textContent === '3 open · 2 blocked · 0 suspended · 0 drifted',
+    JSON.stringify({ badge: badgeOf(rowOf('mixed worker'))?.textContent, detail: elementKids(mixedTodos ?? {})[1]?.textContent })
+  );
+
+  // R5: a session without a contract keeps the 0.9.6 pane (no slot at all).
+  fireClick(rowOf('plain worker'));
+  await sleep(30);
+  const plainPane = byClass('collab-detail-pane');
+  expect(
+    'PN14 no contract: no contract slot, the 0.9.6 order is untouched',
+    JSON.stringify(elementKids(plainPane).map(node => String(node.className))) ===
+      JSON.stringify([
+        'collab-detail-header',
+        'collab-detail-section collab-graph-slot',
+        'collab-detail-section collab-actions-slot',
+        'collab-items'
+      ]) && !text().includes('会话契约'),
+    JSON.stringify(elementKids(plainPane).map(node => node.className))
+  );
+
+  // R2/R3 on the 2 s poll: the contract is re-derived from the new snapshot and
+  // the selection (component memory) survives it.
+  fireClick(rowOf('drift worker'));
+  await sleep(30);
+  contractReply = {
+    ...CONTRACT,
+    at: 2,
+    sessions: CONTRACT.sessions.map(session =>
+      session.sid === 'ses_ct_drift01'
+        ? {
+            ...session,
+            contract: { todos: { open: 1, blocked: 0, suspended: 0, drifted: 0 } }
+          }
+        : session
+    )
+  };
+  await sleep(2100);
+  const polledBadge = badgeOf(rowOf('drift worker'));
+  const polledSlot = findIn(el, node => node.attrs?.['data-collab-slot'] === 'contract');
+  const polledRows = elementKids(polledSlot).filter(node => String(node.className).includes('collab-contract-row'));
+  expect(
+    'PN14 a poll re-derives the badge and the block (drift resolved → ◑1) and keeps the selection',
+    polledBadge?.textContent === '◑1' &&
+      Boolean(findIn(el, node => String(node.className).includes('collab-session-selected'))) &&
+      JSON.stringify(polledRows.map(row => elementKids(row)[0]?.textContent)) === JSON.stringify(['待办']) &&
+      !text().includes('连续 6 轮无主线动作'),
+    JSON.stringify({ badge: polledBadge?.textContent, rows: polledRows.map(row => row.textContent) })
+  );
+  dispose();
+}
+
+/* -------- 14b. `≤640px`: one pane, the badge still on the row, no wrap ------- */
+
+{
+  let viewport = 640;
+  globalThis.matchMedia = query => {
+    const limit = Number((String(query).match(/max-width:\s*(\d+)px/) ?? [])[1] ?? NaN);
+    return {
+      get matches() {
+        return Number.isFinite(limit) ? viewport <= limit : false;
+      },
+      addEventListener() {},
+      removeEventListener() {}
+    };
+  };
+  viewport = 639;
+  const SESSION = serverSession('ses_ct_drift01', 'srv-contract', fakeClient({ reply: CONTRACT }));
+  const h = harness(SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SESSION);
+  const byClass = name => findIn(el, node => String(node.className).includes(name));
+  const rowOf = title =>
+    findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes(title));
+  const badge = findIn(rowOf('drift worker'), node => String(node.className).includes('collab-contract-badge'));
+  expect(
+    'PN14b 639px: the list is one pane and the badge still ends the row (no wrap rule)',
+    Boolean(byClass('collab-sidebar')) &&
+      !byClass('collab-detail-pane') &&
+      badge?.textContent === '◇' &&
+      Boolean(findIn(rowOf('drift worker'), node => String(node.className).includes('collab-row-meta'))),
+    JSON.stringify({ badge: badge?.textContent ?? null, text: (el?.textContent ?? '').slice(0, 120) })
+  );
+  fireClick(rowOf('drift worker'));
+  await sleep(30);
+  const slot = findIn(el, node => node.attrs?.['data-collab-slot'] === 'contract');
+  const rows = (slot?.childNodes ?? [])
+    .filter(node => node.nodeType === 1 && String(node.className).includes('collab-contract-row'))
+    .map(node => (node.childNodes ?? []).filter(child => child.nodeType === 1));
+  expect(
+    'PN14b 639px: selecting shows the detail with the contract rows intact (one column, still readable)',
+    Boolean(byClass('collab-back')) &&
+      rows.length === 5 &&
+      rows.every(parts => parts.length === 2 && String(parts[1].className).includes('collab-contract-text')) &&
+      rows[4][1].textContent.includes('连续 6 轮无主线动作'),
+    JSON.stringify(rows.map(parts => parts[1]?.textContent))
+  );
+  delete globalThis.matchMedia;
+  dispose();
+}
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} panel checks passed`);
 if (failed.length) {

@@ -39,6 +39,67 @@ export interface SnapshotFreeze {
   reason: string;
 }
 
+/**
+ * 0.9.7 (`11-21-collab-board-contract`): the **session contract**, as the board
+ * reads it (design §3.1). Display only — a read-only projection of
+ * `collab-contract/<sid>.json`, derived server-side so the GUI / TUI bundles
+ * never touch the filesystem.
+ *
+ * Every face is optional and **omitted when it has no content** (R3: 缺项隐藏);
+ * a session without a contract file carries no `contract` key at all, so the
+ * payload stays byte-for-byte what 0.9.6 sent (R5).
+ */
+export interface SnapshotContractMission {
+  /** The mainline anchor (`''` when the mission was only scoped). */
+  oneLine: string;
+  /** `active` / `idle` / `suspended` / `done`. */
+  state: string;
+  /** A human confirmed it (`mission.confirmedBy`), never inferred. */
+  confirmed: boolean;
+  inScope: string[];
+  outOfScope: string[];
+  /** Boundary → owning session (the `collab_accept` gate's `handoffTo`). */
+  handoffTo?: Record<string, string>;
+}
+
+/** `M<lit>/<total>` + the first unfinished milestone (`M3「…」`). */
+export interface SnapshotContractProgress {
+  lit: number;
+  total: number;
+  next?: string;
+}
+
+/**
+ * The open work, by status. **`open` is the total**: every todo that is neither
+ * `closed` nor `dropped` (the number `[todo] N open` and `collab_todo list`
+ * print). `blocked` / `suspended` / `drifted` are a **breakdown of `open`**, not
+ * extra rows — a consumer that wants "unfinished work" reads `open` and never
+ * `open + blocked` (that double counts a blocked todo).
+ */
+export interface SnapshotContractTodos {
+  open: number;
+  blocked: number;
+  suspended: number;
+  drifted: number;
+}
+
+/** The evaluated drift (`core/drift.ts#evaluate`) — present only when triggered. */
+export interface SnapshotContractDrift {
+  drifted: boolean;
+  /** The primary reason, one line (`连续 6 轮无主线动作（11.2h）· 未处置`). */
+  reason?: string;
+  /** The moment the drift is measured from (epoch ms; feeds `drift 11h`). */
+  since?: number;
+}
+
+/** The one optional block a session row gained in 0.9.7. */
+export interface SnapshotContract {
+  mission?: SnapshotContractMission;
+  progress?: SnapshotContractProgress;
+  todos?: SnapshotContractTodos;
+  drift?: SnapshotContractDrift;
+}
+
 /** One session the host lists, as the panel groups it. */
 export interface SnapshotSession {
   /** OpenCode session id (`ses_…`) — the same id the tool context reports. */
@@ -62,6 +123,13 @@ export interface SnapshotSession {
    * Optional: an older server omits it and the reader treats absence as false.
    */
   archived?: boolean;
+  /**
+   * 0.9.7 (`11-21-collab-board-contract`): the session's contract, read-only
+   * from `collab-contract/<sid>.json`. **Optional and absent when there is no
+   * usable contract file** — an older server never sends it, and a session that
+   * never used a contract tool must render exactly like 0.9.6.
+   */
+  contract?: SnapshotContract;
 }
 
 /** One resource lease, from `stateOf()` — never a second source of truth. */
@@ -257,7 +325,31 @@ export const CollabState = {
                 // 0.6.0 (`collab_freeze`): optional marker — an older server omits it.
                 frozen: obj({ scope: str, target: str, until: num, reason: str }, ['until', 'reason']),
                 // 0.6.0 (board): optional archived flag (absence = false).
-                archived: bool
+                archived: bool,
+                // 0.9.7 (`11-21-collab-board-contract`): the contract block. Every
+                // face is optional and omitted when empty (an older server sends
+                // none of it, and a session without a contract file gets no key).
+                contract: obj({
+                  mission: obj(
+                    {
+                      oneLine: str,
+                      state: str,
+                      confirmed: bool,
+                      inScope: strArray,
+                      outOfScope: strArray,
+                      handoffTo: { type: 'object', additionalProperties: str }
+                    },
+                    ['oneLine', 'state', 'confirmed', 'inScope', 'outOfScope']
+                  ),
+                  progress: obj({ lit: num, total: num, next: str }, ['lit', 'total']),
+                  todos: obj({ open: num, blocked: num, suspended: num, drifted: num }, [
+                    'open',
+                    'blocked',
+                    'suspended',
+                    'drifted'
+                  ]),
+                  drift: obj({ drifted: bool, reason: str, since: num }, ['drifted'])
+                })
               },
               ['sid', 'title', 'agent', 'busy', 'workspace']
             )

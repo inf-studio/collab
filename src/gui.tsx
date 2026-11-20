@@ -56,8 +56,9 @@ import {
   type PanelTab
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
-import type { ActionReceipt, Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
+import type { ActionReceipt, Snapshot, SnapshotContract, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
+import { contractBadge, contractRows, type ContractRowKey } from './core/contract-view.ts';
 import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
 import {
   GRAPH_BADGE_W,
@@ -351,6 +352,12 @@ const CSS = `
 .collab-tone-success{color:#2ea043;}
 .collab-tone-warning{color:#d29922;}
 .collab-tone-danger{color:#f85149;}
+.collab-tone-info{color:#3b82f6;}
+.collab-contract-badge{flex:none;white-space:nowrap;font-variant-numeric:tabular-nums;letter-spacing:.02em;}
+.collab-contract-slot{flex:none;min-height:0;}
+.collab-contract-row{display:flex;align-items:baseline;gap:8px;min-width:0;overflow:hidden;white-space:nowrap;}
+.collab-contract-label{flex:none;width:34px;}
+.collab-contract-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
 .collab-error{display:flex;flex-direction:column;gap:2px;border-radius:6px;padding:6px 8px;color:#f85149;background:color-mix(in srgb, #f85149 10%, transparent);}
 .collab-error-title{font-weight:600;}
 .collab-empty{opacity:.6;padding:2px 0;}
@@ -433,6 +440,33 @@ function SessionBadges(props: { session: BoardSession }) {
         <span class="collab-badge collab-tone-warning">[urgent]</span>
       </Show>
     </>
+  );
+}
+
+/**
+ * 0.9.7 (`11-21-collab-board-contract`, R2): the contract badge of one list row.
+ *
+ * It renders **inside** the row's second line (`collab-row-meta`) and adds no
+ * line of its own: 1 glyph + at most 3 digits, `nowrap`, `flex:none`. No
+ * contract → `contractBadge` answers `undefined` → nothing is inserted at all
+ * (a 0.9.6 session's row is byte-identical). The derivation is
+ * `core/contract-view.ts`, shared with the TUI.
+ */
+function ContractBadge(props: { contract?: SnapshotContract }) {
+  const badge = () => contractBadge(props.contract);
+  const tone = (): string => {
+    const hit = badge();
+    return hit ? `collab-tone-${hit.tone}` : '';
+  };
+  const label = (): string => {
+    const hit = badge();
+    if (!hit) return '';
+    return `${hit.glyph}${hit.count === undefined ? '' : hit.count}`;
+  };
+  return (
+    <Show when={badge()}>
+      <span class={`collab-badge collab-contract-badge ${tone()}`} title={badge()?.title}>{label()}</span>
+    </Show>
   );
 }
 
@@ -566,7 +600,7 @@ function SessionRow(props: {
     >
       <span class="collab-caret">{props.selected ? '›' : '·'}</span>
       <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
-      <span class="collab-row-body"><span class="collab-row-main"><span class="collab-row-title collab-link" title={`${props.session.title} · ${ctx.t('row.jumpHint')}`} onClick={event => { event.stopPropagation?.(); jump(); }}>{props.session.title}</span><Show when={props.session.sid === props.current}><span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span></Show><SessionBadges session={props.session} /></span><span class="collab-row-meta"><span class="collab-badge">{props.session.agent}</span><span class="collab-mono collab-muted collab-link" title={`${props.session.sid} · ${ctx.t('row.copyHint')}`} onClick={event => { event.stopPropagation?.(); copy(); }}>{shortSid(props.session.sid)}</span></span></span>
+      <span class="collab-row-body"><span class="collab-row-main"><span class="collab-row-title collab-link" title={`${props.session.title} · ${ctx.t('row.jumpHint')}`} onClick={event => { event.stopPropagation?.(); jump(); }}>{props.session.title}</span><Show when={props.session.sid === props.current}><span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span></Show><SessionBadges session={props.session} /></span><span class="collab-row-meta"><span class="collab-badge">{props.session.agent}</span><span class="collab-mono collab-muted collab-link" title={`${props.session.sid} · ${ctx.t('row.copyHint')}`} onClick={event => { event.stopPropagation?.(); copy(); }}>{shortSid(props.session.sid)}</span><ContractBadge contract={props.session.contract} /></span></span>
     </button>
   );
 }
@@ -667,10 +701,43 @@ function OrphanView(props: { orphans: BoardOrphans; current: string }) {
 }
 
 /**
- * R2 (0.8.0): the right pane, top to bottom — header, graph, action row,
- * items. Both insertions are real elements with a stable
- * `data-collab-slot` (`graph` / `actions`), so a later component mounts in place
- * instead of reshaping the layout; the action row is hidden (not removed) when
+ * 0.9.7 (`11-21-collab-board-contract`, R3): the right pane's contract block,
+ * between the header and the graph (`data-collab-slot="contract"`).
+ *
+ * Rows come from `core/contract-view.ts` in the design's fixed order
+ * (主线 → 边界 → 进度 → 待办 → 漂移); a face with no content is simply absent. No
+ * contract → no rows → the `<Show>` renders nothing, so a contract-less session
+ * keeps the 0.9.6 child order (header → graph → actions → items) byte for byte.
+ *
+ * Read-only: these are text rows, never buttons.
+ */
+function ContractSection(props: { contract?: SnapshotContract }) {
+  const ctx = usePlugin();
+  const rows = () => contractRows(props.contract);
+  const label = (key: ContractRowKey): string => ctx.t(`panel.contract.${key}`);
+  return (
+    <Show when={rows().length}>
+      <div class={slotClass('contract')} data-collab-slot="contract">
+        <div class="collab-sub">{ctx.t('panel.contract')}</div>
+        <For each={rows()}>
+          {row => (
+            <div class="collab-contract-row">
+              <span class="collab-contract-label collab-muted">{label(row.key)}</span>
+              <span class="collab-contract-text" title={row.text}>{row.text}</span>
+            </div>
+          )}
+        </For>
+      </div>
+    </Show>
+  );
+}
+
+/**
+ * R2 (0.8.0): the right pane, top to bottom — header, contract block (0.9.7,
+ * only when the session has one), graph, action row, items. Both 0.8.0
+ * insertions are real elements with a stable `data-collab-slot`
+ * (`graph` / `actions`), so a later component mounts in place instead of
+ * reshaping the layout; the action row is hidden (not removed) when
  * `snapshot.actions === false`.
  */
 function DetailHeader(props: { session: BoardSession; current: string }) {
@@ -702,7 +769,7 @@ function DetailHeader(props: { session: BoardSession; current: string }) {
  * renders inside `graph` (see `GraphSlot`); `board2-actions` renders inside
  * `actions` (see `ActionRow`, hidden when `snapshot.actions === false`).
  */
-function slotClass(kind: 'graph' | 'actions'): string {
+function slotClass(kind: 'graph' | 'actions' | 'contract'): string {
   return `collab-detail-section collab-${kind}-slot`;
 }
 
@@ -1397,6 +1464,8 @@ function BoardDetail(props: {
         </button>
       </Show>
       <DetailHeader session={props.session} current={props.current} />
+      {/* 0.9.7: 主线 / 边界 / 进度 / 待办 / 漂移 — nothing when there is no contract. */}
+      <ContractSection contract={props.session.contract} />
       {/* L2: the selected session is the centre (±1 hop, ≤ GRAPH_NODE_LIMIT). */}
       <GraphSlot
         snapshot={props.snapshot}
@@ -1755,6 +1824,12 @@ export default Plugin.define({
       'panel.detailQueue': 'Owner queue ({{count}})',
       'panel.detailSpawned': 'Spawned ({{count}})',
       'panel.detailEmpty': 'No leases, hand-offs or queue items for this session.',
+      'panel.contract': 'Contract',
+      'panel.contract.mission': 'Mainline',
+      'panel.contract.scope': 'Scope',
+      'panel.contract.progress': 'Progress',
+      'panel.contract.todos': 'Todos',
+      'panel.contract.drift': 'Drift',
       'pill.title': 'Collaboration leases',
       'pill.held.one': '{{count}} lease',
       'pill.held.other': '{{count}} leases',
@@ -1846,6 +1921,12 @@ export default Plugin.define({
       'panel.detailQueue': '受保护目标队列 ({{count}})',
       'panel.detailSpawned': '拉起的会话 ({{count}})',
       'panel.detailEmpty': '该会话没有锁 / 交接 / 队列 / 拉起的会话。',
+      'panel.contract': '会话契约',
+      'panel.contract.mission': '主线',
+      'panel.contract.scope': '边界',
+      'panel.contract.progress': '进度',
+      'panel.contract.todos': '待办',
+      'panel.contract.drift': '漂移',
       'pill.title': '协作资源',
       'pill.held.other': '锁 {{count}}',
       'pill.waiting.other': '等待 {{count}}',

@@ -36,7 +36,10 @@
 import { createSignal } from 'solid-js';
 import { createComponent, testRender } from '@opentui/solid';
 import { PluginContextProvider } from '@opencode/plugin/tui';
-import { resolve } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const entry = resolve(import.meta.dirname, '../dist/tui.js');
 const plugin = (await import(`file://${entry}`)).default;
@@ -1105,6 +1108,210 @@ expect(
 );
 await offlineMounted.setup.dispose();
 await offlineSideCleanup();
+
+/* -------------- 9. 0.9.7: the contract badge + the contract detail line ----- */
+
+// The board derives the badge and the summary from the snapshot's optional
+// `contract` block (the GUI uses the same functions). What is pinned here:
+//
+//   - the row badge is one glyph at the **end of the existing row** (no extra
+//     line for a contract-bearing session);
+//   - the selected row's detail gains exactly one line
+//     `主线 … · 2/5 · todo 3 · drift 11h`;
+//   - a session without a contract renders exactly the 0.9.6 detail (no line);
+//   - at a narrow width the line is clipped with `…` instead of wrapping.
+const CONTRACT_TREE = {
+  at: SNAPSHOT.at,
+  reachable: true,
+  sessions: [
+    {
+      sid: 'ses_ct_a1',
+      title: 'contract worker',
+      agent: 'build',
+      busy: true,
+      workspace: '/data/project/contract',
+      contract: {
+        mission: {
+          oneLine: '排钟 B4 接线',
+          state: 'active',
+          confirmed: true,
+          inScope: ['排钟'],
+          outOfScope: ['ws集群实施']
+        },
+        progress: { lit: 2, total: 5, next: 'M3「双写验证」' },
+        todos: { open: 3, blocked: 1, suspended: 1, drifted: 1 },
+        drift: { drifted: true, reason: '连续 6 轮无主线动作（11h）', since: Date.now() - 11 * 3_600_000 }
+      }
+    },
+    { sid: 'ses_ct_a2', title: 'plain worker', agent: 'explore', busy: false, workspace: '/data/project/contract' }
+  ],
+  locks: [],
+  handoffs: [],
+  queue: []
+};
+const contractFrameLines = frame => frame.split('\n').map(line => line.trimEnd()).filter(Boolean);
+{
+  const harnessed = harness({ snapshot: CONTRACT_TREE });
+  const cleanupTree = await plugin.setup(harnessed.context);
+  const mounted = await mount(harnessed.context, () =>
+    harnessed.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_ct_a1' }))
+  );
+  const lines = contractFrameLines(mounted.frame);
+  const rowOf = sid => lines.find(line => line.includes(`${sid}  build`) || line.includes(`${sid}  explore`));
+  const rowLine = rowOf('ses_ct_a1');
+  expect(
+    'T14 the contract badge ends the existing row (◇ for drift, no extra line)',
+    Boolean(rowLine) &&
+      rowLine.trim().endsWith('◇') &&
+      lines.filter(line => line.includes('ses_ct_a1  build')).length === 1,
+    `${rowLine} / ${lines.filter(line => line.includes('ses_ct_a1  build')).length} line(s)`
+  );
+  expect(
+    'T14 a session without a contract keeps its row badge-free',
+    Boolean(rowOf('ses_ct_a2')) && !rowOf('ses_ct_a2').includes('◇') && !rowOf('ses_ct_a2').includes('◑'),
+    rowOf('ses_ct_a2')
+  );
+
+  /** The detail block of the selected row: after `详情 …`, before the next section. */
+  const detailOf = frame => {
+    const all = contractFrameLines(frame);
+    const start = all.findIndex(line => line.startsWith('详情 ') || line.includes('详情 '));
+    if (start < 0) return [];
+    const out = [all[start]];
+    for (const line of all.slice(start + 1)) {
+      if (/^(关系图|资源租约|未闭环交接|受保护目标队列|只读)/.test(line.trim())) break;
+      out.push(line);
+    }
+    return out;
+  };
+
+  // `j` from "nothing selected" lands on row index 1 (the plain session): its
+  // detail must be the 0.9.6 three lines — the contract line is absent, not empty.
+  hostPress(harnessed, 'j');
+  await mounted.setup.renderOnce();
+  const plainFrame = await mounted.setup.captureCharFrame();
+  const plainDetail = detailOf(plainFrame);
+  expect(
+    'T14 a session without a contract adds no contract line to the detail',
+    plainFrame.includes('详情 ses_ct_a2') && !plainFrame.includes('主线 ') && plainDetail.length === 3,
+    plainDetail.join(' | ')
+  );
+
+  hostPress(harnessed, 'j');
+  await mounted.setup.renderOnce();
+  const contractFrame = await mounted.setup.captureCharFrame();
+  const detail = detailOf(contractFrame);
+  expect(
+    'T14 the selected contract session’s detail has 主线 / 进度 / todo / drift on one line',
+    contractFrame.includes('详情 ses_ct_a1') && detail[2] === '  主线 排钟 B4 接线 · 2/5 · todo 3 · drift 11h',
+    detail.slice(0, 4).join(' | ')
+  );
+  await mounted.setup.dispose();
+  await cleanupTree();
+}
+{
+  // Width 34: the summary must be cut with `…` inside the panel width, never
+  // wrapped (a wrap would push `drift 11h` onto the next line).
+  const narrowTree = harness({ snapshot: CONTRACT_TREE });
+  const narrowCleanup = await plugin.setup(narrowTree.context);
+  const narrowMounted = await mount(
+    narrowTree.context,
+    () => narrowTree.slots['session.panel'](panelInput({ width: 34, sessionID: 'ses_ct_a1' })),
+    { width: 34, height: 30 }
+  );
+  hostPress(narrowTree, 'j');
+  hostPress(narrowTree, 'j');
+  await narrowMounted.setup.renderOnce();
+  const narrowFrame = await narrowMounted.setup.captureCharFrame();
+  const narrowLines = contractFrameLines(narrowFrame);
+  const contractLine = narrowLines.find(line => line.includes('主线 '));
+  expect(
+    'T14 at width 34 the contract line is truncated with … and never wraps',
+    Boolean(contractLine) &&
+      contractLine.endsWith('…') &&
+      contractLine.startsWith('  主线 ') &&
+      !narrowLines.some(line => line.trim() === 'drift 11h' || line.includes('· drift')),
+    JSON.stringify(narrowLines.filter(line => line.includes('主线') || line.includes('drift')))
+  );
+  await narrowMounted.setup.dispose();
+  await narrowCleanup();
+}
+
+/* ---- 9b. 0.9.7: an expired suspension is `drift 4.0d`, not `drift <1m` ------ */
+
+// End-to-end for the bug the review found: the injection said 「T1 已挂起 4.0d
+// 未醒」 while the TUI printed `drift <1m` (`driftSince` fell back to `now` for
+// `suspended-expired`). The snapshot here is **really built by the server** from
+// a real contract file, so this asserts the derivation and the formatting
+// together — not just that the formatter can print `4.0d`.
+{
+  const contractDir = mkdtempSync(join(tmpdir(), 'collab-tui-contract-'));
+  process.env.COLLAB_CONTRACT_DIR = contractDir;
+  const t0 = Date.now();
+  writeFileSync(
+    join(contractDir, 'ses_ct_susp01.json'),
+    `${JSON.stringify(
+      {
+        v: 1,
+        sid: 'ses_ct_susp01',
+        updatedAt: t0 - 1_000,
+        mission: { oneLine: '排钟 B4 接线', state: 'active', confirmedBy: '@human', confirmedAt: t0 - 7_200_000 },
+        plan: { milestones: [], lastAdvancedAt: 0 },
+        todos: [
+          {
+            id: 'T1',
+            kind: 'mainline',
+            subject: '等复核',
+            status: 'suspended',
+            parkedAt: t0 - 4 * 86_400_000,
+            wakeWhen: { kind: 'time', at: t0 - 3 * 86_400_000 },
+            since: t0 - 4 * 86_400_000
+          }
+        ],
+        todoSeq: 1,
+        peers: [],
+        turn: { count: 2, lastAt: t0 - 60_000, startedAt: t0 - 60_000, lastAdvancedAt: 0, noAdvanceTurns: 1 }
+      },
+      null,
+      2
+    )}\n`,
+    'utf8'
+  );
+  const server = await import(pathToFileURL(resolve(import.meta.dirname, '../dist/index.js')).href);
+  const SUSPENDED = await server.__internals.buildSnapshot(
+    {
+      sessions: async () => [
+        { id: 'ses_ct_susp01', agent: 'build', title: 'suspended worker', location: { directory: '/data/project/contract' } }
+      ],
+      locks: () => [],
+      handoffs: () => [],
+      queue: () => [],
+      freezes: () => [],
+      index: () => ({ available: true })
+    },
+    {},
+    t0
+  );
+  const suspendedHarness = harness({ snapshot: SUSPENDED });
+  const suspendedCleanup = await plugin.setup(suspendedHarness.context);
+  const suspendedMounted = await mount(suspendedHarness.context, () =>
+    suspendedHarness.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_ct_susp01' }))
+  );
+  hostPress(suspendedHarness, 'j');
+  await suspendedMounted.setup.renderOnce();
+  const suspendedFrame = await suspendedMounted.setup.captureCharFrame();
+  const contractLine = contractFrameLines(suspendedFrame).find(line => line.includes('主线 '));
+  expect(
+    'T14b a server-derived 4-day expired suspension reads `drift 4.0d` (never `drift <1m`)',
+    SUSPENDED.sessions[0]?.contract?.drift?.reason.includes('已挂起 4.0d') &&
+      Boolean(contractLine) &&
+      contractLine.includes('drift 4.0d') &&
+      !contractLine.includes('drift <1m'),
+    JSON.stringify({ drift: SUSPENDED.sessions[0]?.contract?.drift, line: contractLine })
+  );
+  await suspendedMounted.setup.dispose();
+  await suspendedCleanup();
+}
 
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} checks passed`);

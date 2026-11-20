@@ -30,7 +30,7 @@
  *   9. 0.4.2: `dist/tui.js` exists, imports only host-provided modules, keeps
  *      the panel/slash names, and the package exports `./tui` with OpenTUI peers.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // B1 (0.9.0 review): the built server module computes the global message log /
@@ -560,6 +560,23 @@ expect(
     ]
   })
 );
+// 0.9.7 (`11-21-collab-board-contract`): the contract block is **optional** in
+// the schema too, and its four faces are optional as well — an older server
+// sends none of it, and a session without a contract file has no key at all.
+expect(
+  'C2 the session row declares the optional 0.9.7 `contract` block and its four optional faces',
+  Boolean(output.properties?.sessions?.items?.properties?.contract) &&
+    !output.properties?.sessions?.items?.required?.includes('contract') &&
+    ['mission', 'progress', 'todos', 'drift'].every(
+      key =>
+        Boolean(output.properties?.sessions?.items?.properties?.contract?.properties?.[key]) &&
+        !output.properties?.sessions?.items?.properties?.contract?.required?.includes(key)
+    ),
+  JSON.stringify({
+    contract: output.properties?.sessions?.items?.properties?.contract,
+    required: output.properties?.sessions?.items?.required
+  })
+);
 // 0.6.0 (`collab_freeze`): both markers are optional — an older server's answer
 // stays valid, and a consumer must tolerate their absence.
 expect(
@@ -662,6 +679,396 @@ if (hasTui) {
       Boolean(pkg.peerDependencies?.['solid-js']),
     JSON.stringify(pkg.peerDependencies)
   );
+}
+
+/* ------------------------ 10. 0.9.7: the optional `contract` block ---------- */
+
+/*
+ * R1/R5 (`11-21-collab-board-contract`): a session row may carry the contract
+ * from `collab-contract/<sid>.json` — **optionally**. Three things must hold:
+ *
+ *   - no file → no `contract` key, and the whole snapshot is byte-for-byte the
+ *     0.9.6 payload (golden below, produced by building HEAD before this task);
+ *   - a file → mission / progress / todos (/ drift) derived from it;
+ *   - a corrupt file → the key is omitted, one log line, no throw — and reading
+ *     never creates a file the session did not have.
+ *
+ * The cache is proved the honest way (no internals): restore the file's old
+ * mtime after changing its bytes — a cached poll keeps the old value, a real
+ * mtime change picks the new one.
+ */
+const contractDir = process.env.COLLAB_CONTRACT_DIR;
+mkdirSync(contractDir, { recursive: true });
+const contractPath = sid => resolve(contractDir, `${sid}.json`);
+/**
+ * A fresh mtime per write. The snapshot caches on `mtimeMs`, so two fixtures
+ * written at the same timestamp would silently keep the first value — exactly
+ * what the cache is supposed to do.
+ */
+let stampCursor = now;
+const nextStamp = () => new Date((stampCursor += 1_000));
+const writeContractFixture = (sid, value, stamp) => {
+  writeFileSync(contractPath(sid), typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  if (stamp) utimesSync(contractPath(sid), stamp, stamp);
+};
+
+const COMPAT_SESSIONS = [
+  { id: 'ses_c1', agent: 'build', title: 'compat one', location: { directory: '/data/project/compat' }, time: { busy: 1 } },
+  { id: 'ses_c2', agent: 'explore', title: 'compat two', location: { directory: '/data/project/compat' } }
+];
+const compatSource = () => ({
+  sessions: async () => COMPAT_SESSIONS,
+  locks: () => [
+    {
+      resource: 'named:compat',
+      kind: 'named',
+      mode: 'exclusive',
+      holders: ['ses_c1'],
+      waiters: [],
+      waiting: [],
+      acquiredAt: now - 60_000,
+      ttlMs: 900_000,
+      expiresAt: now + 840_000,
+      history: []
+    }
+  ],
+  handoffs: () => [
+    {
+      bid: 'b_compat0001',
+      state: 'open',
+      from: { sid: 'ses_c1' },
+      createdAt: now - 30_000,
+      workspace: '/data/project/compat',
+      title: 'compat proposal'
+    }
+  ],
+  queue: () => [{ id: 'q_compat01', target: 'ses_p', at: now - 10_000, summary: 'please verify', seenAt: null }],
+  freezes: () => [],
+  index: () => ({ available: true })
+});
+
+/** Built from HEAD (`0.9.6`) with exactly this fixture — no `contract` anywhere. */
+const GOLDEN_0P9_6 =
+  '{"at":1800000000000,"sessions":[{"sid":"ses_c1","title":"compat one","agent":"build","busy":true,"workspace":"/data/project/compat"},{"sid":"ses_c2","title":"compat two","agent":"explore","busy":false,"workspace":"/data/project/compat"}],"locks":[{"resource":"named:compat","kind":"named","mode":"exclusive","holders":["ses_c1"],"waiters":0,"waiting":[],"expiresInMs":840000}],"handoffs":[{"bid":"b_compat0001","state":"open","ageMs":30000,"from":"ses_c1","workspace":"/data/project/compat","title":"compat proposal"}],"queue":[{"queueId":"q_compat01","target":"ses_p","ageMs":10000,"summary":"please verify","seen":false}],"index":{"available":true},"reachable":true}';
+
+rmSync(contractPath('ses_c1'), { force: true });
+rmSync(contractPath('ses_c2'), { force: true });
+{
+  const snapshot = await buildSnapshot(compatSource(), { session: 'ses_c2', workspace: '/data/project/compat' }, now);
+  expect(
+    'C10 no contract file: the snapshot is byte-for-byte the 0.9.6 payload (no `contract` key)',
+    JSON.stringify(snapshot) === GOLDEN_0P9_6,
+    JSON.stringify(snapshot)
+  );
+  expect(
+    'C10 reading a snapshot never creates a contract file (R5)',
+    !existsSync(contractPath('ses_c1')) && !existsSync(contractPath('ses_c2')),
+    `${existsSync(contractPath('ses_c1'))} / ${existsSync(contractPath('ses_c2'))}`
+  );
+}
+
+// A real contract: mission + two milestones (one lit) + four todos.
+writeContractFixture('ses_c1', {
+  v: 1,
+  sid: 'ses_c1',
+  updatedAt: now - 1_000,
+  mission: {
+    oneLine: '排钟 B4 接线',
+    inScope: ['排钟'],
+    outOfScope: ['ws集群实施'],
+    handoffTo: { ws集群实施: 'ses_edc3aaaaaaaaaaaa' },
+    state: 'active',
+    confirmedBy: '@human',
+    confirmedAt: now - 7200_000
+  },
+  plan: {
+    milestones: [
+      { id: 'M1', title: '接线', done: true, evidence: 'commit:abc' },
+      { id: 'M2', title: '双写验证', done: false },
+      { id: 'M3', title: '收尾', done: false }
+    ],
+    lastAdvancedAt: now - 7200_000
+  },
+  todos: [
+    { id: 'T1', kind: 'mainline', subject: '接线', status: 'open', blockingOn: 'me', since: now - 3600_000 },
+    { id: 'T2', kind: 'collab', subject: '等复核', status: 'blocked', blockingOn: 'ses_x', since: now - 3600_000 },
+    { id: 'T3', kind: 'mainline', subject: '收尾', status: 'suspended', since: now - 3600_000 },
+    { id: 'T4', kind: 'mainline', subject: '旧', status: 'closed', since: now - 7200_000, closedAt: now - 3600_000 }
+  ],
+  todoSeq: 4,
+  peers: [],
+  turn: { count: 3, lastAt: now - 60_000, startedAt: now - 60_000, lastAdvancedAt: now - 7200_000, noAdvanceTurns: 2 }
+}, nextStamp());
+{
+  const snapshot = await buildSnapshot(compatSource(), { session: 'ses_c2', workspace: '/data/project/compat' }, now);
+  const row = snapshot.sessions.find(session => session.sid === 'ses_c1');
+  const other = snapshot.sessions.find(session => session.sid === 'ses_c2');
+  expect(
+    'C10 a contract file adds the optional block with all four faces',
+    JSON.stringify(row?.contract) ===
+      JSON.stringify({
+        mission: {
+          oneLine: '排钟 B4 接线',
+          state: 'active',
+          confirmed: true,
+          inScope: ['排钟'],
+          outOfScope: ['ws集群实施'],
+          handoffTo: { ws集群实施: 'ses_edc3aaaaaaaaaaaa' }
+        },
+        progress: { lit: 1, total: 3, next: 'M2「双写验证」' },
+        todos: { open: 3, blocked: 1, suspended: 1, drifted: 0 }
+      }),
+    JSON.stringify(row?.contract)
+  );
+  expect(
+    'C10 a session without a file still omits the key (per-session, not per-snapshot)',
+    other !== undefined && !('contract' in other),
+    JSON.stringify(other)
+  );
+}
+
+// Drift: 6 quiet turns, last advance 11.2h ago → the `[drift]` reason + `since`.
+writeContractFixture('ses_c2', {
+  v: 1,
+  sid: 'ses_c2',
+  updatedAt: now - 1_000,
+  mission: { oneLine: '排钟 B4 接线', state: 'active', confirmedBy: '@human', confirmedAt: now - 7200_000 },
+  plan: { milestones: [], lastAdvancedAt: now - 11.2 * 3600_000 },
+  todos: [],
+  todoSeq: 0,
+  peers: [],
+  turn: {
+    count: 9,
+    lastAt: now - 60_000,
+    startedAt: now - 60_000,
+    lastAdvancedAt: now - 11.2 * 3600_000,
+    noAdvanceTurns: 6
+  }
+}, nextStamp());
+{
+  const snapshot = await buildSnapshot(compatSource(), { session: 'ses_c2', workspace: '/data/project/compat' }, now);
+  const row = snapshot.sessions.find(session => session.sid === 'ses_c2');
+  const drift = row?.contract?.drift;
+  expect(
+    'C10 a drifted contract carries the evaluated reason and the moment it is measured from',
+    drift?.drifted === true &&
+      String(drift.reason).includes('连续 6 轮无主线动作') &&
+      drift.since === now - 11.2 * 3600_000,
+    JSON.stringify(drift)
+  );
+  expect(
+    'C10 … and no empty `progress` / `todos` faces (缺项隐藏)',
+    row?.contract?.progress === undefined && row?.contract?.todos === undefined,
+    JSON.stringify(row?.contract)
+  );
+}
+
+// `suspended-expired`: the injection quotes the suspension age (`已挂起 4.0d 未醒`),
+// so `since` must be that same moment — not `now` (the TUI printed `drift <1m`).
+writeContractFixture('ses_c2', {
+  v: 1,
+  sid: 'ses_c2',
+  updatedAt: now - 1_000,
+  mission: { oneLine: '排钟 B4 接线', state: 'active', confirmedBy: '@human', confirmedAt: now - 7200_000 },
+  plan: { milestones: [], lastAdvancedAt: 0 },
+  todos: [
+    {
+      id: 'T1',
+      kind: 'mainline',
+      subject: '等复核',
+      status: 'suspended',
+      parkedAt: now - 4 * 86_400_000,
+      wakeWhen: { kind: 'time', at: now - 3 * 86_400_000 },
+      since: now - 4 * 86_400_000
+    }
+  ],
+  todoSeq: 1,
+  peers: [],
+  turn: { count: 2, lastAt: now - 60_000, startedAt: now - 60_000, lastAdvancedAt: 0, noAdvanceTurns: 1 }
+}, nextStamp());
+{
+  const snapshot = await buildSnapshot(compatSource(), {}, now);
+  const drift = snapshot.sessions.find(session => session.sid === 'ses_c2')?.contract?.drift;
+  expect(
+    'C10 a 4-day expired suspension is measured from its own age (since ≈ now − 4d), not from `now`',
+    drift?.drifted === true &&
+      String(drift.reason).includes('已挂起 4.0d 未醒') &&
+      Math.abs(Number(drift.since) - (now - 4 * 86_400_000)) < 1000,
+    JSON.stringify(drift)
+  );
+}
+
+// `unresolved`: the reason text already says 未处置 — appending the marker again
+// printed 「未处置 … · 未处置」 in the GUI row.
+writeContractFixture('ses_c2', {
+  v: 1,
+  sid: 'ses_c2',
+  updatedAt: now - 1_000,
+  mission: { oneLine: '排钟 B4 接线', state: 'active', confirmedBy: '@human', confirmedAt: now - 7200_000 },
+  plan: { milestones: [], lastAdvancedAt: now - 600_000 },
+  todos: [],
+  todoSeq: 0,
+  peers: [],
+  turn: {
+    count: 5,
+    lastAt: now - 60_000,
+    startedAt: now - 60_000,
+    lastAdvancedAt: now - 600_000,
+    noAdvanceTurns: 2,
+    driftAt: now - 600_000
+  }
+}, nextStamp());
+{
+  const snapshot = await buildSnapshot(compatSource(), {}, now);
+  const drift = snapshot.sessions.find(session => session.sid === 'ses_c2')?.contract?.drift;
+  const occurrences = String(drift?.reason ?? '').match(/未处置/g)?.length ?? 0;
+  expect(
+    'C10 the unresolved reminder does not repeat 未处置 (the reason already says it)',
+    drift?.drifted === true && occurrences === 1 && String(drift.reason).includes('上次漂移提醒未处置'),
+    JSON.stringify(drift)
+  );
+}
+
+// Cache: same mtime + different bytes → the cached read; a touched mtime → re-read.
+{
+  // The **current** mtime, whatever the last fixture write stamped — restoring a
+  // made-up timestamp would look like a change and defeat the cache test.
+  const before = new Date(statSync(contractPath('ses_c2')).mtimeMs);
+  const snapshotA = await buildSnapshot(compatSource(), {}, now);
+  const first = snapshotA.sessions.find(session => session.sid === 'ses_c2')?.contract?.mission?.oneLine;
+  writeContractFixture('ses_c2', {
+    v: 1,
+    sid: 'ses_c2',
+    updatedAt: now - 500,
+    mission: { oneLine: '改过的契约', state: 'active', confirmedBy: '@human' },
+    plan: { milestones: [], lastAdvancedAt: 0 },
+    todos: [],
+    todoSeq: 0,
+    peers: [],
+    turn: { count: 1, lastAt: 1, startedAt: 1, lastAdvancedAt: 0, noAdvanceTurns: 0 }
+  }, before);
+  const cached = (await buildSnapshot(compatSource(), {}, now)).sessions.find(session => session.sid === 'ses_c2');
+  utimesSync(contractPath('ses_c2'), new Date(), new Date());
+  const fresh = (await buildSnapshot(compatSource(), {}, now)).sessions.find(session => session.sid === 'ses_c2');
+  expect(
+    'C10 the contract read is mtime-cached: unchanged mtime keeps the old value, a touch re-reads',
+    first === '排钟 B4 接线' && cached?.contract?.mission?.oneLine === '排钟 B4 接线' && fresh?.contract?.mission?.oneLine === '改过的契约',
+    JSON.stringify({ first, cached: cached?.contract?.mission?.oneLine, fresh: fresh?.contract?.mission?.oneLine })
+  );
+}
+
+// Corrupt: one log line, the key is omitted, nothing throws.
+{
+  writeContractFixture('ses_c2', '{ this is not json');
+  const logged = [];
+  const original = console.error;
+  console.error = (...args) => logged.push(args.map(value => String(value)).join(' '));
+  let snapshot;
+  let thrown;
+  try {
+    snapshot = await buildSnapshot(compatSource(), {}, now);
+  } catch (error) {
+    thrown = error;
+  } finally {
+    console.error = original;
+  }
+  const row = snapshot?.sessions.find(session => session.sid === 'ses_c2');
+  expect(
+    'C10 a corrupt contract omits the block, logs exactly one line and never throws',
+    !thrown &&
+      row !== undefined &&
+      !('contract' in row) &&
+      logged.filter(line => line.includes('ignoring unreadable contract')).length === 1,
+    JSON.stringify({ thrown: thrown ? String(thrown) : null, logged })
+  );
+}
+
+// Parseable but **not ours** (`v: 2`): also "no contract", but silently — an
+// older / newer file is not corruption, so it must not log.
+{
+  writeContractFixture('ses_c2', {
+    v: 2,
+    sid: 'ses_c2',
+    updatedAt: now - 1_000,
+    mission: { oneLine: '未来版本的契约' },
+    plan: { milestones: [], lastAdvancedAt: 0 },
+    todos: [],
+    peers: [],
+    turn: { count: 1 }
+  }, nextStamp());
+  const logged = [];
+  const original = console.error;
+  console.error = (...args) => logged.push(args.map(value => String(value)).join(' '));
+  let snapshot;
+  let thrown;
+  try {
+    snapshot = await buildSnapshot(compatSource(), {}, now);
+  } catch (error) {
+    thrown = error;
+  } finally {
+    console.error = original;
+  }
+  const row = snapshot?.sessions.find(session => session.sid === 'ses_c2');
+  expect(
+    'C10 an unknown-version contract is treated as "no contract" **without** a log line (not corruption)',
+    !thrown && row !== undefined && !('contract' in row) && logged.length === 0,
+    JSON.stringify({ thrown: thrown ? String(thrown) : null, logged })
+  );
+}
+
+// Cost with 100 sessions: cold (100 files) vs warm (mtime hit) vs no files at all.
+{
+  const many = Array.from({ length: 100 }, (_, index) => ({
+    id: `ses_perf${String(index).padStart(3, '0')}`,
+    agent: 'build',
+    title: `perf ${index}`,
+    location: { directory: '/data/project/perf' }
+  }));
+  const source = () => ({
+    sessions: async () => many,
+    locks: () => [],
+    handoffs: () => [],
+    queue: () => [],
+    freezes: () => [],
+    index: () => ({ available: true })
+  });
+  const time = async (fn, runs = 1) => {
+    let total = 0;
+    for (let index = 0; index < runs; index += 1) {
+      const started = process.hrtime.bigint();
+      await fn();
+      total += Number(process.hrtime.bigint() - started) / 1e6;
+    }
+    return total / runs;
+  };
+  const bare = await time(() => buildSnapshot(source(), {}, now), 5);
+  for (const session of many) {
+    writeContractFixture(session.id, {
+      v: 1,
+      sid: session.id,
+      updatedAt: now - 1_000,
+      mission: { oneLine: `会话 ${session.id}`, state: 'active', confirmedBy: '@human' },
+      plan: { milestones: [{ id: 'M1', title: 'a', done: false }], lastAdvancedAt: 0 },
+      todos: [{ id: 'T1', kind: 'mainline', subject: 'a', status: 'open', since: now - 1_000 }],
+      todoSeq: 1,
+      peers: [],
+      turn: { count: 1, lastAt: 1, startedAt: 1, lastAdvancedAt: 0, noAdvanceTurns: 1 }
+    }, nextStamp());
+  }
+  const cold = await time(() => buildSnapshot(source(), {}, now), 1);
+  const warm = await time(() => buildSnapshot(source(), {}, now), 5);
+  expect(
+    'C10 100 sessions: the warm (mtime-cached) poll costs far less than the cold one (reported)',
+    warm < cold && warm <= bare * 5 + 5,
+    `no contracts ${bare.toFixed(2)}ms · cold (100 files) ${cold.toFixed(2)}ms · warm ${warm.toFixed(2)}ms/poll (+${(warm - bare).toFixed(2)}ms)`
+  );
+
+  // Leave the shared temp contract dir as we found it: a stray contract here
+  // would otherwise leak into another suite's snapshot (they all point
+  // `COLLAB_CONTRACT_DIR` at the same temp path).
+  for (const name of readdirSync(contractDir)) {
+    if (/^ses_(c1|c2|perf)/.test(name)) rmSync(resolve(contractDir, name), { force: true });
+  }
 }
 
 const failed = checks.filter(check => !check.ok);

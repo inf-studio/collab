@@ -46,6 +46,7 @@ import { CollabState } from './rpc.ts';
 import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, SnapshotSession } from './rpc.ts';
 import { countsOf, pendingCountOf } from './core/counts.ts';
 import { buildBoard, boardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
+import { contractBadgeText, contractSummary } from './core/contract-view.ts';
 import { buildGraph, type GraphEdge, type GraphLevel } from './core/graph.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
@@ -110,6 +111,27 @@ function clip(value: string, width: number): string {
 function pad(value: string, width: number): string {
   const text = clip(value, width);
   return `${text}${' '.repeat(Math.max(0, width - text.length))}`;
+}
+
+/** A CJK / fullwidth code point takes two terminal cells (the renderer counts cells). */
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/;
+
+/** `clip`, but measured in **cells**: long CJK text must not wrap past the panel. */
+function clipCells(value: string, width: number): string {
+  const text = String(value ?? '');
+  if (width <= 1) return '';
+  let used = 0;
+  for (const char of text) used += WIDE.test(char) ? 2 : 1;
+  if (used <= width) return text;
+  let out = '';
+  let taken = 0;
+  for (const char of text) {
+    const cells = WIDE.test(char) ? 2 : 1;
+    if (taken + cells > width - 1) break;
+    out += char;
+    taken += cells;
+  }
+  return `${out}…`;
 }
 
 /**
@@ -423,7 +445,11 @@ function sessionBadges(session: BoardSession): string {
     session.badges.queue ? `⇢${session.badges.queue}` : '',
     session.archived ? '[archived]' : '',
     session.frozen ? '[frozen]' : '',
-    session.urgent ? '[urgent]' : ''
+    session.urgent ? '[urgent]' : '',
+    // 0.9.7 (`11-21-collab-board-contract`, R2): one glyph + ≤3 digits at the
+    // **end of the row** — the same derivation the GUI badge uses, never a new
+    // line. No contract → `''` → the row is exactly what 0.9.6 printed.
+    contractBadgeText(session.contract)
   ].filter(Boolean);
   return badges.length ? `  ${badges.join(' ')}` : '';
 }
@@ -566,6 +592,11 @@ function detailLines(session: BoardSession, width: number): Line[] {
     },
     { text: clip(`  ${counts}`, width), tone: 'muted' }
   ];
+  // 0.9.7 (`11-21-collab-board-contract`, R3): the contract summary — one extra
+  // line, `主线 … · M2/5 · todo 3 · drift 11h`, clipped to the panel width so it
+  // truncates instead of wrapping. No contract → no line (3–5 rows as before).
+  const contract = contractSummary(session.contract);
+  if (contract) out.push({ text: clipCells(`  ${contract}`, width), tone: 'muted' });
   const rows = [
     ...lockRows(session, '  '),
     ...handoffRows(session, '  '),

@@ -26,6 +26,7 @@ import type { FreezeEntry } from '../types.ts';
 import { freezeFor, freezeMarker, liveFreezeMarker, liveFreezes } from './freeze-pure.ts';
 import type {
   Snapshot,
+  SnapshotContract,
   SnapshotFreeze,
   SnapshotHandoff,
   SnapshotLock,
@@ -69,6 +70,12 @@ export interface BoardSession {
   spawned: BoardSpawn[];
   queue: SnapshotQueueItem[];
   badges: BoardBadges;
+  /**
+   * 0.9.7 (`11-21-collab-board-contract`): the session's contract, passed
+   * through untouched. Optional — an older server sends no `contract`, and a
+   * session that never used a contract tool has none either.
+   */
+  contract?: SnapshotContract;
 }
 
 /** Workspace header numbers: `N 会话 · M 锁 · K 交接 · A 已归档`. */
@@ -265,6 +272,8 @@ export function buildBoard(
         handoffs: myHandoffs,
         spawned,
         queue: myQueue,
+        // 0.9.7: display-only pass-through (the same rule as `frozen`).
+        ...(session.contract ? { contract: session.contract } : {}),
         badges: {
           held: myLocks.filter(lock => (lock.holders ?? []).includes(session.sid)).length,
           waiting: myLocks.filter(lock => (lock.waiting ?? []).includes(session.sid)).length,

@@ -140,7 +140,7 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 ## 2.10 看板主从布局
 
 - **GUI 分栏**：左列表（320px 左右）/ 右详情（自适应）；`≤640px`（`max-width:640px`）回落单栏——选中后详情替换列表并给「← 返回列表」。
-- **右详情顺序固定**：`会话头 → 图槽（GraphSlot）→ 动作槽（ActionRow）→ items`；两个槽位必须是**真实占位元素**（带 `data-collab-slot`），后续子任务原地挂载。
+- **右详情顺序固定**：`会话头 → 契约块（0.9.7，`data-collab-slot="contract"`，无契约不渲染）→ 图槽（GraphSlot）→ 动作槽（ActionRow）→ items`；两个槽位必须是**真实占位元素**（带 `data-collab-slot`），后续子任务原地挂载。
 - **选中是本地 signal（按 sid）**：2s 轮询换快照**不得重置**；会话从「活跃 + 归档」都消失才清空并 toast；拉取失败/暂无快照不算消失。
 - **TUI**：树不变；只有 `j/k` 打开下方 3–5 行详情，`esc` 清除；`enter/space/click` 只做展开，不再附带「激活详情」。
 - **测试要点**：槽位顺序用直接子元素类名数组逐字比较；断点用可注入 `matchMedia` 夹住 `639`（单栏）/`641`（分栏）两侧——否则改数值/换顺序都能全绿。
@@ -295,6 +295,29 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `messages.resend_of` 标记重发行（`_r<n>`）；统计消息数时必须排除，否则重发会被重复计数。
 - `messages_fts` 截的是 **8192 字符**（CJK ≈ 24KB），不是 8KB 字节；文档不要写成字节。
 - `backfill` 只写 `meta.backfilled`，**不造 `messages` 行**（历史正文不可得；造空行会污染计数与 FTS）。
+
+### 2.14 看板显示会话契约（0.9.7）
+
+- **派生唯一来源** `src/core/contract-view.ts`（纯函数、**无 `node:` 导入**）：`contractBadge()` / `contractRows()` /
+  `contractSummary()`；GUI 与 TUI 必须调这三个，禁止各自算。徽标颜色是 `collab-tone-*`，TUI 用行 tone。
+- **快照字段可选**：`sessions[].contract` 缺失即「没有契约」。**无契约时不得写 `contract: {}`**——整份 `snapshot`
+  要与 0.9.6 逐字节一致（`test/snapshot-shape.mjs` 的黄金串就是 HEAD 构建出来的），测试里这是硬断言。
+- **读路径只读 + mtime 缓存**：`snapshot.ts` 读 `collab-contract/<sid>.json`，`mtimeMs` 作缓存键（与 `createConfigReader`
+  同一模式）；**绝不**在快照里调 `updateContract*`。两种情况都省略字段，但**只有一种算损坏**：
+  **不可解析的 JSON** → 省略 + **一条**日志 + 不抛（`ignoring unreadable contract …`）；
+  **可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt === 0`）→ 同样省略，**不记日志**（旧文件不是错误）。
+- **徽标**：1 字符 + ≤3 位数字（`>99` → `99+`），插在 GUI 第二行末尾 / TUI 同一行末尾，**不新增行**；
+  优先级 `drift ◇红 > suspended+drifted ◐琥珀 > todos.open ◑蓝+数量 > 正常 ●灰 > 无契约不显示`。
+  **数量只取 `todos.open`**：`open` 已是「全部未完成」（注入 `[todo] N open` 与 `collab_todo list` 的口径），
+  `blocked/suspended/drifted` 是它的分解——`open + blocked` 会把 blocked 重复计入（`open=3,blocked=2` → `◑5`）。
+- **漂移 `since` 按触发源取**：`no-advance` → `lastAdvancedAt`；`mission-parked` → `parkedAt`；
+  `suspended-expired` → `now − 最老 expiredSuspended.ageMs`；`unresolved` → `turn.driftAt`。
+  一律回落 `now` 会让 TUI 打 `drift <1m`，而注入同时说「已挂起 4.0d 未醒」；`unresolved` 的 reason 已含
+  「未处置」，不要追加第二个。
+- **详情固定顺序** `主线 / 边界 / 进度 / 待办 / 漂移`，缺项隐藏；GUI 槽位 `data-collab-slot="contract"` 位于
+  会话头与图槽之间，无契约整块不渲染。TUI 在计数行后追加**一行**摘要，用 `clipCells`（CJK 记 2 格）截断，不换行。
+- 测试要点：三种徽标优先级各一例 + 无契约不显示；断言行体只有两个子元素（徽标不新增行）；`639px` 单栏仍有徽标；
+  详情子元素类名数组逐字比对；TUI 宽 34 的摘要行以 `…` 结尾且下一行不是续行。
 
 ## 3. 只读是硬约束
 

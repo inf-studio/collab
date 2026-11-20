@@ -3,6 +3,49 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+> **看板显示会话契约**（`11-21-collab-board-contract`）。契约数据一直在，界面上看不到——排钟会话 10.8 小时
+> 无主线推进，看板没有任何可见信号。本批只做**呈现**：快照多一个**可选** `contract` 字段，GUI 列表徽标 +
+> 右详情契约块，TUI 详情一行。工具面 **28 不增**，RPC 不新增方法，读路径不写文件。版本号留给父任务统一发布。
+
+### Added
+
+- **快照（R1）**：`snapshot.sessions[]` 多一个**可选** `contract`，服务端只读
+  `~/.config/opencode/collab-contract/<sid>.json` 派生四面——`mission{oneLine,state,confirmed,inScope,outOfScope,handoffTo?}` /
+  `progress{lit,total,next?}` / `todos{open,blocked,suspended,drifted}` / `drift{drifted,reason?,since?}`。
+  **按 mtime 缓存**（与 `createConfigReader` 同一模式）：100 会话冷读 3–10 ms、命中 ≈0.5–1.6 ms/次（无契约 1.5–2.1 ms）。
+  漂移的 `since` 按触发源取（`no-advance` = `lastAdvancedAt`；`mission-parked` = `parkedAt`；
+  `suspended-expired` = `now − 最老过期挂起`，注入说「已挂起 4.0d」摘要就写 `drift 4.0d`；`unresolved` = `turn.driftAt`）。
+- **列表徽标（R2）**：GUI 会话行第二行末尾 + TUI 行尾，1 字符 + ≤3 位数字（`>99` → `99+`），**不新增行**：
+  `◇` 漂移（红）> `◐` `suspended+drifted>0`（琥珀）> `◑`+`todos.open`（蓝）> `●` 正常（灰）；无契约不显示。
+  **`open` 已是全部未完成**（与注入 `[todo] N open` / `collab_todo list` 同口径），`blocked/suspended/drifted`
+  是它的分解，不能再相加——`open=3, blocked=2` 显示 `◑3` + 详情 `3 open`，不是 `◑5`。
+- **详情区（R3）**：GUI 右详情在会话头与图槽之间插入 `data-collab-slot="contract"` 块，固定顺序
+  `主线 / 边界 / 进度 / 待办 / 漂移`，缺项隐藏、无契约整块不渲染；TUI `j/k` 详情在计数行后追加一行
+  `主线 … · 2/5 · todo 3 · drift 11h`，按**终端格数**截断（CJK 记 2 格）不换行。
+- 派生只有一份：`src/core/contract-view.ts`（纯函数，无 `node:` 导入，GUI/TUI 共用）；`formatAge` 抽到
+  `src/core/age.ts`，`core/contract.ts` 再导出（不复制第二份）。
+
+### Changed
+
+- 快照读路径**不创建**契约文件（`readContract` 只读）。省略字段的两种情况要分清：**不可解析的 JSON**
+  → 省略 + **一条日志**（`ignoring unreadable contract …`），不抛；**可解析但不是本版**（`v` 不认识 /
+  外部 `sid` / `updatedAt === 0`）→ 同样省略，但**不记日志**（旧文件不是损坏）。
+- `unresolved` 的漂移 reason 已含「未处置」，不再追加第二个标记（GUI 行曾打印「未处置 … · 未处置」）。
+- **兼容（R5）**：无契约会话、旧快照、远端缺字段 → `snapshot` 与 0.9.6 **逐字节一致**
+  （`test/snapshot-shape.mjs` 与 HEAD 构建出的黄金串逐字比对）。
+- 回归基线 `1752 → 1788`：快照 54 → 67、TUI 60 → 66、GUI 面板 82 → 99。
+- 变异实测：M1 徽标移出第二行（变第三行）→ 面板 1 条红；M2 无契约也写 `contract:{}` → 快照 3 条红（含黄金串）；
+  M3 `◑` 数字改回 `open + blocked` → 面板 2 条红（`◑5` vs 详情 `3 open`）；M4 `driftSince` 去掉
+  `suspended-expired` 分支 → 快照 1 条 + TUI 1 条红（TUI 打印 `drift <1m`，即原缺陷复现）；M5 `updatedAt:0`
+  也记日志 / `unresolved` 再追加「未处置」→ 快照各 1 条红。
+
+### 回滚
+
+`git restore -- src/rpc.ts src/core/snapshot.ts src/core/board.ts src/core/contract.ts src/gui.tsx src/tui.tsx`；
+删未跟踪文件 `rm src/core/contract-view.ts src/core/age.ts`（回滚后看板与 0.9.6 一致，契约文件本身不受影响）。
+
 ## [0.9.6] - 2026-11-20
 
 > **2min 批量投递 + 无增量不发**。消息间隔 p10 **6.6s** / p50 **20s** / p90 **90s**，最长连续 **151 条**
