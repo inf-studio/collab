@@ -61,6 +61,7 @@ import { log } from '../log.ts';
 import { asObject, dedupe, randToken, truncate } from '../util.ts';
 import { invalid } from './errors.ts';
 import { TODO_DONE_STATUSES, readContract, writeContract } from './contract.ts';
+import { withFileLock } from './file-lock.ts';
 import { localSnapshot } from './tri-state.ts';
 
 export type FactGrade = 'measured' | 'inferred' | 'relayed' | 'unknown';
@@ -97,7 +98,15 @@ export interface Fact {
 /** Per-day counters (R3: `metrics.retract_count` must be measurable). */
 export interface FactDayMetrics {
   settled: number;
+  /** `retract` **and** `supersede` (design §5): both make a claim unusable. */
   retracted: number;
+  /**
+   * 0.9.4 review: how many `stale` messages this workspace delivered. The
+   * "reply ≤30% of the original" rule is a **behavioural** convention the plugin
+   * cannot machine-check (it does not write the reply); this counter is the
+   * auditable half — a human can sample the deliveries and measure the ratio.
+   */
+  staleDeliveries: number;
   /** Why facts were retracted (the reason text → count). */
   reasons: Record<string, number>;
 }
@@ -218,7 +227,12 @@ function normalizeMetrics(raw: unknown): Record<string, FactDayMetrics> {
       const n = num(count);
       if (n) reasons[text(reason, FACT_REASON_LIMIT) || '(未写原因)'] = n;
     }
-    out[day] = { settled: num(source.settled), retracted: num(source.retracted), reasons };
+    out[day] = {
+      settled: num(source.settled),
+      retracted: num(source.retracted),
+      staleDeliveries: num(source.staleDeliveries),
+      reasons
+    };
   }
   return out;
 }
@@ -338,7 +352,9 @@ function serialize<T>(workspace: string, fn: () => Promise<T> | T): Promise<T> {
 
 function bumpDay(ws: WorkspaceFacts, now: number): FactDayMetrics {
   const day = dayKey(now);
-  const current = ws.metrics[day] ?? { settled: 0, retracted: 0, reasons: {} };
+  const current = ws.metrics[day] ?? { settled: 0, retracted: 0, staleDeliveries: 0, reasons: {} };
+  // A day record written by an older build may lack the review-added counter.
+  if (!Number.isFinite(Number(current.staleDeliveries))) current.staleDeliveries = 0;
   ws.metrics[day] = current;
   return current;
 }
@@ -415,53 +431,65 @@ export interface SettleResult {
  */
 export function settleFact(input: SettleInput): Promise<SettleResult> {
   const workspace = String(input.workspace ?? '').trim().replace(/\/+$/, '');
-  return serialize(workspace, () => {
-    const claim = text(input.claim, FACT_CLAIM_LIMIT);
-    if (!claim) throw invalid('settle 必填 claim（一句话可证伪的断言）');
-    const evidence = text(input.evidence, FACT_EVIDENCE_LIMIT);
-    if (!evidence) throw invalid('settle 必填 evidence（文件:行 / 命令 / 复现路径）');
-    const gradeRaw = String(input.grade ?? '').trim();
-    if (!gradeRaw) throw invalid(`settle 必填 grade（${FACT_SETTLE_GRADES.join(' | ')}）：未标注的事实不可引用`);
-    if (!FACT_SETTLE_GRADES.includes(gradeRaw)) {
-      throw invalid(`grade="${gradeRaw}" 不合法（${FACT_SETTLE_GRADES.join(' | ')}）`);
-    }
-    const grade = gradeRaw as FactGrade;
-    const now = Number(input.now) || Date.now();
-    const ledger = readLedger(input.file);
-    const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
-    const cited = guardCitations(ws, evidence, input.factIds);
-    const basedOn: FactBasedOn = { ...localSnapshot({ workspace, epoch: ws.epoch }), ...(cited.length ? { factIds: cited } : {}) };
+  const file = input.file ?? FACTS_FILE;
+  // In-process queue per workspace **and** a cross-process file lock around the
+  // whole read-modify-write: the ledger is one file per machine, so a queue is
+  // not enough (two OpenCode processes would erase each other's workspace).
+  return serialize(workspace, () =>
+    withFileLock(file, () => {
+      const claim = text(input.claim, FACT_CLAIM_LIMIT);
+      if (!claim) throw invalid('settle 必填 claim（一句话可证伪的断言）');
+      const evidence = text(input.evidence, FACT_EVIDENCE_LIMIT);
+      if (!evidence) throw invalid('settle 必填 evidence（文件:行 / 命令 / 复现路径）');
+      const gradeRaw = String(input.grade ?? '').trim();
+      if (!gradeRaw) throw invalid(`settle 必填 grade（${FACT_SETTLE_GRADES.join(' | ')}）：未标注的事实不可引用`);
+      if (!FACT_SETTLE_GRADES.includes(gradeRaw)) {
+        throw invalid(`grade="${gradeRaw}" 不合法（${FACT_SETTLE_GRADES.join(' | ')}）`);
+      }
+      const grade = gradeRaw as FactGrade;
+      const now = Number(input.now) || Date.now();
+      const ledger = readLedger(file);
+      const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
+      const cited = guardCitations(ws, evidence, input.factIds);
+      const basedOn: FactBasedOn = {
+        ...localSnapshot({ workspace, epoch: ws.epoch }),
+        ...(cited.length ? { factIds: cited } : {})
+      };
 
-    // Same claim = the newer fact replaces the older one (design §4). It is
-    // superseded, not retracted: it was true, the wording/evidence moved on.
-    const same = ws.facts.filter(fact => fact.state === 'active' && fact.claim === claim);
-    const id = `F${Math.max(ws.seq, ...ws.facts.map(fact => factIDNumber(fact.id)), 0) + 1}`;
-    for (const fact of same) {
-      fact.state = 'superseded';
-      fact.supersededBy = id;
-      fact.supersededAt = now;
-    }
-    const fact: Fact = {
-      id,
-      claim,
-      grade,
-      evidence,
-      state: 'active',
-      basedOn,
-      by: String(input.by ?? ''),
-      at: now,
-      supersededBy: null,
-      scope: 'workspace'
-    };
-    ws.facts.push(fact);
-    ws.seq = factIDNumber(id);
-    prune(ws);
-    const metrics = bumpDay(ws, now);
-    metrics.settled += 1;
-    ledger.workspaces[workspace] = ws;
-    writeLedger(ledger, input.file);
-    return { fact, superseded: same.map(entry => entry.id), epoch: ws.epoch };
-  });
+      // Same claim = the newer fact replaces the older one (design §4). It is
+      // superseded, not retracted: it was true, the wording/evidence moved on.
+      const same = ws.facts.filter(fact => fact.state === 'active' && fact.claim === claim);
+      const id = `F${Math.max(ws.seq, ...ws.facts.map(fact => factIDNumber(fact.id)), 0) + 1}`;
+      for (const fact of same) {
+        fact.state = 'superseded';
+        fact.supersededBy = id;
+        fact.supersededAt = now;
+      }
+      const fact: Fact = {
+        id,
+        claim,
+        grade,
+        evidence,
+        state: 'active',
+        basedOn,
+        by: String(input.by ?? ''),
+        at: now,
+        supersededBy: null,
+        scope: 'workspace'
+      };
+      ws.facts.push(fact);
+      ws.seq = factIDNumber(id);
+      prune(ws);
+      const metrics = bumpDay(ws, now);
+      metrics.settled += 1;
+      // Design §5 (review): `retract_count` counts **retract + supersede** — a
+      // claim replaced by a newer settle is just as unusable as a retracted one.
+      metrics.retracted += same.length;
+      ledger.workspaces[workspace] = ws;
+      writeLedger(ledger, file);
+      return { fact, superseded: same.map(entry => entry.id), epoch: ws.epoch };
+    })
+  );
 }
 
 export interface RetractResult {
@@ -481,30 +509,35 @@ export function retractFact(input: {
   file?: string;
 }): Promise<RetractResult> {
   const workspace = String(input.workspace ?? '').trim().replace(/\/+$/, '');
-  return serialize(workspace, () => {
-    const id = String(input.id ?? '').trim();
-    if (!isFactID(id)) throw invalid(`retract 需要事实 id（F1 / F2 …），收到 "${id}"`);
-    const reason = text(input.reason, FACT_REASON_LIMIT);
-    if (!reason) throw invalid('retract 必填 reason：没有原因的撤回无法度量（PRD R3）');
-    const now = Number(input.now) || Date.now();
-    const ledger = readLedger(input.file);
-    const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
-    const fact = ws.facts.find(entry => entry.id === id);
-    if (!fact) throw invalid(`没有事实 ${id}：用 collab_fact { action:"list", includeAll:true } 查看`);
-    if (fact.state === 'retracted') throw invalid(`${id} 已经是 retracted（原因：${fact.retractReason ?? '-'}）`);
-    fact.state = 'retracted';
-    fact.retractedAt = now;
-    fact.retractReason = reason;
-    fact.supersededBy = null;
-    const metrics = bumpDay(ws, now);
-    // Design §5: `retract_count` counts retract **and** supersede; the reason
-    // breakdown is what makes a retraction classifiable after the fact.
-    metrics.retracted += 1;
-    metrics.reasons[reason] = (metrics.reasons[reason] ?? 0) + 1;
-    ledger.workspaces[workspace] = ws;
-    writeLedger(ledger, input.file);
-    return { fact, affected: [id], metrics, epoch: ws.epoch };
-  });
+  const file = input.file ?? FACTS_FILE;
+  return serialize(workspace, () =>
+    withFileLock(file, () => {
+      const id = String(input.id ?? '').trim();
+      if (!isFactID(id)) throw invalid(`retract 需要事实 id（F1 / F2 …），收到 "${id}"`);
+      const reason = text(input.reason, FACT_REASON_LIMIT);
+      if (!reason) throw invalid('retract 必填 reason：没有原因的撤回无法度量（PRD R3）');
+      const now = Number(input.now) || Date.now();
+      const ledger = readLedger(file);
+      const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
+      const fact = ws.facts.find(entry => entry.id === id);
+      if (!fact) throw invalid(`没有事实 ${id}：用 collab_fact { action:"list", includeAll:true } 查看`);
+      if (fact.state === 'retracted') throw invalid(`${id} 已经是 retracted（原因：${fact.retractReason ?? '-'}）`);
+      fact.state = 'retracted';
+      fact.retractedAt = now;
+      fact.retractReason = reason;
+      // Review: retracting an already-superseded row must **keep** its
+      // `supersededBy` pointer — clearing it turned `[retracted:F2→F4]` into a
+      // bare `F2` and lost which fact actually replaced it.
+      const metrics = bumpDay(ws, now);
+      // Design §5: `retract_count` counts retract **and** supersede; the reason
+      // breakdown is what makes a retraction classifiable after the fact.
+      metrics.retracted += 1;
+      metrics.reasons[reason] = (metrics.reasons[reason] ?? 0) + 1;
+      ledger.workspaces[workspace] = ws;
+      writeLedger(ledger, file);
+      return { fact, affected: [id], metrics, epoch: ws.epoch };
+    })
+  );
 }
 
 /**
@@ -562,71 +595,74 @@ export function invalidateFacts(input: {
   file?: string;
 }): Promise<InvalidateResult> {
   const workspace = String(input.workspace ?? '').trim().replace(/\/+$/, '');
-  return serialize(workspace, () => {
-    const now = Number(input.now) || Date.now();
-    const ledger = readLedger(input.file);
-    const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
-    const raw = String(input.since ?? '').trim();
-    if (!raw) throw invalid('invalidate 必填 since（事实 id `F3` 或 epoch 数字）');
+  const file = input.file ?? FACTS_FILE;
+  return serialize(workspace, () =>
+    withFileLock(file, () => {
+      const now = Number(input.now) || Date.now();
+      const ledger = readLedger(file);
+      const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
+      const raw = String(input.since ?? '').trim();
+      if (!raw) throw invalid('invalidate 必填 since（事实 id `F3` 或 epoch 数字）');
 
-    let roots: Fact[] = [];
-    let sinceLabel = raw;
-    if (isFactID(raw)) {
-      const root = ws.facts.find(fact => fact.id === raw);
-      if (!root) throw invalid(`没有事实 ${raw}：用 collab_fact { action:"list", includeAll:true } 查看`);
-      if (root.state !== 'active') {
-        return {
-          workspace,
-          since: raw,
-          epoch: ws.epoch,
-          changed: [],
-          derived: [],
-          staleTodos: [],
-          applied: false
-        };
+      let roots: Fact[] = [];
+      let sinceLabel = raw;
+      if (isFactID(raw)) {
+        const root = ws.facts.find(fact => fact.id === raw);
+        if (!root) throw invalid(`没有事实 ${raw}：用 collab_fact { action:"list", includeAll:true } 查看`);
+        if (root.state !== 'active') {
+          return {
+            workspace,
+            since: raw,
+            epoch: ws.epoch,
+            changed: [],
+            derived: [],
+            staleTodos: [],
+            applied: false
+          };
+        }
+        roots = [root];
+        roots.push(...derivedFrom(ws, [root.id]).filter(fact => fact.state === 'active'));
+      } else {
+        const epoch = Number(raw);
+        if (!Number.isFinite(epoch) || epoch < 0) throw invalid(`since="${raw}" 不合法（事实 id F3 或 epoch 数字）`);
+        roots = ws.facts.filter(fact => fact.state === 'active' && fact.basedOn.facts <= epoch);
+        sinceLabel = `epoch:${epoch}`;
+        if (!roots.length) {
+          return {
+            workspace,
+            since: sinceLabel,
+            epoch: ws.epoch,
+            changed: [],
+            derived: [],
+            staleTodos: [],
+            applied: false
+          };
+        }
       }
-      roots = [root];
-      roots.push(...derivedFrom(ws, [root.id]).filter(fact => fact.state === 'active'));
-    } else {
-      const epoch = Number(raw);
-      if (!Number.isFinite(epoch) || epoch < 0) throw invalid(`since="${raw}" 不合法（事实 id F3 或 epoch 数字）`);
-      roots = ws.facts.filter(fact => fact.state === 'active' && fact.basedOn.facts <= epoch);
-      sinceLabel = `epoch:${epoch}`;
-      if (!roots.length) {
-        return {
-          workspace,
-          since: sinceLabel,
-          epoch: ws.epoch,
-          changed: [],
-          derived: [],
-          staleTodos: [],
-          applied: false
-        };
+
+      const rootIDs = new Set(roots.map(fact => fact.id));
+      const rootIsFact = isFactID(sinceLabel) ? sinceLabel : null;
+      for (const fact of roots) {
+        fact.state = 'superseded';
+        fact.supersededAt = now;
+        fact.supersededBy = rootIsFact && fact.id !== rootIsFact ? rootIsFact : null;
       }
-    }
+      ws.epoch += 1;
+      const metrics = bumpDay(ws, now);
+      metrics.retracted += roots.length;
+      const reason = rootIsFact ? `invalidate ${rootIsFact}` : `invalidate ${sinceLabel}`;
+      metrics.reasons[reason] = (metrics.reasons[reason] ?? 0) + 1;
 
-    const rootIDs = new Set(roots.map(fact => fact.id));
-    const rootIsFact = isFactID(sinceLabel) ? sinceLabel : null;
-    for (const fact of roots) {
-      fact.state = 'superseded';
-      fact.supersededAt = now;
-      fact.supersededBy = rootIsFact && fact.id !== rootIsFact ? rootIsFact : null;
-    }
-    ws.epoch += 1;
-    const metrics = bumpDay(ws, now);
-    metrics.retracted += roots.length;
-    const reason = rootIsFact ? `invalidate ${rootIsFact}` : `invalidate ${sinceLabel}`;
-    metrics.reasons[reason] = (metrics.reasons[reason] ?? 0) + 1;
+      const changed = roots.map(fact => ({ id: fact.id, state: fact.state, supersededBy: fact.supersededBy }));
+      const derived = roots.filter(fact => fact.id !== rootIsFact).map(fact => fact.id);
+      ledger.workspaces[workspace] = ws;
+      writeLedger(ledger, file);
 
-    const changed = roots.map(fact => ({ id: fact.id, state: fact.state, supersededBy: fact.supersededBy }));
-    const derived = roots.filter(fact => fact.id !== rootIsFact).map(fact => fact.id);
-    ledger.workspaces[workspace] = ws;
-    writeLedger(ledger, input.file);
-
-    // R5: in-flight work that cited a now-invalid fact is marked, never closed.
-    const staleTodos = markStaleWork(rootIDs);
-    return { workspace, since: sinceLabel, epoch: ws.epoch, changed, derived, staleTodos, applied: true };
-  });
+      // R5: in-flight work that cited a now-invalid fact is marked, never closed.
+      const staleTodos = markStaleWork(workspace, rootIDs);
+      return { workspace, since: sinceLabel, epoch: ws.epoch, changed, derived, staleTodos, applied: true };
+    })
+  );
 }
 
 /**
@@ -635,12 +671,15 @@ export function invalidateFacts(input: {
  * injection says `⚠失效`). A failure is a log line — the ledger write already
  * succeeded and the next invalidate retries.
  *
- * The scan is workspace-agnostic on purpose: a contract file carries no
- * workspace field, and a todo that cites `F3` can only exist if the session
- * settled/read it in the workspace that owns `F3`'s ledger. Matching by id
- * (never by claim text) keeps it from touching unrelated rows.
+ * **Workspace-scoped (review)**: `F1` is a per-workspace id — every workspace
+ * starts at `F1`, so matching by id alone marked another workspace's todo
+ * `⚠失效` for an unrelated fact. The todo's ref records the workspace it was
+ * created in (`collab_todo { action:"add", factId }`), and only a ref from
+ * **this** workspace can be marked. A legacy ref without a workspace is left
+ * alone (no guessing), which is safe because 0.9.4 is the first build to write
+ * refs at all.
  */
-function markStaleWork(factIDs: Set<string>): string[] {
+function markStaleWork(workspace: string, factIDs: Set<string>): string[] {
   if (!factIDs.size) return [];
   const marked: string[] = [];
   let files: string[] = [];
@@ -655,8 +694,11 @@ function markStaleWork(factIDs: Set<string>): string[] {
       const contract = readContract(sid);
       let dirty = false;
       const todos = contract.todos.map(todo => {
-        const factId = String(asObject(asObject(todo).ref).factId ?? '');
-        if (!factId || !factIDs.has(factId) || TODO_DONE_STATUSES.includes(todo.status)) return todo;
+        const ref = asObject(asObject(todo).ref);
+        const factId = String(ref.factId ?? '');
+        const refWorkspace = String(ref.workspace ?? '').trim().replace(/\/+$/, '');
+        if (!factId || refWorkspace !== workspace) return todo;
+        if (!factIDs.has(factId) || TODO_DONE_STATUSES.includes(todo.status)) return todo;
         if (todo.staleWork) return todo;
         dirty = true;
         marked.push(`${sid}:${todo.id}`);
@@ -684,7 +726,40 @@ export function retractedLabel(root: string, derived: string[]): string {
 
 /** The current day's retract counters (the measurable half of R3). */
 export function metricsOf(workspace: string, now = Date.now(), file = FACTS_FILE): FactDayMetrics {
-  return workspaceFacts(workspace, file).metrics[dayKey(now)] ?? { settled: 0, retracted: 0, reasons: {} };
+  return (
+    workspaceFacts(workspace, file).metrics[dayKey(now)] ?? { settled: 0, retracted: 0, staleDeliveries: 0, reasons: {} }
+  );
+}
+
+/**
+ * 0.9.4 review: count the `stale` messages this workspace actually delivered.
+ * The "reply ≤30% of the original" rule is a behavioural convention (the plugin
+ * never writes the reply), so the auditable half is the count: a human can
+ * sample the deliveries and measure the ratio. Best-effort — a counter failure
+ * never fails a model request.
+ */
+export function noteStaleDeliveries(input: {
+  workspace: string;
+  count?: number;
+  now?: number;
+  file?: string;
+}): Promise<number> {
+  const workspace = String(input.workspace ?? '').trim().replace(/\/+$/, '');
+  const count = Math.max(0, Math.trunc(Number(input.count) || 0));
+  if (!count) return Promise.resolve(0);
+  const file = input.file ?? FACTS_FILE;
+  return serialize(workspace, () =>
+    withFileLock(file, () => {
+      const now = Number(input.now) || Date.now();
+      const ledger = readLedger(file);
+      const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
+      const metrics = bumpDay(ws, now);
+      metrics.staleDeliveries += count;
+      ledger.workspaces[workspace] = ws;
+      writeLedger(ledger, file);
+      return metrics.staleDeliveries;
+    })
+  );
 }
 
 /* -------------------------------------------------------------- injection */

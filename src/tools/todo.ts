@@ -34,6 +34,7 @@ import {
 import type { ContractTodo, TodoKind, TodoStatus } from '../core/contract.ts';
 import { InvariantError, invalid } from '../core/errors.ts';
 import { checkEvidence } from '../core/evidence.ts';
+import { workspaceOf } from '../core/facts.ts';
 import { parseWakeWhen, wakePhrase } from '../core/wake.ts';
 import { truncate } from '../util.ts';
 import type { ToolDefinition } from '../types.ts';
@@ -227,7 +228,7 @@ export function todoTool(kit: ToolKit): ToolDefinition {
             blockingOn: blocking,
             since: now,
             updatedAt: now,
-            ...(factRef ? { ref: { factId: factRef } } : {})
+            ...(factRef ? { ref: { factId: factRef, workspace: workspaceOf(ctx) } } : {})
           };
           // `todoSeq` is monotonic across closed-history trimming: an id is
           // never issued twice, even after the row itself is gone.

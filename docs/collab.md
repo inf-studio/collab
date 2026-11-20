@@ -286,8 +286,8 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
 | `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by?, next?, on?, reason? }` | **会话契约主线（0.9.1；0.9.3 三选一）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。**0.9.3**：`resume {next}` / `block {on,reason}` / `done` 是回答 `[drift]` 的唯一三个动作；`done` 要求已有 mainline next-up 待办。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 / §11.24 |
 | `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
-| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, factId?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。`factId?`（0.9.4）：这条待办依据的事实（`F3`）；事实被作废后行保留并标 `⚠失效`（§11.25）。见 §11.22 / §11.24 |
-| `collab_fact` | `{ action, claim?, evidence?, grade?, factIds?, id?, reason?, since?, includeAll?, limit?, confirm }` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`/`F2`…（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行；`relayed`/`unknown` 事实**不得**被引用为证据，按正文 `F3` 或 `factIds` 都会被拒）；`retract {id, reason}` 撤回单条并写当日 `metrics.retract_count` + 原因分类；`invalidate {since}` 作废一条事实及其**显式引用**（`basedOn.factIds`）的派生，或 epoch 数字作废该 epoch 及之前 settled 的 active 事实，`epoch+1`，工作区级传播，并在途 todo 标 `staleWork`（**不关闭**）；`list` 只读（默认 active，`includeAll` 含历史）。写动作需 `confirm:true`。见 §11.25 |
+| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, factId?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。`factId?`（0.9.4）：这条待办依据的事实（`F3`，ref 同时记 `workspace`）；同一工作区的事实被作废后行保留并标 `⚠失效`（§11.25）。见 §11.22 / §11.24 |
+| `collab_fact` | `{ action, claim?, evidence?, grade?, factIds?, id?, reason?, since?, includeAll?, limit?, confirm }` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`/`F2`…（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行；`relayed`/`unknown` 事实**不得**被引用为证据，按正文 `F3` 或 `factIds` 都会被拒）；`retract {id, reason}` 撤回单条并写当日 `metrics.retract_count` + 原因分类；`invalidate {since}` 作废一条事实及其**显式引用**（`basedOn.factIds`）的派生，或 epoch 数字作废该 epoch 及之前 settled 的 active 事实，`epoch+1`，工作区级传播，并在途 todo 标 `staleWork`（**不关闭**）；`list` 只读（默认 active，`includeAll` 含历史，并显示当日 `settled`/`retracted`/`stale` 计数）。写动作需 `confirm:true`。见 §11.25 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -2233,6 +2233,7 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
                              "factIds": ["F2"] },
                 "by": "ses_…", "at": 0, "supersededBy": null, "scope": "workspace" }],
     "metrics": { "2026-11-20": { "settled": 4, "retracted": 1,
+                                 "staleDeliveries": 2,
                                  "reasons": { "口径错误": 1 } } } } }
 ```
 
@@ -2242,7 +2243,28 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
   事实的 `basedOn.facts` 记录这个版本号；消息的 `basedOn.facts` 同样。
 - `seq` 是「发放过的最大 `F<n>`」，裁剪历史后 id 也**不会复用**。上限 **2000** 行：超出先淘汰最旧的
   non-active，再淘汰最旧的 active。
-- 写：`tmp + rename`；读：坏文件/坏行只丢该行，不抛错（`error-handling` 的降级口径）。
+- 写：**`<file>.lock` 跨进程互斥 + `tmp + rename` 原子替换**；读：坏文件/坏行只丢该行，不抛错
+  （`error-handling` 的降级口径）。
+
+#### 跨进程并发写（0.9.4 复核必改）
+
+`collab-facts.json` 是**全机一个文件**，每次写入都是整文件读改写。只按 workspace 串行（进程内队列）不够：
+两个 OpenCode 进程（不同工作区，本机常态）会各自读到同一份快照，后写的把对方**整个 workspace 条目**抹掉，
+而且两边都 exit 0、无任何报错（复核实测 3 轮丢 21–26 条 / 50）。
+
+修法（`src/core/file-lock.ts`，`collab-glossary.json` 同型）：
+
+| 项 | 规则 |
+| --- | --- |
+| 锁文件 | `<file>.lock`，`open(…, 'wx')` 原子创建；内容 `{ pid, at, token }` |
+| 互斥范围 | 覆盖**整个** read-modify-write（不是只包 `rename`） |
+| 陈旧回收 | `at` 超过 **60s**（`FILE_LOCK_STALE_MS`）或 `pid` 已不存在（`kill(pid,0)` → ESRCH）即回收；刚 `open` 还没写内容的锁**不算陈旧**（按年龄判定，不按可解析性） |
+| 重试 | **3 次**、指数退避 `50 / 200 / 800ms`（`FILE_LOCK_ATTEMPTS` / `FILE_LOCK_RETRY_DELAYS_MS`）；耗尽后**可读拒绝**（`ValidationError`，不报缺陷）：未写入任何内容，稍后重试 |
+| 释放 | 只删 token 仍是自己的锁——被陈旧回收后接管的新持有者不会被误删 |
+| 原子性 | `tmp + rename` 保持不变：锁是**互斥**，rename 是**原子性**，两者不能互相替代 |
+
+> 进程内队列（按 workspace / pair）保留：它省掉同进程内的锁竞争，但**不是**安全边界。
+> `noteStaleDeliveries`（注入侧计数）走同一把锁；计数失败只记日志，不影响请求。
 
 #### `collab_fact`（26 → 27 个工具）
 
@@ -2251,7 +2273,7 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
 | `settle` | 新事实，或覆盖同 `claim` 的旧 active 事实（旧的转 `superseded → 新 id`） | `claim` / `evidence` 非空、`grade` 必填；`relayed` / `unknown` 事实**不得**被引用为证据 |
 | `retract {id, reason}` | `state='retracted'`，记原因；当日 `metrics.retracted` +1、`reasons[原因]` +1 | `id` 存在且不是已撤回；`reason` 非空 |
 | `invalidate {since}` | `F#`：该事实 + 传递引用它的派生 → `superseded`；数字：`basedOn.facts <= epoch` 的 active 事实 → `superseded`；`epoch+1` | `since` 是合法 `F#` 或非负整数；已无 active 可作废 → 幂等 no-op（不涨 epoch） |
-| `list` | 只读；默认只列 `active`，`includeAll:true` 连历史；显示当日 `settled` / `retracted` 与原因分类 | — |
+| `list` | 只读；默认只列 `active`，`includeAll:true` 连历史；显示当日 `settled` / `retracted` / `stale` 与原因分类 | — |
 
 - 写动作都要 `confirm:true`；否则只返回预览。
 - `settle` 允许显式 `grade:"unknown"`（诚实登记「未标注」），但这样的行同样不能被引用为证据——`list` 会显示
@@ -2259,7 +2281,10 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
 - **派生判定**：沿 `basedOn.factIds` 的**传递闭包**（`settle` 时按 `factIds` 或正文里的 `F3` token 建立边）。
   设计 §4 的 `basedOn.facts <= sinceEpoch` 公式保留给 **epoch 形式**；把它套到单个 fact id 上会把同 epoch 的
   无关事实一起作废（已记录为偏差，见下）。
-- 撤回可度量：`retract` 与 `invalidate` 都计入 `metrics.retract_count`（设计 §5），按本地日期分桶、按原因分类。
+- 撤回可度量：`retract`、`invalidate` **以及 `settle` 覆盖同 claim 的旧行（supersede）**都计入
+  `metrics.retract_count`（设计 §5），按本地日期分桶、按原因分类（supersede 只计数，原因由 overwrite 本身表达）。
+- `retract` 一行已 `superseded` 的事实时**保留 `supersededBy`**（复核）：否则 `[retracted:F2→F4]` 会退化成 `F2`，
+  丢失「被哪条取代」。
 
 #### 证据等级（D5/R2）
 
@@ -2289,6 +2314,10 @@ compare(basedOn):
 [stale] 本条基于 <commit>，你已到 <commit2>；只回增量（≤30% 原文），不要重述已作废事实
 ```
 
+> **「≤30%」是行为约定，不是自动闸门**（0.9.4 复核调整）：插件不生成回复，无法机器判定长度。可验证的两条：
+> ① 注入逐字包含上面这句；② 每次 `stale` 投递计入 `metrics.staleDeliveries`（当日计数），供人工抽检比值。
+> 插件**不会**因为回复过长而拒绝任何内容。
+
 - `conflict` 只注入 `[conflict] 基线分叉（本条 …，本地 …）—— 先各自报增量，0.9.5 会开决策`，**不自动开决策**。
 - `[基线未知]` 标在消息行前（D2），与 `[未标注]` 可同时出现：一个说「不知道等级」，一个说「不知道基线」。
 
@@ -2311,7 +2340,11 @@ compare(basedOn):
 
 `invalidate` 成功后扫描契约文件：`todos[].ref.factId` 命中被作废事实的 **open** 行加 `staleWork: true`，
 `[todo]` 行尾标 **`⚠失效`**、`collab_todo list` 同时显示 `依据 F#`。**不自动关闭**——替人决定「这条不用做了」
-是另一种数据丢失。`ref.factId` 由 `collab_todo { action:"add", factId }` 写入。
+是另一种数据丢失。`ref` 由 `collab_todo { action:"add", factId }` 写入。
+
+**按 workspace 过滤（复核）**：`F#` 在每个工作区从 `F1` 重新编号，只按 id 匹配会把另一个工作区的同名 todo
+也标 `⚠失效`。因此 ref 记录创建时的工作区（`{ factId, workspace }`），`invalidate` 只标记 **ref.workspace ==
+被作废账本所在工作区** 的行；没有 workspace 的旧 ref 一律不动（0.9.4 是第一个写 ref 的版本，不存在需要兜底的旧数据）。
 
 #### glossary（R6）
 
@@ -2334,7 +2367,7 @@ collab_send { target, text, glossary:{ conflict:["状态"] }, confirm:true }
 | 1 | 设计 §4 的派生公式 `basedOn.facts <= sinceEpoch` | 只用于 `invalidate {since: epoch}`；`since: F#` 用**显式引用闭包**。套用公式到单个 id 会作废同 epoch 的全部无关事实（过度撤回会让真事实也被标死） |
 | 2 | `facts` 表（SQLite） | **0.9.4 不投影**：真源是 `collab-facts.json`；`collab_index stats` 显示 `facts=0（真源在 collab-facts.json）` |
 | 3 | repo / env 的先后 | 没有任意 commit 的祖先判定：值不同按「落后」；只有同时 ahead+behind 才 `conflict` |
-| 4 | 契约没有 workspace 字段 | `staleWork` 扫描按 **factId** 匹配所有契约文件（不按工作区过滤），只动机命中 `ref.factId` 的行 |
+| 4 | 契约本身没有 workspace 字段 | 由 todo 的 `ref.workspace` 承担（复核后）；无 workspace 的旧 ref 不参与 `staleWork` 标记 |
 | 5 | `[未标注]` / `[基线未知]` 的噪声 | 这是**故意可见的债**：旧消息 / CLI 消息没有元数据，标记它们正是 R2 的验收项 |
 | 6 | `conflict` 不开决策 | 本版只标记 + 注入；0.9.5 的 `collab_decide` 负责开单 |
 
@@ -2344,24 +2377,31 @@ collab_send { target, text, glossary:{ conflict:["状态"] }, confirm:true }
 FACTS_FILE      = ~/.config/opencode/collab-facts.json   // COLLAB_FACTS_FILE
 GLOSSARY_FILE   = ~/.config/opencode/collab-glossary.json // COLLAB_GLOSSARY_FILE
 FACTS_LIMIT     = 2000      // 永久账本上限（非 active 先淘汰）
-STALE_REPLY_RATIO = 0.3     // stale 回复的增量预算（只写进注入文案）
+STALE_REPLY_RATIO = 0.3     // stale 回复的增量预算（只写进注入文案，不是闸门）
+FILE_LOCK_STALE_MS = 60000  // 跨进程锁的陈旧阈值
+FILE_LOCK_ATTEMPTS = 3      // 首次 + 2 次重试
+FILE_LOCK_RETRY_DELAYS_MS = [50, 200, 800]
 ```
 
 回滚：`git restore -- src/core/messages.ts src/core/storage.ts src/core/contract.ts src/hooks/context.ts src/tools/{index,send,reply,todo,store,shared}.ts`、
-`rm -f src/core/facts.ts src/core/tri-state.ts src/core/glossary.ts src/tools/fact.ts test/facts.mjs`、
+`rm -f src/core/facts.ts src/core/tri-state.ts src/core/glossary.ts src/core/file-lock.ts src/tools/fact.ts test/facts.mjs`、
 `rm -f ~/.config/opencode/collab-facts.json ~/.config/opencode/collab-glossary.json`；
 从 `package.json` 的 `test` 链里移除 `node test/facts.mjs`。
 
 #### 验收
 
-`test/facts.mjs`（74 项）：27 个工具 · settle/list（id 连续、grade 必填、`unknown` 可见、同 claim 覆盖）·
+`test/facts.mjs`（93 项）：27 个工具 · settle/list（id 连续、grade 必填、`unknown` 可见、同 claim 覆盖且计入
+`retracted`）·
 relayed/unknown 引用被拒（正文与 `factIds` 两条路径）· retract（state / reason / 当日计数 / 不可重复）·
 invalidate F#（根 + 派生 superseded、epoch+1、幂等 no-op、`[retracted:F2→F6]` 工作区级传播）·
 invalidate epoch（`basedOn.facts <= epoch`）· 三态 fresh/stale/conflict/无基线（D2）· `[未标注]` / `[stale]`（≤30% 文案）/
 `[基线未知]` / `[conflict]` 注入 · `[settled]` 每会话只播一次 · 在途 todo 标 `staleWork` + `⚠失效` 且不关闭 ·
-glossary（定义、第 2 次冲突拒绝、define+conflict 放行、一行注入）· 发送元数据 `grade` / `factIds` / `basedOn`
-（缺省 `unknown`，信封同）。
-**变异（强制）**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（实测退出码 1）。
+glossary（定义、第 2 次冲突拒绝、define+conflict 放行、一行注入、`collab_reply` 同参数）· 发送元数据
+`grade` / `factIds` / `basedOn`（缺省 `unknown`，信封同）· 10 条进程内并发 settle 零丢失 · 跨工作区账本 /
+`[settled]` / `staleWork` 隔离 · 注入预算（契约 ≤12 行、事实段 ≤3 行、整块 ≤15）· **双进程各 settle 25 条 × 3 轮
+`wsA=25/25 wsB=25/25 lost=0`**。
+**变异（强制）**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（退出码 1）；
+`withFileLock` 置空 → 双进程回归必红（实测 lost = 21 / 18 / 26，退出码 1）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

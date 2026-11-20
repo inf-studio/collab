@@ -30,10 +30,15 @@
  *  12. send metadata carries grade / factIds / basedOn (default `unknown`)
  *  13. a superseded / retracted fact cannot be cited; the design's flat ledger
  *      shape is still readable
+ *  14. review: `supersededBy` survives a retract · 10 in-process concurrent
+ *      settles · cross-workspace ledger / `[settled]` / `staleWork` isolation ·
+ *      `staleDeliveries` counter
+ *  15. review: two processes settling 25 facts each (3 rounds) never lose a
+ *      workspace — `wsA=25/25 wsB=25/25 lost=0`
  *
  * Exits 1 if any check fails.
  */
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -221,9 +226,16 @@ expect('preview writes nothing', /未写入/.test(preview) && workspaceLedger().
 await settle('未标注的断言', 'someone said so', 'unknown');
 const unknownList = await call('collab_fact', { action: 'list' });
 expect('an explicit unknown grade is listable as grade=unknown', unknownList.includes('F3 [unknown]'), unknownList.split('\n').find(line => line.includes('F3')) ?? '');
+const retractedBeforeOverwrite = internals.metricsOf(workspace).retracted;
 const overwrite = await settle('serverId 恒非空', 'repo/era RedisClient.php:640', 'measured');
+const retractedAfterOverwrite = internals.metricsOf(workspace).retracted;
 expect('an identical claim supersedes the active older one', /旧事实已 supersede: F1/.test(overwrite) && factOf('F1')?.state === 'superseded', overwrite.split('\n').slice(-1)[0]);
 expect('the replacement is F4 with evidence moved', factOf('F4')?.evidence === 'repo/era RedisClient.php:640', factOf('F4')?.evidence);
+expect(
+  'a settle overwrite counts in retract_count (design §5: retract + supersede)',
+  retractedAfterOverwrite === retractedBeforeOverwrite + 1,
+  `${retractedBeforeOverwrite} → ${retractedAfterOverwrite}`
+);
 
 // ============================================================ 3) relayed evidence
 section('3) relayed / unknown facts cannot be evidence');
@@ -453,6 +465,197 @@ expect(
   migrated.workspaces[workspace]?.epoch === 3 && migrated.workspaces[workspace]?.facts[0]?.id === 'F1',
   JSON.stringify(Object.keys(migrated.workspaces))
 );
+
+// ============================================================ 13) review: ledger safety
+section('13) review: supersede pointer, in-process concurrency, cross-workspace isolation');
+
+// (a) retracting an already-superseded row keeps its `supersededBy` pointer.
+const keepOld = await settle('会被覆盖的断言', 'probe:keep', 'measured');
+const keepNew = await settle('会被覆盖的断言', 'probe:keep-2', 'measured');
+const keepId = /已登记 (F\d+)/.exec(keepOld)?.[1];
+const keepNewId = /已登记 (F\d+)/.exec(keepNew)?.[1];
+await call('collab_fact', { action: 'retract', id: keepId, reason: '被新版本取代且已过时', confirm: true });
+expect(
+  'retract keeps the supersededBy pointer of an already-superseded row',
+  factOf(keepId)?.state === 'retracted' && factOf(keepId)?.supersededBy === keepNewId,
+  JSON.stringify({ state: factOf(keepId)?.state, supersededBy: factOf(keepId)?.supersededBy, expected: keepNewId })
+);
+
+// (b) in-process concurrency: 10 settles at once must all land (no lost update
+// between two different workspace queues inside one process either).
+const concurrentWorkspace = workspace;
+const concurrentBefore = workspaceLedger().facts.length;
+await Promise.all(
+  Array.from({ length: 10 }, (_, index) =>
+    internals.settleFact({
+      workspace: concurrentWorkspace,
+      claim: `并发事实 ${index}`,
+      evidence: `probe:concurrent:${index}`,
+      grade: 'measured',
+      by: 'ses_me',
+      now: Date.now() + index
+    })
+  )
+);
+const concurrentFacts = workspaceLedger().facts.filter(fact => fact.claim.startsWith('并发事实'));
+expect(
+  '10 in-process concurrent settles all land (unique ids, no lost update)',
+  concurrentFacts.length === 10 && new Set(concurrentFacts.map(fact => fact.id)).size === 10,
+  `${concurrentFacts.length} rows / ${new Set(concurrentFacts.map(fact => fact.id)).size} ids (before ${concurrentBefore})`
+);
+
+// (c) cross-workspace isolation: a second workspace has its own ledger, its own
+// F1, and does not see / announce the first workspace's facts.
+const workspaceB = join(root, 'workspace-b');
+mkdirSync(workspaceB, { recursive: true });
+const factsA = workspaceLedger().facts.length;
+ctx.location.directory = workspaceB;
+const bSettle = await settle('B 工作区的事实', 'probe:b', 'measured');
+const bList = await call('collab_fact', { action: 'list' });
+expect('workspace B starts its own ids at F1', /已登记 F1/.test(bSettle), bSettle.split('\n')[0]);
+expect(
+  'workspace B list does not show workspace A facts',
+  bList.includes('B 工作区的事实') && !bList.includes('serverId 恒非空') && !bList.includes('并发事实'),
+  bList.split('\n')[0]
+);
+const bInjection = await ask('ses_ws_b');
+expect('[settled:F1] in B is B’s claim, not A’s', bInjection.includes('[settled:F1] B 工作区的事实'), bInjection.split('\n').find(line => line.startsWith('[settled')) ?? '(none)');
+ctx.location.directory = workspace;
+expect('workspace A ledger is untouched by B', workspaceLedger().facts.length === factsA, `${workspaceLedger().facts.length} vs ${factsA}`);
+
+// (d) staleWork is workspace-scoped: B's `invalidate F1` must not mark A's todo.
+const aFact = await settle('A 的在途依据', 'probe:a-work', 'measured', {}, 'ses_stale_a');
+const aFactId = /已登记 (F\d+)/.exec(aFact)?.[1];
+const aTodo = await call('collab_todo', { action: 'add', subject: 'A 的待办', factId: aFactId, confirm: true }, 'ses_stale_a');
+const aTodoId = /已新增待办 (T\d+)/.exec(aTodo)?.[1];
+ctx.location.directory = workspaceB;
+await call('collab_fact', { action: 'invalidate', since: 'F1', confirm: true }, 'ses_ws_b');
+const aStillFresh = internals.readContract('ses_stale_a').todos.find(todo => todo.id === aTodoId);
+expect(
+  'another workspace’s invalidate does NOT mark this workspace’s todo',
+  aStillFresh?.staleWork !== true,
+  `staleWork=${String(aStillFresh?.staleWork)} (B invalidated its own F1)`
+);
+ctx.location.directory = workspace;
+await call('collab_fact', { action: 'invalidate', since: aFactId, confirm: true }, 'ses_stale_a');
+const aNowStale = internals.readContract('ses_stale_a').todos.find(todo => todo.id === aTodoId);
+expect('the owning workspace’s invalidate does mark it', aNowStale?.staleWork === true, String(aNowStale?.staleWork));
+
+// (e) `staleDeliveries` is the auditable half of the ≤30% convention.
+expect(
+  'stale deliveries were counted for today',
+  internals.metricsOf(workspace).staleDeliveries >= 1,
+  String(internals.metricsOf(workspace).staleDeliveries)
+);
+
+// ============================================================ 14) review: glossary on reply + injection budget
+section('14) review: glossary via collab_reply + total injection budget');
+const requestSent = await call(
+  'collab_send',
+  { target: 'ses_peer', text: '请回一条带术语定义的受理', kind: 'request', confirm: true },
+  'ses_me'
+);
+const replyThread = /thread=(t_[A-Za-z0-9_]+)/.exec(requestSent)?.[1];
+expect('a request produced a thread to reply on', Boolean(replyThread), replyThread ?? requestSent.split('\n')[1]);
+const replied = await call(
+  'collab_reply',
+  {
+    threadID: replyThread,
+    text: '受理，术语先对齐：回退 = revert 到上一个 commit',
+    glossary: { define: { term: '回退', meaning: 'revert 到上一个 commit' } },
+    confirm: true
+  },
+  'ses_me'
+);
+expect('collab_reply accepts glossary.define', /术语「回退」已定义/.test(replied), replied.split('\n').find(line => line.includes('术语')) ?? '');
+expect(
+  'the reply definition is stored on the pair (same pair as send)',
+  internals.termsFor('ses_me', 'ses_peer').some(term => term.term === '回退' && term.meaning.includes('revert')),
+  JSON.stringify(internals.termsFor('ses_me', 'ses_peer').map(term => term.term))
+);
+
+// A session with all four contract sections + the facts section: the contract
+// block must stay ≤12 lines and the facts block ≤3 (`[settled]` / `[retracted]` /
+// `[glossary]`), i.e. the new lines never blow the request budget.
+const budgetSid = 'ses_budget';
+await call('collab_mission', { action: 'set', oneLine: '预算测试主线', inScope: ['注入'], outOfScope: ['其它'] }, budgetSid);
+await call('collab_mission', { action: 'confirm', by: 'human' }, budgetSid);
+await call('collab_progress', { action: 'add', milestone: 'M1', title: '预算', confirm: true }, budgetSid);
+await call('collab_todo', { action: 'add', subject: '预算待办一', confirm: true }, budgetSid);
+await call('collab_todo', { action: 'add', subject: '预算待办二', blockingOn: 'ses_peer', confirm: true }, budgetSid);
+const budgetText = await ask(budgetSid);
+const blocks = budgetText.split('\n\n');
+const contractBlock = blocks.find(block => block.includes('[mission]')) ?? '';
+const factsBlock = blocks.find(block => block.startsWith('[settled') || block.startsWith('[retracted')) ?? '';
+const nonEmpty = text => text.split('\n').filter(line => line.trim().length > 0);
+expect('the contract block stays ≤12 lines', nonEmpty(contractBlock).length <= 12, String(nonEmpty(contractBlock).length));
+expect('the facts block stays ≤3 lines (settled + retracted + glossary)', nonEmpty(factsBlock).length <= 3, String(nonEmpty(factsBlock).length));
+expect(
+  'the whole injection stays ≤15 lines (12 contract + 3 facts)',
+  nonEmpty(budgetText).length <= 15,
+  String(nonEmpty(budgetText).length)
+);
+
+// ============================================================ 15) review: two-process ledger write
+section('15) review: two processes settling at once never lose a workspace');
+const raceFile = join(root, 'race-facts.json');
+const raceWorkspaceA = join(root, 'race-ws-a');
+const raceWorkspaceB = join(root, 'race-ws-b');
+const childScript = join(root, 'race-child.mjs');
+writeFileSync(
+  childScript,
+  [
+    "import { pathToFileURL } from 'node:url';",
+    `const { __internals } = await import(pathToFileURL(${JSON.stringify(dist)}).href);`,
+    'const workspace = process.env.CHILD_WS;',
+    'const tag = process.env.CHILD_TAG;',
+    'const count = Number(process.env.CHILD_COUNT);',
+    'for (let index = 0; index < count; index += 1) {',
+    '  await __internals.settleFact({',
+    '    workspace,',
+    "    claim: `${tag} 事实 ${index}`,",
+    "    evidence: `probe:${tag}:${index}`,",
+    "    grade: 'measured',",
+    "    by: `ses_${tag}`,",
+    '    now: Date.now() + index',
+    '  });',
+    '}'
+  ].join('\n'),
+  'utf8'
+);
+const { spawn } = await import('node:child_process');
+const runChild = (workspaceDir, tag) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [childScript], {
+      env: {
+        ...process.env,
+        COLLAB_FACTS_FILE: raceFile,
+        CHILD_WS: workspaceDir,
+        CHILD_TAG: tag,
+        CHILD_COUNT: '25'
+      },
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+    let stderr = '';
+    child.stderr.on('data', chunk => {
+      stderr += String(chunk);
+    });
+    child.on('exit', code => (code === 0 ? resolve() : reject(new Error(`${tag} exited ${code}: ${stderr}`))));
+    child.on('error', reject);
+  });
+for (let round = 1; round <= 3; round += 1) {
+  if (existsSync(raceFile)) unlinkSync(raceFile);
+  await Promise.all([runChild(raceWorkspaceA, 'A'), runChild(raceWorkspaceB, 'B')]);
+  const race = internals.readLedger(raceFile);
+  const countA = race.workspaces[raceWorkspaceA]?.facts.length ?? 0;
+  const countB = race.workspaces[raceWorkspaceB]?.facts.length ?? 0;
+  const lost = Math.max(0, 25 - countA) + Math.max(0, 25 - countB);
+  expect(
+    `round ${round}: wsA=25/25 wsB=25/25 lost=0`,
+    countA === 25 && countB === 25,
+    `wsA=${countA}/25 wsB=${countB}/25 lost=${lost}`
+  );
+}
 
 // ============================================================ summary
 await cleanup?.();

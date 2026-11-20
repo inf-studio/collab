@@ -41,6 +41,7 @@ import {
 import { log } from '../log.ts';
 import { asObject, randToken, truncate } from '../util.ts';
 import { invalid } from './errors.ts';
+import { withFileLock } from './file-lock.ts';
 
 export interface GlossaryTerm {
   term: string;
@@ -180,35 +181,41 @@ export interface DefineTermInput {
 /** Define (or redefine) one term for a pair. Replaces an existing definition. */
 export function defineTerm(input: DefineTermInput): Promise<{ pair: PairGlossary; term: GlossaryTerm; needMore: number }> {
   const key = pairKey(input.from, input.to);
-  return serialize(key, () => {
-    const term = truncate(input.term, GLOSSARY_TERM_CHARS);
-    const meaning = truncate(input.meaning, GLOSSARY_MEANING_CHARS);
-    if (!term) throw invalid('define 必填 term（如 "状态" / "已发版"）');
-    if (!meaning) throw invalid('define 必填 meaning（一句话定义；定义不清等于没定义）');
-    if (!String(input.from ?? '').trim() || !String(input.to ?? '').trim()) {
-      throw invalid('define 需要 from / to 两个会话（术语表按会话对维护）');
-    }
-    const now = Number(input.now) || Date.now();
-    const glossary = readGlossary(input.file);
-    const pair = glossary.pairs[key] ?? emptyPair();
-    const existing = pair.terms.find(entry => entry.term === term);
-    const entry: GlossaryTerm = { term, meaning, at: now, by: String(input.by ?? '') };
-    if (existing) Object.assign(existing, entry);
-    else {
-      if (pair.terms.length >= GLOSSARY_TERMS_MAX) {
-        throw invalid(
-          `术语表已达上限 ${GLOSSARY_TERMS_MAX} 条（一对会话 3–10 条）：先合并同义术语，再定义「${term}」`
-        );
+  const file = input.file ?? GLOSSARY_FILE;
+  // `collab-glossary.json` is one file per machine (same read-modify-write
+  // hazard as the facts ledger) — the in-process queue is per pair, so the
+  // cross-process file lock is what keeps two workspaces from clobbering it.
+  return serialize(key, () =>
+    withFileLock(file, () => {
+      const term = truncate(input.term, GLOSSARY_TERM_CHARS);
+      const meaning = truncate(input.meaning, GLOSSARY_MEANING_CHARS);
+      if (!term) throw invalid('define 必填 term（如 "状态" / "已发版"）');
+      if (!meaning) throw invalid('define 必填 meaning（一句话定义；定义不清等于没定义）');
+      if (!String(input.from ?? '').trim() || !String(input.to ?? '').trim()) {
+        throw invalid('define 需要 from / to 两个会话（术语表按会话对维护）');
       }
-      pair.terms.push(entry);
-    }
-    // The conflict counter is kept: a definition answers the *previous* conflict
-    // (its `at` now outranks that conflict), and a brand-new conflict afterwards
-    // starts a new round. Clearing the counter would erase the audit trail.
-    glossary.pairs[key] = pair;
-    writeGlossary(glossary, input.file);
-    return { pair, term: entry, needMore: Math.max(0, GLOSSARY_TERMS_MIN - pair.terms.length) };
-  });
+      const now = Number(input.now) || Date.now();
+      const glossary = readGlossary(file);
+      const pair = glossary.pairs[key] ?? emptyPair();
+      const existing = pair.terms.find(entry => entry.term === term);
+      const entry: GlossaryTerm = { term, meaning, at: now, by: String(input.by ?? '') };
+      if (existing) Object.assign(existing, entry);
+      else {
+        if (pair.terms.length >= GLOSSARY_TERMS_MAX) {
+          throw invalid(
+            `术语表已达上限 ${GLOSSARY_TERMS_MAX} 条（一对会话 3–10 条）：先合并同义术语，再定义「${term}」`
+          );
+        }
+        pair.terms.push(entry);
+      }
+      // The conflict counter is kept: a definition answers the *previous* conflict
+      // (its `at` now outranks that conflict), and a brand-new conflict afterwards
+      // starts a new round. Clearing the counter would erase the audit trail.
+      glossary.pairs[key] = pair;
+      writeGlossary(glossary, file);
+      return { pair, term: entry, needMore: Math.max(0, GLOSSARY_TERMS_MIN - pair.terms.length) };
+    })
+  );
 }
 
 export interface ConflictInput {
@@ -235,32 +242,35 @@ export interface ConflictResult {
  */
 export function recordConflict(input: ConflictInput): Promise<ConflictResult> {
   const key = pairKey(input.from, input.to);
-  return serialize(key, () => {
-    const term = truncate(input.term, GLOSSARY_TERM_CHARS);
-    if (!term) throw invalid('glossary conflict 需要一个 term（如 "状态"）');
-    if (!String(input.from ?? '').trim() || !String(input.to ?? '').trim()) {
-      throw invalid('glossary conflict 需要 from / to 两个会话');
-    }
-    const now = Number(input.now) || Date.now();
-    const glossary = readGlossary(input.file);
-    const pair = glossary.pairs[key] ?? emptyPair();
-    const current = pair.conflicts[term] ?? { count: 0, at: 0 };
-    const next: TermConflict = { count: current.count + 1, at: now };
-    pair.conflicts[term] = next;
-    glossary.pairs[key] = pair;
-    writeGlossary(glossary, input.file);
-    const definition = pair.terms.find(entry => entry.term === term);
-    // A definition recorded **after the previous conflict** answers that round;
-    // the second conflict with no newer definition refuses (R6).
-    const definedAfter = Boolean(definition && definition.at > current.at);
-    const blocked = next.count >= GLOSSARY_CONFLICT_LIMIT && !definedAfter;
-    return {
-      term,
-      count: next.count,
-      blocked,
-      ...(definition ? { meaning: definition.meaning } : {})
-    };
-  });
+  const file = input.file ?? GLOSSARY_FILE;
+  return serialize(key, () =>
+    withFileLock(file, () => {
+      const term = truncate(input.term, GLOSSARY_TERM_CHARS);
+      if (!term) throw invalid('glossary conflict 需要一个 term（如 "状态"）');
+      if (!String(input.from ?? '').trim() || !String(input.to ?? '').trim()) {
+        throw invalid('glossary conflict 需要 from / to 两个会话');
+      }
+      const now = Number(input.now) || Date.now();
+      const glossary = readGlossary(file);
+      const pair = glossary.pairs[key] ?? emptyPair();
+      const current = pair.conflicts[term] ?? { count: 0, at: 0 };
+      const next: TermConflict = { count: current.count + 1, at: now };
+      pair.conflicts[term] = next;
+      glossary.pairs[key] = pair;
+      writeGlossary(glossary, file);
+      const definition = pair.terms.find(entry => entry.term === term);
+      // A definition recorded **after the previous conflict** answers that round;
+      // the second conflict with no newer definition refuses (R6).
+      const definedAfter = Boolean(definition && definition.at > current.at);
+      const blocked = next.count >= GLOSSARY_CONFLICT_LIMIT && !definedAfter;
+      return {
+        term,
+        count: next.count,
+        blocked,
+        ...(definition ? { meaning: definition.meaning } : {})
+      };
+    })
+  );
 }
 
 /**

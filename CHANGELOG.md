@@ -31,11 +31,28 @@
   `[未标注]` / `[基线未知]` / `[stale]` / `[conflict]`（消息行 + 每轮各 ≤1 行指令）· `[glossary]`（一行摘要）。
   四段 `[mission]/[todo]/[drift]/[progress]` 的 12 行预算不变。
 - **在途失效（R5）**：`invalidate` 后扫描契约，`todos[].ref.factId` 命中的 open 行标 `staleWork: true`，
-  `[todo]` 行尾 **`⚠失效`**、`collab_todo list` 显示 `依据 F#`；**不自动关闭**。`collab_todo add` 新增 `factId?`。
+  `[todo]` 行尾 **`⚠失效`**、`collab_todo list` 显示 `依据 F#`；**不自动关闭**。`collab_todo add` 新增 `factId?`
+  （ref 同时记录 `workspace`，复核后按工作区过滤）。
 - **glossary（R6）**：`src/core/glossary.ts` — `~/.config/opencode/collab-glossary.json`，按 `(from,to)` 排序对
   维护 3–10 条术语；`collab_send` / `collab_reply` 新增 `glossary:{ define:{term,meaning}, conflict?:[term] }`；
   同一术语第 **2** 次冲突且无「上次冲突之后」的新定义 → **拒绝发送**（0 写入）；定义 + 冲突同一条消息给齐则放行。
-- **`metrics.retract_count`**：retract 与 supersede 都计入当日计数（按本地日期分桶），原因分类在 `list` / 回执里可查。
+- **`metrics.retract_count`**：retract、invalidate **以及 settle 覆盖（supersede）**都计入当日计数（按本地日期
+  分桶），原因分类在 `list` / 回执里可查。
+- **`metrics.staleDeliveries`（复核口径调整）**：每次 `stale` 投递按日计数。插件不生成回复，「回复 ≤ 原文 30%」
+  是**给模型的行为约定**，不是自动闸门；可审计的一半是这个计数（供人工抽检），PRD 验收已同步改写。
+
+### Fixed（复核必改）
+
+- **跨进程并发写不再丢整本账**：`src/core/file-lock.ts` — 每次账本/术语表写入在 `tmp + rename` 之外再套
+  `<file>.lock`（`open(…,'wx')` + `{pid, at, token}` + 60s 陈旧或死 pid 回收 + 3 次指数退避 50/200/800ms），
+  互斥覆盖**整个 read-modify-write**；释放只删自己 token 的锁。此前两个 OpenCode 进程（不同工作区）并发
+  settle 会互相覆盖，连对方整个 workspace 条目一起抹掉且无报错（复核实测 3 轮丢 21–26 条 / 50）。
+  锁耗尽时是可读拒绝（`ValidationError`，不报缺陷）。`collab-glossary.json` 同型修复。
+- **`retract` 不再清空 `supersededBy`**：对已 superseded 的行执行 retract 保留原指针，`[retracted:F2→F4]`
+  不再退化成 `F2`。
+- **`staleWork` 不再跨工作区误标**：`F#` 在每个工作区从 `F1` 重新编号；todo 的 ref 现在记录 `{factId, workspace}`，
+  `invalidate` 只标记同一工作区的行（无 workspace 的旧 ref 不动）。
+- **`metrics.retracted` 计入 settle 覆盖**（design §5「retract + supersede」）：同 claim 覆盖后计数 +1。
 
 ### Changed
 
@@ -48,16 +65,21 @@
 
 ### Tests / Docs
 
-- 新增 `test/facts.mjs`（**74 项**，已串进 `pnpm test`）：27 个工具 · settle/list（id 连续、grade 必填、
-  `unknown` 可见、同 claim 覆盖）· relayed/unknown 引用被拒（正文 + `factIds`）· retract（state / reason / 当日计数 /
-  不可重复）· invalidate F#（根 + 派生 superseded、epoch+1、幂等 no-op、`[retracted:F2→F6]` 工作区级传播）·
-  invalidate epoch · 三态 fresh/stale/conflict/无基线（D2）· `[未标注]` / `[stale]`（≤30% 文案）/ `[基线未知]` /
-  `[conflict]` 注入 · `[settled]` 每会话只播一次 · 在途 todo 标 `staleWork` + `⚠失效` 且不关闭 · glossary 四例 ·
-  发送元数据 `grade`/`factIds`/`basedOn`（缺省 `unknown`，信封同）。
-  **强制变异**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（实测，退出码 1）。
+- 新增 `test/facts.mjs`（**93 项**，已串进 `pnpm test`）：27 个工具 · settle/list（id 连续、grade 必填、
+  `unknown` 可见、同 claim 覆盖且计入 `retracted`）· relayed/unknown 引用被拒（正文 + `factIds`）· retract
+  （state / reason / 当日计数 / 不可重复 / 保留 `supersededBy`）· invalidate F#（根 + 派生 superseded、epoch+1、
+  幂等 no-op、`[retracted:F2→F6]` 工作区级传播）· invalidate epoch · 三态 fresh/stale/conflict/无基线（D2）·
+  `[未标注]` / `[stale]`（≤30% 文案）/ `[基线未知]` / `[conflict]` 注入 · `[settled]` 每会话只播一次 ·
+  在途 todo 标 `staleWork` + `⚠失效` 且不关闭 · glossary 五例（含 `collab_reply`）· 发送元数据
+  `grade`/`factIds`/`basedOn`（缺省 `unknown`，信封同）· 10 条进程内并发 settle 零丢失 · 跨工作区账本 / 注入 /
+  `staleWork` 隔离 · 注入预算（契约 ≤12 行、事实段 ≤3 行、整块 ≤15）。
+  **强制变异**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（退出码 1）；
+  `withFileLock` 置空 → 双进程回归必红（实测 lost = 21 / 18 / 26，退出码 1）；恢复后
+  **双进程各 25 条 × 3 轮 `wsA=25/25 wsB=25/25 lost=0`**。
 - 版本断言与工具数升到 0.9.4 / 27（`contract-inject` / `drift` / `gate` / `store-rebuild` / `handoff-harness`）。
-- 文档：`docs/collab.md` 工具表 + §11.25（事实账本 / 证据等级 / 三态 / 在途失效 / glossary / 偏差）；
-  README 版本表；skill `collab`（工具表 + 「事实账本」小节）。
+- 文档：`docs/collab.md` 工具表 + §11.25（事实账本 / 证据等级 / 三态 / **跨进程锁** / 在途失效 / glossary / 偏差）；
+  README 版本表；skill `collab`（工具表 + 「事实账本」小节）；PRD / implement 的 stale 验收口径改为
+  「注入文案 + `staleDeliveries` 计数」（30% 是行为约定，不是自动闸门）。
 
 ## [0.9.3] - 2026-11-20
 

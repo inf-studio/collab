@@ -107,6 +107,7 @@ import {
   isFactID,
   listFacts,
   metricsOf,
+  noteStaleDeliveries,
   readFactSeen,
   readLedger,
   retractFact,
@@ -116,6 +117,7 @@ import {
   workspaceOf,
   writeLedger
 } from './core/facts.ts';
+import { FILE_LOCK_ATTEMPTS, FILE_LOCK_RETRY_DELAYS_MS, FILE_LOCK_STALE_MS, tryAcquireFileLock, withFileLock } from './core/file-lock.ts';
 import {
   basedOnLabel,
   compareBasedOn,
@@ -675,6 +677,7 @@ export const __internals = {
   retractFact,
   invalidateFacts,
   metricsOf,
+  noteStaleDeliveries,
   formatFact,
   retractedLabel,
   factInjection,
@@ -696,5 +699,12 @@ export const __internals = {
   normalizeGrade,
   normalizeFactIds,
   messageSemantics,
-  unlabeledPrefix
+  unlabeledPrefix,
+  // 0.9.4 review: the cross-process lock around the whole-file ledgers. The
+  // two-process regression drives `settleFact` through this path directly.
+  withFileLock,
+  tryAcquireFileLock,
+  FILE_LOCK_STALE_MS,
+  FILE_LOCK_ATTEMPTS,
+  FILE_LOCK_RETRY_DELAYS_MS
 };

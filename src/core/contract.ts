@@ -117,8 +117,13 @@ export interface ContractTodo {
    * 0.9.4 (R5): the facts this todo rests on. `invalidate` marks a todo whose
    * `factId` was retracted with `staleWork: true` — the row stays open and the
    * injection says `⚠失效` (auto-closing would decide for the human).
+   *
+   * `workspace` was added in the 0.9.4 review: fact ids restart at `F1` in every
+   * workspace, so matching by id alone marked another workspace's todo for an
+   * unrelated fact. The ref records the workspace it was created in and only a
+   * ref from the invalidating workspace can be marked.
    */
-  ref?: { factId?: string } | null;
+  ref?: { factId?: string; workspace?: string } | null;
   /** Set by `core/facts.ts` when an open todo's cited fact is no longer active. */
   staleWork?: boolean;
 }
@@ -294,6 +299,7 @@ function normalizeTodo(raw: unknown): ContractTodo | undefined {
   const blocking = String(value.blockingOn ?? '').trim();
   const kind = TODO_KINDS.includes(String(value.kind) as TodoKind) ? (String(value.kind) as TodoKind) : 'mainline';
   const factRef = String(asObject(value.ref).factId ?? '').trim();
+  const refWorkspace = String(asObject(value.ref).workspace ?? '').trim().replace(/\/+$/, '');
   return {
     id,
     kind,
@@ -309,7 +315,7 @@ function normalizeTodo(raw: unknown): ContractTodo | undefined {
     updatedAt: num(value.updatedAt) || num(value.since) || Date.now(),
     deferredUntil: num(value.deferredUntil) || null,
     deferReason: value.deferReason ? text(value.deferReason, 200) : null,
-    ref: /^F\d+$/.test(factRef) ? { factId: factRef } : null,
+    ref: /^F\d+$/.test(factRef) ? { factId: factRef, ...(refWorkspace ? { workspace: refWorkspace } : {}) } : null,
     staleWork: value.staleWork === true
   };
 }

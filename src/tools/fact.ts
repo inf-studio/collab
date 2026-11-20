@@ -131,7 +131,7 @@ export function factTool(kit: ToolKit): ToolDefinition {
         const metrics = metricsOf(workspace, now);
         const head =
           `[facts] ${active} active / ${ws.facts.length} total · epoch ${ws.epoch}` +
-          ` · 今日 settled ${metrics.settled} / retracted ${metrics.retracted}`;
+          ` · 今日 settled ${metrics.settled} / retracted ${metrics.retracted} / stale ${metrics.staleDeliveries}`;
         const body = rows.length
           ? rows.map(fact => `  ${formatFact(fact)}`)
           : ['  （空）用 collab_fact { action:"settle", claim, evidence, grade, confirm:true } 登记第一条'];

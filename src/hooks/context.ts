@@ -11,7 +11,7 @@ import {
 } from '../core/contract.ts';
 import { isAckText } from '../core/ack.ts';
 import { evaluate as evaluateDrift, markDrifted } from '../core/drift.ts';
-import { factInjection, markFactSeen, readFactSeen, workspaceFacts, workspaceOf } from '../core/facts.ts';
+import { factInjection, markFactSeen, noteStaleDeliveries, readFactSeen, workspaceFacts, workspaceOf } from '../core/facts.ts';
 import { glossaryLineFor } from '../core/glossary.ts';
 import { compareBasedOn, localSnapshot } from '../core/tri-state.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
@@ -149,14 +149,16 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
    * receiving side, so its hand-off cid is acked on a side path (`[ack] <cid>
    * seen`). `[ack]` messages themselves are neither injected nor acked.
    */
-  async function injectInbox(event: ContextHookEvent): Promise<{ text?: string; shown: number; rest: number }> {
+  async function injectInbox(
+    event: ContextHookEvent
+  ): Promise<{ text?: string; shown: number; rest: number; stale: number }> {
     const config = readConfig();
-    if (!config.autoDeliver) return { shown: 0, rest: 0 };
+    if (!config.autoDeliver) return { shown: 0, rest: 0, stale: 0 };
     const sessionID = event?.sessionID;
-    if (!sessionID) return { shown: 0, rest: 0 };
+    if (!sessionID) return { shown: 0, rest: 0, stale: 0 };
 
     const box = await inbox.read(sessionID);
-    if (!box.messages.length) return { shown: 0, rest: 0 };
+    if (!box.messages.length) return { shown: 0, rest: 0, stale: 0 };
 
     const inRequest = collectRequestKeys(event);
     // `accounted` = messages this session has already been shown: injected in
@@ -226,7 +228,7 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
           };
         });
       }
-      return { shown: 0, rest: pending.length };
+      return { shown: 0, rest: pending.length, stale: 0 };
     }
 
     const rest = pending.length - shown.length;
@@ -253,12 +255,19 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     };
     let staleLine: string | undefined;
     let conflictLine: string | undefined;
+    // 0.9.4 review: how many `stale` messages this request really delivered. The
+    // "reply ≤30%" rule is a behavioural convention (we never write the reply),
+    // so the audit trail is this counter — a human samples and measures.
+    let staleCount = 0;
     const verdictOf = (
       semantics: ReturnType<typeof messageSemantics>
     ): ReturnType<typeof compareBasedOn> | undefined => {
       if (!semantics.basedOn) return undefined; // D2: no baseline = fresh + [基线未知]
       const verdict = compareBasedOn(semantics.basedOn, baseline());
-      if (verdict.state === 'stale' && !staleLine) staleLine = verdict.line;
+      if (verdict.state === 'stale') {
+        staleCount += 1;
+        if (!staleLine) staleLine = verdict.line;
+      }
       if (verdict.state === 'conflict' && !conflictLine) conflictLine = verdict.line;
       return verdict;
     };
@@ -308,7 +317,8 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         rest > 0 ? `…还有 ${rest} 条，调用 collab_inbox 查看全文。` : '全文/状态用 collab_inbox。'
       ].join('\n'),
       shown: shown.length,
-      rest
+      rest,
+      stale: staleCount
     };
   }
 
@@ -436,6 +446,15 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
         // 0.9.4: same after-push rule for the fact lines — a failed injection
         // leaves them pending for the next request.
         if (factPart.keys.length) await markFactSeen(deps.ctx, event.sessionID, factPart.keys);
+        // 0.9.4 review: the stale-delivery counter (auditable half of R4). A
+        // counter failure must never fail the request — the block is already in.
+        if (inboxPart.stale > 0) {
+          try {
+            await noteStaleDeliveries({ workspace: workspaceOf(deps.ctx), count: inboxPart.stale });
+          } catch (error) {
+            log('stale-delivery metric failed:', (error as Error)?.message ?? error);
+          }
+        }
         // Same rule for the awareness hint: stamp the 10-minute window only
         // once the line really reached the request.
         if (awarenessText) awareness.markShown(event.sessionID);
