@@ -71,18 +71,37 @@ const HEAD_CHARS = 8;
 const ENV_FILES = ['.env'];
 
 /** `git rev-parse --short=8 HEAD`; `undefined` when this is not a repo / git is absent. */
+const HEAD_TTL_MS = 5000;
+const headCache = new Map<string, { at: number; sha?: string }>();
+
+/**
+ * `git rev-parse --short=8 HEAD`; `undefined` when this is not a repo / git is
+ * absent.
+ *
+ * Cached for 5s per directory on purpose: spawning `git` costs 10–30ms, and a
+ * baseline marker needs "the HEAD we were looking at", not a per-call oracle.
+ * The cache also keeps the facts ledger's **lock hold time** tiny (the snapshot
+ * is read outside the lock — a `git` spawn inside it starved other processes).
+ */
 export function gitHead(directory: string): string | undefined {
+  const dir = String(directory ?? '').trim();
+  if (!dir) return undefined;
+  const hit = headCache.get(dir);
+  if (hit && Date.now() - hit.at < HEAD_TTL_MS) return hit.sha;
+  let sha: string | undefined;
   try {
-    const out = execFileSync('git', ['-C', directory, 'rev-parse', `--short=${HEAD_CHARS}`, 'HEAD'], {
+    const out = execFileSync('git', ['-C', dir, 'rev-parse', `--short=${HEAD_CHARS}`, 'HEAD'], {
       encoding: 'utf8',
       timeout: 2000,
       stdio: ['ignore', 'pipe', 'ignore']
     });
-    const sha = String(out ?? '').trim();
-    return /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
+    const value = String(out ?? '').trim();
+    sha = /^[0-9a-f]{7,40}$/i.test(value) ? value : undefined;
   } catch {
-    return undefined;
+    sha = undefined;
   }
+  headCache.set(dir, { at: Date.now(), sha });
+  return sha;
 }
 
 /** First 8 hex chars of each `.env` in the workspace (a content fingerprint). */

@@ -432,27 +432,35 @@ export interface SettleResult {
 export function settleFact(input: SettleInput): Promise<SettleResult> {
   const workspace = String(input.workspace ?? '').trim().replace(/\/+$/, '');
   const file = input.file ?? FACTS_FILE;
+  // Validate the pure inputs **before** taking the lock: a bad call must not
+  // wait on a writer.
+  const claim = text(input.claim, FACT_CLAIM_LIMIT);
+  if (!claim) throw invalid('settle 必填 claim（一句话可证伪的断言）');
+  const evidence = text(input.evidence, FACT_EVIDENCE_LIMIT);
+  if (!evidence) throw invalid('settle 必填 evidence（文件:行 / 命令 / 复现路径）');
+  const gradeRaw = String(input.grade ?? '').trim();
+  if (!gradeRaw) throw invalid(`settle 必填 grade（${FACT_SETTLE_GRADES.join(' | ')}）：未标注的事实不可引用`);
+  if (!FACT_SETTLE_GRADES.includes(gradeRaw)) {
+    throw invalid(`grade="${gradeRaw}" 不合法（${FACT_SETTLE_GRADES.join(' | ')}）`);
+  }
+  const grade = gradeRaw as FactGrade;
+  // 0.9.4 review (P2): the baseline is read **outside** the lock. `localSnapshot`
+  // shells out to `git` (10–30ms); doing that inside the critical section made a
+  // 25-settle burst hold the ledger for seconds and starved other processes into
+  // a refusal. The epoch is still attached inside (it must be the write-time one).
+  const baseline = localSnapshot({ workspace });
   // In-process queue per workspace **and** a cross-process file lock around the
   // whole read-modify-write: the ledger is one file per machine, so a queue is
   // not enough (two OpenCode processes would erase each other's workspace).
   return serialize(workspace, () =>
     withFileLock(file, () => {
-      const claim = text(input.claim, FACT_CLAIM_LIMIT);
-      if (!claim) throw invalid('settle 必填 claim（一句话可证伪的断言）');
-      const evidence = text(input.evidence, FACT_EVIDENCE_LIMIT);
-      if (!evidence) throw invalid('settle 必填 evidence（文件:行 / 命令 / 复现路径）');
-      const gradeRaw = String(input.grade ?? '').trim();
-      if (!gradeRaw) throw invalid(`settle 必填 grade（${FACT_SETTLE_GRADES.join(' | ')}）：未标注的事实不可引用`);
-      if (!FACT_SETTLE_GRADES.includes(gradeRaw)) {
-        throw invalid(`grade="${gradeRaw}" 不合法（${FACT_SETTLE_GRADES.join(' | ')}）`);
-      }
-      const grade = gradeRaw as FactGrade;
       const now = Number(input.now) || Date.now();
       const ledger = readLedger(file);
       const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
       const cited = guardCitations(ws, evidence, input.factIds);
       const basedOn: FactBasedOn = {
-        ...localSnapshot({ workspace, epoch: ws.epoch }),
+        ...baseline,
+        facts: ws.epoch,
         ...(cited.length ? { factIds: cited } : {})
       };
 
@@ -749,16 +757,21 @@ export function noteStaleDeliveries(input: {
   if (!count) return Promise.resolve(0);
   const file = input.file ?? FACTS_FILE;
   return serialize(workspace, () =>
-    withFileLock(file, () => {
-      const now = Number(input.now) || Date.now();
-      const ledger = readLedger(file);
-      const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
-      const metrics = bumpDay(ws, now);
-      metrics.staleDeliveries += count;
-      ledger.workspaces[workspace] = ws;
-      writeLedger(ledger, file);
-      return metrics.staleDeliveries;
-    })
+    withFileLock(
+      file,
+      () => {
+        const now = Number(input.now) || Date.now();
+        const ledger = readLedger(file);
+        const ws = ledger.workspaces[workspace] ?? emptyWorkspace();
+        const metrics = bumpDay(ws, now);
+        metrics.staleDeliveries += count;
+        ledger.workspaces[workspace] = ws;
+        writeLedger(ledger, file);
+        return metrics.staleDeliveries;
+      },
+      // A model request must not wait 5s for a metric: bound the queue.
+      { waitMs: 1000 }
+    )
   );
 }
 

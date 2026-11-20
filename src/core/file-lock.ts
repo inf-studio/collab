@@ -27,7 +27,7 @@
  *   - a fresh but unreadable lock (the `open` → `write` window) is **not**
  *     treated as stale; age decides, not parseability.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, watch, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { invalid } from './errors.ts';
@@ -35,15 +35,20 @@ import { errCode, errText, log } from '../log.ts';
 
 /** A lock older than this is considered abandoned (a writer never holds it long). */
 export const FILE_LOCK_STALE_MS = 60_000;
-/** Total acquisition attempts (first try + 2 retries). */
-export const FILE_LOCK_ATTEMPTS = 3;
 /**
- * Backoff between attempts (3 total, same shape as `DB_RETRY_DELAYS_MS`). The
- * first retry is quick because the critical section is milliseconds; the later
- * ones cover a *burst* from another process (25 sequential settles hold the lock
- * tens of times), which a ~200ms total budget starved into a refusal.
+ * Backoff between attempts. The first retry is quick because the critical
+ * section is milliseconds; the later ones cover a *burst* from other processes
+ * (25 sequential settles hold the lock tens of times), which a ~200ms total
+ * budget starved into a refusal.
  */
 export const FILE_LOCK_RETRY_DELAYS_MS = [50, 200, 800];
+/**
+ * Total acquisition attempts: `1 + delays.length` (4), the same convention as
+ * `withRetry` in `core/db-runtime.ts` (`attempts = delays.length + 1`). The
+ * earlier `3` made the third delay (800ms) unreachable — the loop slept
+ * `50 / 200` and then gave up.
+ */
+export const FILE_LOCK_ATTEMPTS = FILE_LOCK_RETRY_DELAYS_MS.length + 1;
 
 export interface FileLockHandle {
   file: string;
@@ -127,10 +132,13 @@ export function tryAcquireFileLock(
       lockPath,
       token: mine,
       release() {
-        // Only delete the lock when it is still ours: a stale reaper may have
-        // handed it to another process while we were running.
-        const { owner } = readOwner(lockPath);
-        if (owner.token && owner.token !== mine) return;
+        // Only delete the lock when the file is readable **and** still carries
+        // our token. An unreadable lock is either a different process inside its
+        // `open` → `write` window or a lock we already lost to a stale reaper:
+        // deleting either would hand two writers the same lock. The 60s stale
+        // reaper is the backstop, so leaking here is safe.
+        const { owner, readable } = readOwner(lockPath);
+        if (!readable || !owner.token || owner.token !== mine) return;
         try {
           unlinkSync(lockPath);
         } catch (error) {
@@ -163,18 +171,82 @@ export interface FileLockOptions {
   staleMs?: number;
   attempts?: number;
   retryDelaysMs?: number[];
+  /**
+   * Delay injection for tests: every configured backoff must actually be slept
+   * through, which a real 1.05s wait would make slow to assert. Production never
+   * passes this.
+   */
+  sleep?: (ms: number) => Promise<void>;
+  /** Bounded final wait after the configured attempts (`0` disables it). */
+  waitMs?: number;
+  /** Longest wait between attempts when no filesystem event arrives. */
+  pollMs?: number;
+}
+
+/**
+ * After the configured attempts, keep **waiting** for the holder instead of
+ * sampling once and giving up. Under a 3-process burst the lock is held almost
+ * continuously (each write is ~1ms and the loops are tight), so a single sample
+ * after the last backoff loses at random — the acceptance measured 4–6 refusals
+ * / 9 with a pure attempt count.
+ *
+ * The wait is **event-driven**: watch the directory and attempt the instant the
+ * holder unlinks its lock, with a short timeout as the polling fallback. That
+ * makes the lock a queue in practice (one waiter wins per release, the others
+ * wait for the next), so a live holder always hands over in a few milliseconds.
+ * Only a genuinely stuck holder reaches the deadline.
+ */
+export const FILE_LOCK_WAIT_MS = 30_000;
+/** Longest wait between attempts when no filesystem event arrives. */
+export const FILE_LOCK_POLL_MS = 25;
+
+/**
+ * Resolve on the next directory change (a lock created / removed) or after
+ * `timeoutMs`, whichever comes first. `watch` can miss or coalesce events, so
+ * the timeout is the fallback — no busy loop, no missed progress.
+ */
+function waitForLockEvent(directory: string, timeoutMs: number): Promise<void> {
+  return new Promise(resolve => {
+    let settled = false;
+    let watcher: ReturnType<typeof watch> | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        watcher?.close();
+      } catch {
+        /* already closed */
+      }
+      resolve();
+    };
+    // **Not** unref'd: this timer is the only handle keeping a waiting process
+    // alive while the lock is held. An unref'd timer + a non-persistent watcher
+    // let Node exit with code 13 ("unsettled top-level await") mid-wait.
+    const timer = setTimeout(finish, Math.max(1, timeoutMs));
+    try {
+      watcher = watch(directory, { persistent: false }, () => finish());
+      watcher.on('error', finish);
+    } catch {
+      /* no watcher available: the timeout is the (slower) fallback */
+    }
+  });
 }
 
 /**
  * Run `fn` while holding `<file>.lock`. Throws a **readable** refusal after the
- * attempts are exhausted (`ValidationError`, so the report path never files it
- * as a plugin defect): the caller's data is intact, retrying later is correct.
+ * attempts + final wait are exhausted (`ValidationError`, so the report path
+ * never files it as a plugin defect): the caller's data is intact, retrying
+ * later is correct.
  */
 export async function withFileLock<T>(file: string, fn: () => T | Promise<T>, options: FileLockOptions = {}): Promise<T> {
-  const attempts = Math.max(1, Number(options.attempts) || FILE_LOCK_ATTEMPTS);
   const delays = Array.isArray(options.retryDelaysMs) && options.retryDelaysMs.length
     ? options.retryDelaysMs
     : FILE_LOCK_RETRY_DELAYS_MS;
+  // `attempts = delays.length + 1` (same convention as `withRetry`): one first
+  // try plus one retry per delay, so **every** delay is reachable.
+  const attempts = Math.max(1, Number(options.attempts) || delays.length + 1);
+  const pause = options.sleep ?? sleep;
   const lockPath = `${file}.lock`;
   let last: LockOwner = {};
   for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -188,7 +260,26 @@ export async function withFileLock<T>(file: string, fn: () => T | Promise<T>, op
     }
     const snapshot = readOwner(lockPath);
     last = snapshot.owner;
-    if (attempt < attempts - 1) await sleep(delays[Math.min(attempt, delays.length - 1)]);
+    if (attempt < attempts - 1) await pause(delays[Math.min(attempt, delays.length - 1)]);
+  }
+  // The final bounded wait (a queue, not a sample): every event / poll is itself
+  // an acquisition attempt, so a lock released in between is picked up at once.
+  const waitMs = options.waitMs === undefined ? FILE_LOCK_WAIT_MS : Math.max(0, Number(options.waitMs) || 0);
+  const pollMs = Math.max(1, Number(options.pollMs) || FILE_LOCK_POLL_MS);
+  const directory = dirname(file);
+  const deadline = Date.now() + waitMs;
+  while (waitMs > 0 && Date.now() < deadline) {
+    await waitForLockEvent(directory, Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    const handle = tryAcquireFileLock(file, { staleMs: options.staleMs });
+    if (handle) {
+      try {
+        return await fn();
+      } finally {
+        handle.release();
+      }
+    }
+    const snapshot = readOwner(lockPath);
+    last = snapshot.owner;
   }
   throw invalid(
     `账本正被另一个进程写入（${lockPath}${last.pid ? `，pid ${last.pid}` : ''}）：未写入任何内容，` +

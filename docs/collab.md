@@ -2259,8 +2259,10 @@ SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
 | 锁文件 | `<file>.lock`，`open(…, 'wx')` 原子创建；内容 `{ pid, at, token }` |
 | 互斥范围 | 覆盖**整个** read-modify-write（不是只包 `rename`） |
 | 陈旧回收 | `at` 超过 **60s**（`FILE_LOCK_STALE_MS`）或 `pid` 已不存在（`kill(pid,0)` → ESRCH）即回收；刚 `open` 还没写内容的锁**不算陈旧**（按年龄判定，不按可解析性） |
-| 重试 | **3 次**、指数退避 `50 / 200 / 800ms`（`FILE_LOCK_ATTEMPTS` / `FILE_LOCK_RETRY_DELAYS_MS`）；耗尽后**可读拒绝**（`ValidationError`，不报缺陷）：未写入任何内容，稍后重试 |
-| 释放 | 只删 token 仍是自己的锁——被陈旧回收后接管的新持有者不会被误删 |
+| 重试 | **`1 + delays.length` 次**（4 次；与 `withRetry` 同一约定，**三个延迟 `50 / 200 / 800ms` 都会被消费**） |
+| 等待（复核追加） | 4 次尝试后**事件驱动等待**：`fs.watch` 目录，持锁方一 `unlink` 就立刻再抢；25ms 兜底轮询，上限 **30s**。只「再采样一次」在 3 进程连续写时必然饿死（实测 4–6 次拒绝 / 9）；等待超限才是**可读拒绝**（`ValidationError`，不报缺陷）：未写入任何内容，稍后重试 |
+| 释放 | 只在**内容可解析且 token 仍是自己**时删除；读不到内容（`open` → `write` 窗口 / 撕裂写）或 token 不匹配 → **不删**，交回 60s 陈旧回收兜底——绝不误删接管者的锁 |
+| 临界区 | 只包含读账本 / 校验 / 写账本；**基线快照（`git` + `.env`）在锁外算**（`git` spawn 10–30ms，放在锁内会把 25 次突发拉成数秒并饿死别人）。`gitHead` 按目录缓存 **5s**（基线是「我当时看的 HEAD」，不是每次调用的 oracle） |
 | 原子性 | `tmp + rename` 保持不变：锁是**互斥**，rename 是**原子性**，两者不能互相替代 |
 
 > 进程内队列（按 workspace / pair）保留：它省掉同进程内的锁竞争，但**不是**安全边界。
@@ -2379,7 +2381,9 @@ GLOSSARY_FILE   = ~/.config/opencode/collab-glossary.json // COLLAB_GLOSSARY_FIL
 FACTS_LIMIT     = 2000      // 永久账本上限（非 active 先淘汰）
 STALE_REPLY_RATIO = 0.3     // stale 回复的增量预算（只写进注入文案，不是闸门）
 FILE_LOCK_STALE_MS = 60000  // 跨进程锁的陈旧阈值
-FILE_LOCK_ATTEMPTS = 3      // 首次 + 2 次重试
+FILE_LOCK_ATTEMPTS = 4      // = FILE_LOCK_RETRY_DELAYS_MS.length + 1（1 次首试 + 3 次重试）
+FILE_LOCK_WAIT_MS   = 30000 // 4 次尝试之后的事件驱动等待上限
+FILE_LOCK_POLL_MS   = 25    // 没有目录事件时的兜底轮询间隔
 FILE_LOCK_RETRY_DELAYS_MS = [50, 200, 800]
 ```
 
@@ -2390,7 +2394,7 @@ FILE_LOCK_RETRY_DELAYS_MS = [50, 200, 800]
 
 #### 验收
 
-`test/facts.mjs`（93 项）：27 个工具 · settle/list（id 连续、grade 必填、`unknown` 可见、同 claim 覆盖且计入
+`test/facts.mjs`（103 项）：27 个工具 · settle/list（id 连续、grade 必填、`unknown` 可见、同 claim 覆盖且计入
 `retracted`）·
 relayed/unknown 引用被拒（正文与 `factIds` 两条路径）· retract（state / reason / 当日计数 / 不可重复）·
 invalidate F#（根 + 派生 superseded、epoch+1、幂等 no-op、`[retracted:F2→F6]` 工作区级传播）·
@@ -2398,10 +2402,12 @@ invalidate epoch（`basedOn.facts <= epoch`）· 三态 fresh/stale/conflict/无
 `[基线未知]` / `[conflict]` 注入 · `[settled]` 每会话只播一次 · 在途 todo 标 `staleWork` + `⚠失效` 且不关闭 ·
 glossary（定义、第 2 次冲突拒绝、define+conflict 放行、一行注入、`collab_reply` 同参数）· 发送元数据
 `grade` / `factIds` / `basedOn`（缺省 `unknown`，信封同）· 10 条进程内并发 settle 零丢失 · 跨工作区账本 /
-`[settled]` / `staleWork` 隔离 · 注入预算（契约 ≤12 行、事实段 ≤3 行、整块 ≤15）· **双进程各 settle 25 条 × 3 轮
-`wsA=25/25 wsB=25/25 lost=0`**。
+`[settled]` / `staleWork` 隔离 · 注入预算（契约 ≤12 行、事实段 ≤3 行、整块 ≤15）· **3 个工作区（3 进程）各
+settle 25 条 × 3 轮 `wsA/wsB/wsC = 25/25/25 lost=0`、9 次子进程 `refusals 0/9`** · 锁预算（`attempts = delays+1`、
+`[50,200,800]` 全部被 sleep）· 超过退避预算仍持有的锁会被**等待**而不是采样拒绝 · `release()` 对空内容 /
+他人 token 不删除、对自己 token 删除。
 **变异（强制）**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（退出码 1）；
-`withFileLock` 置空 → 双进程回归必红（实测 lost = 21 / 18 / 26，退出码 1）。
+`withFileLock` 置空 → 3 工作区回归必红（实测单轮 lost = 22–24，退出码 1）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

@@ -44,10 +44,14 @@
 ### Fixed（复核必改）
 
 - **跨进程并发写不再丢整本账**：`src/core/file-lock.ts` — 每次账本/术语表写入在 `tmp + rename` 之外再套
-  `<file>.lock`（`open(…,'wx')` + `{pid, at, token}` + 60s 陈旧或死 pid 回收 + 3 次指数退避 50/200/800ms），
-  互斥覆盖**整个 read-modify-write**；释放只删自己 token 的锁。此前两个 OpenCode 进程（不同工作区）并发
+  `<file>.lock`（`open(…,'wx')` + `{pid, at, token}` + 60s 陈旧或死 pid 回收 + `1 + delays.length` 次尝试 / 50/200/800ms，与 `withRetry` 同约定 + 之后的事件驱动等待 `fs.watch` / 25ms 兜底 / 30s 上限），
+  互斥覆盖**整个 read-modify-write**；释放只在内容可解析且 token 仍是自己时删锁（空内容 / 他人 token → 不删，
+  交回 60s 陈旧回收兜底）。此前两个 OpenCode 进程（不同工作区）并发
   settle 会互相覆盖，连对方整个 workspace 条目一起抹掉且无报错（复核实测 3 轮丢 21–26 条 / 50）。
-  锁耗尽时是可读拒绝（`ValidationError`，不报缺陷）。`collab-glossary.json` 同型修复。
+  锁等待超限时是可读拒绝（`ValidationError`，不报缺陷）。`collab-glossary.json` 同型修复。
+- **锁的临界区不再包含 `git`**：`settle` 的基线快照（`git` + `.env`）移到锁外，`gitHead` 按目录缓存 5s——
+  否则 4 次尝试 + 单次采样在「3 进程各 25 条」的连续写下会饿死（实测 4–6 次拒绝 / 9）；改为事件驱动等待后
+  15 轮 × 3 进程压测与 8 次单测均 `refusals 0/9`。
 - **`retract` 不再清空 `supersededBy`**：对已 superseded 的行执行 retract 保留原指针，`[retracted:F2→F4]`
   不再退化成 `F2`。
 - **`staleWork` 不再跨工作区误标**：`F#` 在每个工作区从 `F1` 重新编号；todo 的 ref 现在记录 `{factId, workspace}`，
@@ -65,7 +69,7 @@
 
 ### Tests / Docs
 
-- 新增 `test/facts.mjs`（**93 项**，已串进 `pnpm test`）：27 个工具 · settle/list（id 连续、grade 必填、
+- 新增 `test/facts.mjs`（**103 项**，已串进 `pnpm test`）：27 个工具 · settle/list（id 连续、grade 必填、
   `unknown` 可见、同 claim 覆盖且计入 `retracted`）· relayed/unknown 引用被拒（正文 + `factIds`）· retract
   （state / reason / 当日计数 / 不可重复 / 保留 `supersededBy`）· invalidate F#（根 + 派生 superseded、epoch+1、
   幂等 no-op、`[retracted:F2→F6]` 工作区级传播）· invalidate epoch · 三态 fresh/stale/conflict/无基线（D2）·
@@ -74,8 +78,10 @@
   `grade`/`factIds`/`basedOn`（缺省 `unknown`，信封同）· 10 条进程内并发 settle 零丢失 · 跨工作区账本 / 注入 /
   `staleWork` 隔离 · 注入预算（契约 ≤12 行、事实段 ≤3 行、整块 ≤15）。
   **强制变异**：`compareBasedOn` 恒返回 `fresh` → stale / conflict 三例必红（退出码 1）；
-  `withFileLock` 置空 → 双进程回归必红（实测 lost = 21 / 18 / 26，退出码 1）；恢复后
-  **双进程各 25 条 × 3 轮 `wsA=25/25 wsB=25/25 lost=0`**。
+  `withFileLock` 置空 → 3 工作区回归必红（实测单轮 lost = 22–24，退出码 1）；恢复后
+  **3 个工作区（3 进程）各 25 条 × 3 轮 `wsA/wsB/wsC = 25/25/25 lost=0`、`refusals 0/9`**。
+  另断言 `attempts = delays.length + 1` 且 `[50,200,800]` 每个延迟都被真正 sleep；持锁方在退避预算**之后**释放时
+  会被等待（事件驱动）而不是被拒绝；`release()` 对空内容 / 他人 token 不删除、对自己 token 删除。
 - 版本断言与工具数升到 0.9.4 / 27（`contract-inject` / `drift` / `gate` / `store-rebuild` / `handoff-harness`）。
 - 文档：`docs/collab.md` 工具表 + §11.25（事实账本 / 证据等级 / 三态 / **跨进程锁** / 在途失效 / glossary / 偏差）；
   README 版本表；skill `collab`（工具表 + 「事实账本」小节）；PRD / implement 的 stale 验收口径改为

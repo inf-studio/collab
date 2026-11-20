@@ -33,8 +33,12 @@
  *  14. review: `supersededBy` survives a retract · 10 in-process concurrent
  *      settles · cross-workspace ledger / `[settled]` / `staleWork` isolation ·
  *      `staleDeliveries` counter
- *  15. review: two processes settling 25 facts each (3 rounds) never lose a
- *      workspace — `wsA=25/25 wsB=25/25 lost=0`
+ *  15. review: three processes settling 25 facts each (3 rounds) never lose a
+ *      workspace — `wsA/wsB/wsC = 25/25/25 lost=0`, `refusals 0/9`
+ *  16. review: the retry budget is fully consumed (`attempts = delays + 1`,
+ *      `[50,200,800]` all slept), a holder that releases *after* the budget is
+ *      waited for (event-driven, not one last sample), and `release()` never
+ *      deletes an unreadable / foreign lock
  *
  * Exits 1 if any check fails.
  */
@@ -597,10 +601,11 @@ expect(
 );
 
 // ============================================================ 15) review: two-process ledger write
-section('15) review: two processes settling at once never lose a workspace');
+section('15) review: three processes settling at once never lose a workspace');
 const raceFile = join(root, 'race-facts.json');
 const raceWorkspaceA = join(root, 'race-ws-a');
 const raceWorkspaceB = join(root, 'race-ws-b');
+const raceWorkspaceC = join(root, 'race-ws-c');
 const childScript = join(root, 'race-child.mjs');
 writeFileSync(
   childScript,
@@ -640,22 +645,125 @@ const runChild = (workspaceDir, tag) =>
     child.stderr.on('data', chunk => {
       stderr += String(chunk);
     });
-    child.on('exit', code => (code === 0 ? resolve() : reject(new Error(`${tag} exited ${code}: ${stderr}`))));
+    // Resolve on any exit (a refusal is data for the assertion, not a crash):
+    // `settleFact` throwing in the child is exactly the "gave up on the lock"
+    // case this test exists to keep at zero.
+    child.on('exit', code => resolve({ tag, code, stderr }));
     child.on('error', reject);
   });
+let refusals = 0;
 for (let round = 1; round <= 3; round += 1) {
   if (existsSync(raceFile)) unlinkSync(raceFile);
-  await Promise.all([runChild(raceWorkspaceA, 'A'), runChild(raceWorkspaceB, 'B')]);
+  const runs = await Promise.all([
+    runChild(raceWorkspaceA, 'A'),
+    runChild(raceWorkspaceB, 'B'),
+    runChild(raceWorkspaceC, 'C')
+  ]);
+  const failedRuns = runs.filter(run => run.code !== 0);
+  refusals += failedRuns.length;
   const race = internals.readLedger(raceFile);
-  const countA = race.workspaces[raceWorkspaceA]?.facts.length ?? 0;
-  const countB = race.workspaces[raceWorkspaceB]?.facts.length ?? 0;
-  const lost = Math.max(0, 25 - countA) + Math.max(0, 25 - countB);
+  const counts = [raceWorkspaceA, raceWorkspaceB, raceWorkspaceC].map(
+    dir => race.workspaces[dir]?.facts.length ?? 0
+  );
+  const lost = counts.reduce((sum, count) => sum + Math.max(0, 25 - count), 0);
   expect(
-    `round ${round}: wsA=25/25 wsB=25/25 lost=0`,
-    countA === 25 && countB === 25,
-    `wsA=${countA}/25 wsB=${countB}/25 lost=${lost}`
+    `round ${round}: wsA/wsB/wsC = 25/25/25, lost=0, refusals ${refusals}/9`,
+    counts.every(count => count === 25),
+    `counts=${counts.join('/')} lost=${lost}${
+      failedRuns.length ? ` · ${failedRuns.map(run => `${run.tag}:${run.code}:${run.stderr.trim().split('\n')[0]}`).join(' | ')}` : ''
+    }`
   );
 }
+expect('9 child runs across 3 rounds, 0 lock refusals', refusals === 0, `${refusals}/9`);
+
+// ============================================================ 16) lock mechanics
+section('16) review: attempt budget is fully consumed + release never steals');
+expect(
+  'attempts = delays.length + 1 (the same convention as withRetry)',
+  internals.FILE_LOCK_ATTEMPTS === internals.FILE_LOCK_RETRY_DELAYS_MS.length + 1 &&
+    internals.FILE_LOCK_ATTEMPTS === 4,
+  `${internals.FILE_LOCK_ATTEMPTS} attempts / ${JSON.stringify(internals.FILE_LOCK_RETRY_DELAYS_MS)}`
+);
+const heldFile = join(root, 'held-ledger.json');
+const heldLock = `${heldFile}.lock`;
+writeFileSync(heldLock, JSON.stringify({ pid: process.pid, at: Date.now(), token: 'foreign-holder' }), 'utf8');
+const slept = [];
+let callbackRan = false;
+let refusal;
+try {
+  await internals.withFileLock(
+    heldFile,
+    () => {
+      callbackRan = true;
+      return 'never';
+    },
+    {
+      // Disable the final bounded wait so the assertion sees exactly the three
+      // configured backoffs, then the readable refusal.
+      waitMs: 0,
+      sleep: async delay => {
+        slept.push(delay);
+      }
+    }
+  );
+} catch (error) {
+  refusal = String(error?.message ?? error);
+}
+expect(
+  'every configured backoff delay is really slept (50 / 200 / 800)',
+  JSON.stringify(slept) === JSON.stringify(internals.FILE_LOCK_RETRY_DELAYS_MS),
+  JSON.stringify(slept)
+);
+expect('the callback never runs while the lock is held', callbackRan === false, String(callbackRan));
+expect('exhausting the budget is a readable refusal', /账本正被另一个进程写入/.test(refusal ?? ''), refusal);
+unlinkSync(heldLock);
+
+// A holder that releases *after* the configured backoff must be waited for, not
+// refused: the final wait is a queue, not one last sample.
+const lateFile = join(root, 'late-ledger.json');
+const lateHolder = internals.tryAcquireFileLock(lateFile);
+let lateAcquired = false;
+const lateWaiter = internals.withFileLock(
+  lateFile,
+  () => {
+    lateAcquired = true;
+    return 'ok';
+  },
+  { waitMs: 3000, pollMs: 20 }
+);
+const lateRelease = new Promise(resolve =>
+  setTimeout(() => {
+    lateHolder?.release();
+    resolve();
+  }, 1200)
+);
+const [lateValue] = await Promise.all([lateWaiter, lateRelease]);
+expect(
+  'a lock held past the backoff budget is waited for (event-driven), not refused',
+  lateValue === 'ok' && lateAcquired,
+  String(lateValue)
+);
+
+const releaseFile = join(root, 'release-ledger.json');
+const releaseLock = `${releaseFile}.lock`;
+const handle = internals.tryAcquireFileLock(releaseFile);
+expect('a lock can be acquired for the release test', Boolean(handle), handle ? handle.lockPath : '(none)');
+// (a) the open → write window / a torn write: unreadable ⇒ never delete.
+writeFileSync(releaseLock, '', 'utf8');
+handle?.release();
+expect('release does not delete an unreadable lock', existsSync(releaseLock), 'file still there');
+// (b) another owner's token ⇒ never delete.
+writeFileSync(releaseLock, JSON.stringify({ pid: process.pid, at: Date.now(), token: 'someone-else' }), 'utf8');
+handle?.release();
+expect('release does not delete a lock holding another token', existsSync(releaseLock), 'file still there');
+// (c) our own token ⇒ delete (the normal path must still work).
+writeFileSync(
+  releaseLock,
+  JSON.stringify({ pid: process.pid, at: Date.now(), token: handle?.token ?? '' }),
+  'utf8'
+);
+handle?.release();
+expect('release deletes its own lock', !existsSync(releaseLock), 'file removed');
 
 // ============================================================ summary
 await cleanup?.();
