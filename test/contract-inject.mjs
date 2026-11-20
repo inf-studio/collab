@@ -166,15 +166,16 @@ const blockLines = text => text.split('\n').filter(line => line.trim().length > 
 
 // ================================================================ 1) surface
 section('1) tool surface + version');
-expect('PLUGIN_VERSION / package.json agree (0.9.2)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.2', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.3)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.3', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('26 tools are registered', tools.length === 26, `${tools.length} tools`);
 for (const name of ['collab_mission', 'collab_progress', 'collab_todo']) {
   const registrations = tools.filter(definition => definition.name === name).length;
   expect(`${name} is registered exactly once`, registrations === 1, `${registrations} registration(s)`);
 }
 expect(
-  'collab_mission schema: get|set|confirm + oneLine/outOfScope/reconfirm',
-  JSON.stringify(tool('collab_mission').input.properties.action.enum) === JSON.stringify(['get', 'set', 'confirm']) &&
+  'collab_mission schema: get|set|confirm|resume|block|done + oneLine/outOfScope/reconfirm',
+  JSON.stringify(tool('collab_mission').input.properties.action.enum) ===
+    JSON.stringify(['get', 'set', 'confirm', 'resume', 'block', 'done']) &&
     Boolean(tool('collab_mission').input.properties.oneLine) &&
     Boolean(tool('collab_mission').input.properties.outOfScope) &&
     Boolean(tool('collab_mission').input.properties.reconfirm)
@@ -718,14 +719,14 @@ expect(
   addHist.split('\n')[0]
 );
 
-// ===================== 23) same-millisecond advance resets noAdvanceTurns
-section('23) same-millisecond advance resets noAdvanceTurns');
+// ============= 23) same-millisecond advance restarts the quiet-run counter
+section('23) same-millisecond advance restarts noAdvanceTurns at 1');
 const sameTurn = internals.emptyContract('ses_same');
 sameTurn.turn = { count: 1, lastAt: 1000, startedAt: 1000, lastAdvancedAt: 1000, noAdvanceTurns: 3 };
 const stampedSame = internals.stampTurn(sameTurn, 1000);
 expect(
-  'stampTurn treats lastAdvancedAt === lastAt as an advance (>=)',
-  stampedSame.turn.count === 2 && stampedSame.turn.noAdvanceTurns === 0,
+  'stampTurn treats lastAdvancedAt === lastAt as an advance (>=): this request is quiet #1',
+  stampedSame.turn.count === 2 && stampedSame.turn.noAdvanceTurns === 1,
   JSON.stringify(stampedSame.turn)
 );
 const stampedBehind = internals.stampTurn({ ...sameTurn, turn: { ...sameTurn.turn, lastAdvancedAt: 999 } }, 1000);
@@ -741,8 +742,8 @@ writeFileSync(internals.contractFile('ses_same_ms'), JSON.stringify(sameMsBase))
 await ask('ses_same_ms');
 const sameMsAfter = internals.readContract('ses_same_ms').turn;
 expect(
-  'the next request sees the same-ms advance and resets',
-  sameMsAfter.count === 2 && sameMsAfter.noAdvanceTurns === 0,
+  'the next request sees the same-ms advance and starts at 1 (not 0)',
+  sameMsAfter.count === 2 && sameMsAfter.noAdvanceTurns === 1,
   JSON.stringify(sameMsAfter)
 );
 

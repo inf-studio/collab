@@ -37,16 +37,17 @@ import {
   CONTRACT_TODO_KEEP_CLOSED,
   CONTRACT_TODO_SUBJECT_LIMIT,
   CONTRACT_VERSION,
-  CONTRACT_WAKE_CHARS,
   INJECT_MAX_LINES,
   INJECT_SECTION_LIMITS,
   INJECT_TODO_TOP
 } from '../constants.ts';
 import { log } from '../log.ts';
 import { asObject, dedupe, randToken, truncate } from '../util.ts';
+import { normalizeWakeWhen, wakePhrase } from './wake.ts';
+import type { WakeWhenValue } from './wake.ts';
 
 export type MissionState = 'active' | 'idle' | 'suspended' | 'done';
-export type TodoStatus = 'open' | 'doing' | 'blocked' | 'suspended' | 'closed' | 'dropped';
+export type TodoStatus = 'open' | 'doing' | 'blocked' | 'suspended' | 'drifted' | 'closed' | 'dropped';
 export type TodoKind = 'mainline' | 'collab';
 export type PeerRole = 'requester' | 'implementer' | 'decider' | 'verifier';
 
@@ -63,6 +64,11 @@ export interface ContractMission {
   /** Set by the one human confirmation; never overwritten by inference (D7). */
   confirmedBy: string | null;
   confirmedAt: number | null;
+  /**
+   * 0.9.3 (`collab_mission block`): when the mainline was parked. `parkedHours`
+   * drives the "suspended > 2h" drift trigger; `null` = not parked.
+   */
+  parkedAt?: number | null;
   /** Where `taskPath` / `oneLine` came from — display only. */
   source?: 'pointer' | 'task' | 'first-message' | 'manual' | 'confirm';
 }
@@ -93,8 +99,11 @@ export interface ContractTodo {
   blockingOn: string | null;
   parkedBy?: string | null;
   parkedAt?: number | null;
-  /** Required for `status:'suspended'` (R4). */
-  wakeWhen?: string | null;
+  /**
+   * Required for `status:'suspended'` (R4). 0.9.3 accepts either the structured
+   * `{kind, ref|at}` form or the legacy free text 0.9.1 wrote.
+   */
+  wakeWhen?: WakeWhenValue | null;
   since: number;
   closedAt?: number | null;
   evidence?: string | null;
@@ -123,11 +132,17 @@ export interface ContractTurn {
   /** Last verified advance (milestone evidence / closed mainline todo). */
   lastAdvancedAt: number;
   /**
-   * Consecutive requests without an advance. 0.9.1 only maintains the counter
-   * (reset on a verified advance, +1 on a turn that had none); the drift
-   * **decision** (threshold / trigger) belongs to 0.9.3.
+   * Consecutive quiet requests, **including the one being stamped** (0.9.3):
+   * `1` on the first request / the request right after an advance, otherwise
+   * `previous + 1`. Drift reads this value directly (threshold 5).
    */
   noAdvanceTurns: number;
+  /**
+   * 0.9.3 (R2): when the last `[drift]` was injected and not yet answered by
+   * `resume` / `block` / `done`. `0` = nothing unresolved; non-zero makes the
+   * next block say `[未处置]` even when the original trigger is gone.
+   */
+  driftAt?: number;
 }
 
 export interface Contract {
@@ -148,7 +163,7 @@ export interface Contract {
 }
 
 export const MISSION_STATES: MissionState[] = ['active', 'idle', 'suspended', 'done'];
-export const TODO_STATUSES: TodoStatus[] = ['open', 'doing', 'blocked', 'suspended', 'closed', 'dropped'];
+export const TODO_STATUSES: TodoStatus[] = ['open', 'doing', 'blocked', 'suspended', 'drifted', 'closed', 'dropped'];
 export const TODO_KINDS: TodoKind[] = ['mainline', 'collab'];
 export const PEER_ROLES: PeerRole[] = ['requester', 'implementer', 'decider', 'verifier'];
 /** Closed / dropped todos are history, not open work. */
@@ -186,7 +201,7 @@ export function emptyContract(sessionID: string): Contract {
     todos: [],
     todoSeq: 0,
     peers: [],
-    turn: { count: 0, lastAt: 0, startedAt: 0, lastAdvancedAt: 0, noAdvanceTurns: 0 }
+    turn: { count: 0, lastAt: 0, startedAt: 0, lastAdvancedAt: 0, noAdvanceTurns: 0, driftAt: 0 }
   };
 }
 
@@ -221,6 +236,7 @@ function normalizeMission(raw: unknown): ContractMission {
     : 'active';
   const confirmedBy = String(value.confirmedBy ?? '').trim();
   const confirmedAt = num(value.confirmedAt);
+  const parkedAt = num(value.parkedAt);
   return {
     ...(taskPath ? { taskPath } : {}),
     oneLine: text(value.oneLine, CONTRACT_ONE_LINE_LIMIT),
@@ -228,6 +244,8 @@ function normalizeMission(raw: unknown): ContractMission {
     outOfScope: normalizeList(value.outOfScope, CONTRACT_SCOPE_ITEMS, CONTRACT_SCOPE_CHARS),
     handoffTo: normalizeMap(value.handoffTo),
     state,
+    // A park stamp only means something while the mission is suspended.
+    parkedAt: state === 'suspended' && parkedAt ? parkedAt : null,
     confirmedBy: confirmedBy || null,
     // A name without a stamp (or the reverse) is a hand edit: keep them paired.
     confirmedAt: confirmedBy && confirmedAt ? confirmedAt : null,
@@ -275,7 +293,7 @@ function normalizeTodo(raw: unknown): ContractTodo | undefined {
     blockingOn: blocking || null,
     parkedBy: value.parkedBy ? text(value.parkedBy, 120) : null,
     parkedAt: num(value.parkedAt) || null,
-    wakeWhen: value.wakeWhen ? text(value.wakeWhen, CONTRACT_WAKE_CHARS) : null,
+    wakeWhen: normalizeWakeWhen(value.wakeWhen),
     since: num(value.since) || Date.now(),
     closedAt: num(value.closedAt) || null,
     evidence: value.evidence ? text(value.evidence, 300) : null,
@@ -314,6 +332,18 @@ export function todoSeqOf(id: unknown): number {
 /** Highest `T<n>` in a raw list (before closed-history trimming). */
 export function maxTodoSeq(todos: ContractTodo[]): number {
   return todos.reduce((max, todo) => Math.max(max, todoSeqOf(todo.id)), 0);
+}
+
+/**
+ * The next `T<n>`. Derived from `todoSeq` (highest ever issued) **and** the
+ * visible rows, because closed history is trimmed on read — max(visible) alone
+ * would reuse an id that a trimmed row already had.
+ *
+ * Lives here (not in a tool) because both `collab_todo add` and
+ * `collab_mission resume` may create a row, and there is exactly one id rule.
+ */
+export function nextTodoSeq(contract: Contract): number {
+  return Math.max(Number(contract.todoSeq) || 0, maxTodoSeq(contract.todos)) + 1;
 }
 
 /** Duplicate ids can exist in files written by the pre-review bug: last wins. */
@@ -373,7 +403,8 @@ export function normalizeContract(raw: unknown, sessionID: string): Contract {
       lastAt: num(turn.lastAt),
       startedAt: num(turn.startedAt),
       lastAdvancedAt: num(turn.lastAdvancedAt),
-      noAdvanceTurns: num(turn.noAdvanceTurns)
+      noAdvanceTurns: num(turn.noAdvanceTurns),
+      driftAt: num(turn.driftAt)
     }
   };
 }
@@ -520,20 +551,28 @@ export function unfinishedTodos(contract: Contract, startedAt?: number): string[
  * exists (a mission-only or milestone-only contract still needs a turn count —
  * 0.9.3's drift check must not start from 0 forever).
  *
- * `noAdvanceTurns` has its own condition (the review's #2): it resets when the
- * previous request verified an advance (`lastAdvancedAt > lastAt`) and increments
- * otherwise. 0.9.1 only maintains the number; 0.9.3 owns the threshold/decision.
+ * `noAdvanceTurns` is the number of consecutive **quiet** requests, counting the
+ * one being stamped (its own tool calls have not happened yet, so at stamp time
+ * it has produced no evidence):
+ *
+ *   first request of the contract          → 1
+ *   the previous request verified an advance → 1 (this one is the first quiet)
+ *   otherwise                              → previous + 1
+ *
+ * `advancedLastTurn` is `lastAdvancedAt >= previousStart` (`>=` mirrors
+ * `[未收尾]`'s `updatedAt <= 本轮开始`: a light and the request start can share
+ * one millisecond).
+ *
+ * The "previous request advanced → 1, not 0" rule is what keeps the counter
+ * aligned after an advance: resetting to 0 made drift fire one request late
+ * (drift reads the stamped value directly, without a second `+1`).
  */
 export function stampTurn(contract: Contract, now = Date.now()): Contract {
   const previousStart = Number(contract.turn?.lastAt) || 0;
   const lastAdvancedAt = Number(contract.turn?.lastAdvancedAt) || 0;
   const previousNoAdvance = Number(contract.turn?.noAdvanceTurns) || 0;
-  // `>=` mirrors `[未收尾]`'s `updatedAt <= 本轮开始`: a light and the request
-  // start can share one millisecond, and a strict `>` left `noAdvanceTurns`
-  // stuck at its old value in that case.
   const advancedLastTurn = previousStart > 0 && lastAdvancedAt >= previousStart;
-  const noAdvanceTurns =
-    previousStart === 0 ? 0 : advancedLastTurn ? 0 : previousNoAdvance + 1;
+  const noAdvanceTurns = advancedLastTurn ? 1 : previousNoAdvance + 1;
   return {
     ...contract,
     turn: {
@@ -577,9 +616,15 @@ export interface RenderInput {
    */
   anchor?: { source: string; candidates?: string[] };
   unfinished?: string[];
-  /** 0.9.3 fills this; 0.9.1 always passes nothing (placeholder, never triggers). */
+  /** 0.9.3 (`core/drift.ts`): the `[drift]` section; empty when not triggered. */
   drift?: string[];
   now?: number;
+  /**
+   * Line budget for the whole block. Defaults to `INJECT_MAX_LINES`; the
+   * truncation test lowers it, because the four per-section caps (3+4+2+2 = 11)
+   * can never exceed the production budget of 12 on their own.
+   */
+  maxLines?: number;
 }
 
 export interface RenderResult {
@@ -607,7 +652,12 @@ function missionLines(
   const bits: string[] = [];
   if (mission.inScope.length) bits.push(`做 ${mission.inScope.join(' / ')}`);
   if (mission.outOfScope.length) bits.push(`不做 ${mission.outOfScope.join(' / ')}`);
-  bits.push(`状态 ${mission.state}`);
+  const parkedAt = Number(mission.parkedAt) || 0;
+  bits.push(
+    mission.state === 'suspended' && parkedAt
+      ? `状态 suspended（${formatAge(now - parkedAt)} 未醒）`
+      : `状态 ${mission.state}`
+  );
   const lastAdvanced = Number(contract.plan?.lastAdvancedAt) || 0;
   if (lastAdvanced) bits.push(`推进于 ${formatAge(now - lastAdvanced)} 前`);
   lines.push(`  边界: ${bits.join(' · ')}`);
@@ -626,8 +676,9 @@ const waiting = (todo: ContractTodo): boolean => Boolean(todo.blockingOn) && tod
 
 function todoTarget(todo: ContractTodo, now: number): string {
   if (todo.status === 'suspended') {
-    return todo.wakeWhen ? `挂起 → 等 ${todo.wakeWhen}` : '挂起（缺 wakeWhen）';
+    return todo.wakeWhen ? `suspended(${wakePhrase(todo.wakeWhen)})` : 'suspended（缺 wakeWhen）';
   }
+  if (todo.status === 'drifted') return '挂起到期 → 需重新评估';
   if (todo.status === 'blocked') return todo.blockingOn && todo.blockingOn !== 'me' ? `阻塞 → 等 ${todo.blockingOn.slice(0, 12)}…` : '阻塞';
   if (mine(todo)) return '需要你';
   if (waiting(todo)) return `等 ${String(todo.blockingOn).slice(0, 12)}…`;
@@ -684,6 +735,7 @@ function progressLines(contract: Contract): string[] {
  */
 export function renderInjection(input: RenderInput): RenderResult {
   const now = input.now ?? Date.now();
+  const maxLines = Math.max(1, Number(input.maxLines) || INJECT_MAX_LINES);
   const unfinished = new Set(input.unfinished ?? []);
   const sections: Array<{ name: keyof typeof INJECT_SECTION_LIMITS; lines: string[] }> = [
     { name: 'mission', lines: missionLines(input.mission, input.contract, now, input.anchor) },
@@ -700,7 +752,7 @@ export function renderInjection(input: RenderInput): RenderResult {
       .slice(0, INJECT_SECTION_LIMITS[section.name])
       .filter(line => line.trim().length > 0);
     if (!capped.length) continue;
-    if (lines.length + capped.length > INJECT_MAX_LINES) {
+    if (lines.length + capped.length > maxLines) {
       dropped.push(section.name);
       break;
     }

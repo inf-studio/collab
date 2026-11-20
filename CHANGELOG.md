@@ -3,6 +3,69 @@
 遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与
 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.3] - 2026-11-20
+
+> **漂移三选一 + 挂起唤醒**。排钟会话 13:00 主线完结后没有下一项占位，空槽被 ws 集群填满，**10.8h 零提醒**；
+> 一批「等 owner 批复」从未落成挂起项；「我这条之后不再回执」自声明过 3 次、下一条照旧。
+> 本版让契约自己把「停摆」说出来：连续 5 轮无主线动作 / 主线挂起 > 2h / 挂起 24h 未醒 → `[drift]`，
+> 且必须用 `resume` / `block` / `done` 三选一**落账**，不回答就下一轮带 `[未处置]` 再来。
+> 工具面不变（仍 **26**）；无新增配置文件。
+
+### Added
+
+- **漂移判定（R1/D8）**：`src/core/drift.ts` 的 `evaluate(contract, now)` → `{drifted, reasons, noAdvanceTurns,
+  parkedHours, expiredSuspended, lines}`。触发条件只有四条：`noAdvanceTurns + 1 >= 5`（**当前请求也计入**，
+  第 4 轮安静、第 5 轮出现）/ `mission.state='suspended'` 且 `parkedAt` 超过 **2h** / suspended（或已 drifted）
+  待办的 `wakeWhen` 到期 / `turn.driftAt > 0`（上次提醒未处置）。纯函数、时钟注入，无定时器。
+- **三选一落账（R2）**：`collab_mission` 新增 `resume {next}` / `block {on, reason}` / `done`：
+  - `resume`：`state=active`、`noAdvanceTurns=0`、`driftAt=0`，把下一步写成/更新为一条 mainline `doing` 待办，
+    **并关闭同一契约里所有 mainline `suspended`/`drifted` 行**（`evidence:"resume"`）——否则 `block → resume`
+    会留下一条僵尸挂起行，24h 后每轮把 `[drift]` 重新顶出来；
+  - `block`：`state=suspended`、`parkedAt=now`、建/复用一条 suspended mainline 待办
+    （`wakeWhen:{kind:"manual"}`、`blockingOn=on`）；重复 block 不会撑大列表；
+  - `done`：`state=done`，**必须已存在 `kind:"mainline" && status:"open"` 的 next-up 占位**，否则拒绝
+    （`set {state:"done"}` 走同一校验）。
+  未处置 → 下一轮 `[drift]` 继续出现并加 `[未处置]`（只有上面三个动作会清 `turn.driftAt`）。
+- **挂起唤醒条件（R3/R4）**：`src/core/wake.ts` 的 `wakeWhen` 结构化：
+  `{kind:"reply",ref}` / `{kind:"decision",ref}` / `{kind:"time",at}` / `{kind:"manual"}`。
+  `suspend` 缺 `wakeWhen`、`time` 给过去时间、`reply`/`decision` 缺 `ref` 一律拒绝；
+  0.9.1 的自由文本仍然有效（按 `manual` 处理、原文渲染，不静默改写）。
+  **`manual` 仍受 24h 兜底**：它只表示没有可自动观察的触发源，不是永久免打扰。
+  时间型标签改为本地时区 `到期 11-20 12:46`（原先 `等 至 11-20T12:46`：前缀重复且是 UTC）。
+- **24h 兜底（D17）**：`kind:"time"` 到点即到期；其余类型超过 24h 未醒 → 待办 `status:"drifted"`
+  （进 `[todo]` 显示 `挂起到期`、进 `[drift]` 原因），**绝不自动关闭**；记录了一个未来 `at` 时，
+  明确的截止时间让位给 24h 兜底（未到点不判漂移）。
+- **注入（R6）**：`[drift]` 段（≤2 行，仅触发时出现），顺序仍为 `mission → todo → drift → progress`；
+  `[todo]` 的挂起项显示 `suspended(等 X)`，`[mission]` 的 suspended 状态显示 `suspended（N 未醒）`。
+- **`drifted` 待办状态**：`TODO_STATUSES` / `contract.ts` 渲染 / `collab_todo list` / SQLite DDL 的
+  `todos.status` CHECK 同步（仍不是 done：保留在 `[todo]` 与 `openTodos` 里，直到被处置）。
+
+### Changed
+
+- **`turn.noAdvanceTurns` 的计数口径（复核 A）**：hook 先 `stampTurn` 再 `evaluate`/渲染，计数器**含当前请求**
+  （首个请求 / 上一轮刚推进过 → **1**，否则 `prev+1`），`evaluate` 直接读、不再 `+1`。0.9.1 的
+  `previousStart === 0 → 0` 特例与「`advancedLastTurn → 0`」会让「推进过一次后再静默」晚一轮触发、
+  文案少一轮；现在两条路径都是第 4 轮安静、第 5 轮出现 `连续 5 轮`。
+- **漂移评估与状态写入都在 `context` hook 里每轮执行**（读契约 → 评估 → 渲染 → 串行写 `stampTurn` +
+  `markDrifted`），到期扫描不依赖定时器，插件进程退出也不会留下「永远挂起」。
+- `renderInjection` 增加可选 `maxLines`（默认 `INJECT_MAX_LINES=12`）：四段上限之和为 11，
+  生产预算下截断分支不可达，测试用更小的预算真实驱动「整段丢弃」。
+
+### Tests / Docs
+
+- 新增 `test/drift.mjs`（68 项，已串进 `pnpm test`）：4 轮安静 / 第 5 轮 `[drift]` / 第 6 轮 `[未处置]` ·
+  推进一次后再静默 5 轮仍是第 5 轮触发（复核 A）· `block → 25h → [drift] → resume` 后下一轮无 `[drift]`（复核 B）·
+  `resume`（缺 `next` 拒绝）· `block`（缺 `on`/`reason` 拒绝、复用挂起行）· `done`（无 next-up 拒绝、`doing` 不算、
+  `set` 同校验）· `suspend` 缺 `wakeWhen` / `time` 已过期 / `reply` 缺 `ref` 拒绝 · 未来 `time` 写入与渲染 ·
+  主线挂起 2.1h 触发 · 25h 未醒 → `drifted` 且不关闭、下一轮 `[未处置]` · 未来截止不被 24h 兜底误伤 ·
+  legacy 字符串 wakeWhen · `close` mainline / `progress light` 归零计数 · 截断分支被丢的是 `[progress]` ·
+  工具数 26；时间型 `wakeWhen` 渲染为本地 `到期 MM-DD HH:mm`。
+  **强制变异**：`DRIFT_NO_ADVANCE_TURNS` 5 → 0 → 「1–4 轮不出现 `[drift]`」必红（实测，退出码 1）。
+- `test/contract-inject.mjs` / `test/gate.mjs` / `test/store-rebuild.mjs`：版本断言升到 0.9.3；
+  `collab_mission` schema 断言加上三个新动作（其余 83 / 62 / 30 项不变）。
+- 文档：`docs/collab.md` §11.24（漂移与挂起）、§11.22（契约字段与四段注入口径）；README 工具表 / 注入说明 /
+  版本表；skill `collab`「一点十五」；`.trellis/spec/frontend/opencode-plugin-ui.md` §2.13。
+
 ## [0.9.2] - 2026-11-20
 
 > **协作闸门：接单前模型表态**。初版靠关键词/别名匹配判越界，复核当场误伤（`排钟 Redis 缓存键设计`

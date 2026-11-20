@@ -10,6 +10,7 @@ import {
   updateContractIfExists
 } from '../core/contract.ts';
 import { isAckText } from '../core/ack.ts';
+import { evaluate as evaluateDrift, markDrifted } from '../core/drift.ts';
 import { markFollowUpSeen } from '../core/followup.ts';
 import { collectRequestKeys, cursorFrom, messageIDs, messageKey } from '../core/messages.ts';
 import { markSeen as markQueueSeen } from '../core/owner-queue.ts';
@@ -81,15 +82,22 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
     if (!hasContract && (!hint || hint.source === 'none' || hint.source === 'ambiguous')) return undefined;
 
     const now = Date.now();
+    // 0.9.3 (R1/R4): stamp **first**, then evaluate/render from that snapshot,
+    // then persist once. The stamped counter already includes this request
+    // (its tool calls have not run yet), so `evaluate` reads it as is — the
+    // previous order (render from the pre-stamp value + `evaluate`'s `+1`) made
+    // drift fire one request late right after an advance.
+    //
+    // `[未收尾]` still compares against the **pre-stamp** turn: its gate is
+    // "a previous request really happened", which the fresh stamp would erase.
+    const unfinished = unfinishedTodos(contract, now);
+    const stamped = stampTurn(contract, now);
+    const drift = evaluateDrift(stamped, now);
     const result = renderInjection({
-      contract,
-      mission: effectiveMission(contract, hint),
-      // The current request's start: a doing todo created mid-previous-request is
-      // older than this stamp but newer than the previous one, so it is marked
-      // exactly one turn later (review #3).
-      unfinished: unfinishedTodos(contract, now),
-      // 0.9.3 fills `[drift]`; 0.9.1 reserves the slot and never triggers it.
-      drift: [],
+      contract: stamped,
+      mission: effectiveMission(stamped, hint),
+      unfinished,
+      drift: drift.lines,
       anchor: hint,
       now
     });
@@ -97,8 +105,10 @@ export function createContextHook(deps: ToolDeps): ContextEventHandler {
 
     try {
       // Unconditional (count / lastAt / startedAt) whenever a contract file
-      // exists; `updateContractIfExists` is a no-op without one.
-      await updateContractIfExists(sessionID, current => stampTurn(current, now));
+      // exists; `updateContractIfExists` is a no-op without one. The same
+      // serialised write marks expired suspended todos `drifted` (never closed)
+      // and remembers that a `[drift]` is still unanswered (`[未处置]`).
+      await updateContractIfExists(sessionID, current => markDrifted(stampTurn(current, now), drift, now));
     } catch (error) {
       // The block is already built; a failed stamp only means `[未收尾]` is
       // judged against the previous successful turn. Never fail the request.

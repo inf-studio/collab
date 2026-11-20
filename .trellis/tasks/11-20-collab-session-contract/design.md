@@ -223,7 +223,7 @@ interface Contract {
 [todo] 3 open · 2 需要你 · 1 等 ses_e176… · 最老 T2 6.2h
   T2 decide dev/prod 键空间 → 等 owner
   T3 reply  t_mwnmtb97 D1 记入 PRD → 可执行
-[drift] 连续 6 轮无主线动作（11.2h）→ 三选一：继续 / 记阻塞 / 建 next-up
+[drift] 连续 5 轮无主线动作（11.2h）→ 三选一：继续 / 记阻塞 / 建 next-up
 ```
 
 规则：

@@ -284,9 +284,9 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_promote` | `{ target, agent?, confirm, revert? }` | **按会话切 agent**（`POST /api/session/{id}/agent`）：默认 `build`，白名单仅 `build` / `plan`；`confirm:true` 才发。记录 `agentBefore/promotedAt/promotedBy` 到同一份 `collab-grants/<sid>.json`（与 grant 半段互不覆盖）；`revert:true` 切回记录里的原 agent 并删除该半段（无记录报「无可还原」）。`[protected*]` 与非法 agent 直接拒绝。**只在对端 `collab_accept` 且确需改代码时用；`expected:"review"` 的交接永不 promote** |
 | `collab_archive` | `{ bid?, session?, restore?, confirm }` | **归档 spawn 会话（0.5.0，归档 ≠ 删除）**：`PATCH /api/session/{id} { archived:true }`（宿主无 `session.update` 时走 `COLLAB_SERVER_URL` HTTP），会话与消息保留、记录 `state/receipt` 不变，`restore:true` → `archived:false` 并清 `archivedAt`。`bid` 只认得**本插件拉起的**会话（`claim.by`；spawn 租约过期后才被领取的取 `expiredClaim.by`），别的单一律报错并提示改用 `session` 直指；`confirm:false` 只预览。自动路径还有 10 分钟防抖（默认）/idle/未决引用/未读队列等门（见 §11.13），**手动工具跳过这些门**，但 `[protected*]` 一律拒绝 |
 | `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
-| `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by? }` | **会话契约主线（0.9.1）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 |
+| `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by?, next?, on?, reason? }` | **会话契约主线（0.9.1；0.9.3 三选一）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。**0.9.3**：`resume {next}` / `block {on,reason}` / `done` 是回答 `[drift]` 的唯一三个动作；`done` 要求已有 mainline next-up 待办。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 / §11.24 |
 | `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
-| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。见 §11.22 |
+| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**：`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}`，或 0.9.1 的自由文本）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；挂起项显示 `suspended(等 X)`，到期未醒转 `drifted`（不自动关闭）；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。见 §11.22 / §11.24 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -1947,16 +1947,19 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
   "mission": { "taskPath": ".trellis/tasks/…", "oneLine": "…",
                "inScope": [], "outOfScope": [], "handoffTo": {},
                "state": "active|idle|suspended|done",
+               "parkedAt": null,
                "confirmedBy": null, "confirmedAt": null },
   "plan": { "milestones": [{ "id": "M1", "title": "…", "done": false,
                              "evidence": null, "at": null }],
             "lastAdvancedAt": 0 },
   "todos": [{ "id": "T1", "kind": "mainline|collab", "subject": "…",
-              "status": "open|doing|blocked|suspended|closed|dropped",
+              "status": "open|doing|blocked|suspended|drifted|closed|dropped",
               "blockingOn": "me|<sid>", "parkedBy": null, "parkedAt": null,
-              "wakeWhen": null, "since": 0, "closedAt": null, "evidence": null }],
+              "wakeWhen": null,               // 0.9.3：{kind,ref|at} 或 0.9.1 的自由文本
+              "since": 0, "closedAt": null, "evidence": null }],
   "peers": [],
-  "turn": { "count": 0, "lastAt": 0, "lastAdvancedAt": 0, "noAdvanceTurns": 0 }
+  "turn": { "count": 0, "lastAt": 0, "lastAdvancedAt": 0,
+            "noAdvanceTurns": 0, "driftAt": 0 }
 }
 ```
 
@@ -2001,7 +2004,7 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 ```
 [mission]  ≤3 行    一句话主线 · 任务路径 · [未确认] / 边界 · 状态 · 推进于 N 前 / 确认命令
 [todo]     ≤4 行    N open · M 需要你 · K 等对方 · 最老 T2 6.2h · 还有 7 条；随后 top3
-[drift]    ≤2 行    0.9.1 预留（不触发；0.9.3 填）
+[drift]    ≤2 行    仅触发时出现（连续 5 轮无主线动作 / 主线挂起 > 2h / 挂起 24h 未醒 / [未处置]）
 [progress] ≤2 行    done/total · 下一里程碑需要 evidence；或「未设置里程碑」
 ```
 
@@ -2015,8 +2018,9 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
   （`updatedAt ≤ 本轮 startedAt`；请求中途新建的 doing 会在下一轮被标）的 todo 标 `[未收尾]`。
   语义等价于「上一轮没收尾」，不承诺 idle 写入；
 - `turn.count` / `lastAt` / `startedAt`：**契约文件存在就每轮推进**（只有 mission 或只有里程碑也一样），
-  `noAdvanceTurns` 单独按「上一轮是否有已验证推进」维护（阈值/漂移判定留给 0.9.3）；
-  没有契约的会话不会被 hook 建文件（惰性创建）；
+  `noAdvanceTurns` 单独按「上一轮是否有已验证推进」维护；0.9.3 起**首个请求也计入**（否则漂移会晚一轮触发），
+  阈值 5 与 `[drift]` 见 §11.24；
+- 没有契约的会话不会被 hook 建文件（惰性创建）；
 - 该块排在注入最前（主线/待办是整体框架），失败独立兜底，不影响未读消息 / 交接 / 感知行。
 
 #### 配置与回滚
@@ -2119,6 +2123,91 @@ collab_accept { bid:"b_…", confirm:true,
 `open=8` 时 accept / broadcast / handoff 全放行 + 提醒行 · 「已被领取」/ spawn 自领不被闸门改写 ·
 `reply`/`send` 永不校验 · `gate:"warn"` 只提示 · `gate:"off"` 全跳过 · protected 行为不变。
 变异（强制）：「缺 `scopeCheck` 拒绝」改成放行 → 该组 8 项红（实测）。
+
+
+### 11.24 漂移与挂起（0.9.3）
+
+**为什么**：排钟会话 13:00 主线完结后没有下一项占位，空槽被 ws 集群填满，**10.8h 无人提醒**；
+一批「等 owner 批复」从未落成挂起项；「我这条之后不再回执」出现过 3 次，下一条照旧——
+「停」靠自声明不成立，必须由契约落账并**反复追问**。
+
+#### 触发（只有这四条，不放宽）
+
+```
+[drift] = turn.noAdvanceTurns >= 5                 // 连续 5 轮无 mainline evidence（当前请求已计入）
+        OR mission.state='suspended' && 挂起 > 2h  // 主线 park 太久
+        OR 存在 suspended/drifted todo 的 wakeWhen 到期   // kind='time' 到点，其余（含 manual）24h 兜底
+        OR turn.driftAt > 0                        // 上次 [drift] 未处置（下一轮加 [未处置]）
+```
+
+- **mainline evidence** = `collab_progress light` 点亮 / 关闭一个 `kind:"mainline"` 的 todo（提交证据走 `light` 的
+  `commit:<sha>`）；两者都会把 `turn.noAdvanceTurns` 归零并推进 `lastAdvancedAt`；
+- `turn.noAdvanceTurns` 由 hook 在**请求开始**时 stamp：首个请求 / 上一轮刚推进过 → **1**，否则 `prev+1`；
+  `evaluate` 直接读这个值（不再 `+1`）。于是「从未推进」与「推进过一次后再静默」两条路径都是：
+  第 4 轮安静、**第 5 轮**出现 `[drift]`（`test/drift.mjs` 用例 1 / 17）；
+- 每轮最多 2 行，只在触发时出现；`[未处置]` 表示上一轮的提醒没被三选一回答。
+
+```
+[drift] 连续 5 轮无主线动作（3.2h）→ 三选一：resume / block / done
+[drift] T4 已挂起 1.0d 未醒（等 ses_e176 回复）→ 重新评估（resume / block / done） [未处置]
+```
+
+#### 三选一（必须落账）
+
+| 动作 | 写什么 | 校验 |
+| --- | --- | --- |
+| `collab_mission { action:"resume", next:"<下一步>" }` | `state=active`、`noAdvanceTurns=0`、`driftAt=0`，建/更新一条 mainline `doing` 待办 | `next` 非空 |
+| `collab_mission { action:"block", on:"<me\|ses_…>", reason:"…" }` | `state=suspended`、`parkedAt=now`、一条 `suspended` mainline 待办（`wakeWhen:{kind:"manual"}`） | `on` / `reason` 非空；重复 block 复用同一行 |
+| `collab_mission { action:"done" }` | `state=done`、`driftAt=0` | **必须已存在 `kind:"mainline"` 且 `status:"open"` 的 next-up 占位**，否则拒绝 |
+
+未处置：下一轮 `[drift]` 继续出现并加 `[未处置]`（`turn.driftAt` 只在三个动作里清零）。
+`set { state:"done" }` 走同一条 next-up 校验，绕不过去。
+
+> 已知行为（不加守护）：`done` **只在迁移时**校验 next-up 是否存在；之后那个占位被关闭不会回滚
+> `mission.state`（PRD 只要求迁移校验）。这时下一次 `[drift]` 会重新问，处置仍是 resume / block / done 三选一。
+
+#### 挂起的唤醒条件（`wakeWhen`，R3/R4）
+
+```ts
+{ kind: "reply",    ref: "ses_…" }   // 等某会话回复
+{ kind: "decision", ref: "D3"    }   // 等某决策 answered
+{ kind: "time",     at: <epoch ms> } // 到期时间，必须 > now
+{ kind: "manual"                  } // 没有自动触发源（仍受 24h 兜底）
+```
+
+- `collab_todo suspend` / `collab_mission block` 都要求它；缺 `wakeWhen` 直接拒绝（没有唤醒条件的挂起 = 永久消失）；
+- 0.9.1 写的**自由文本仍然有效**（按 `manual` 处理，注入显示 `suspended(等 <原文>)`），不会被静默改写；
+- 到期判定**在每次注入时扫描**（不依赖定时器）：`kind:"time"` 到点即到期；其余类型超过 **24h** 兜底到期；
+- **`manual` 只是「不因 reply/decision/time 自动醒」，仍受 24h 兜底**：`manual` 的挂起 24h 后同样转 `drifted` 并进
+  `[drift]`——它表示「没有可自动观察的触发源」，不是「永久免打扰」；
+- `resume` 会**收尾**同一契约里所有 mainline `suspended`/`drifted` 行（转 `closed`、`evidence:"resume"`），
+  否则 `block → resume` 会留下一条僵尸挂起行、24h 后每轮重新把 `[drift]` 顶出来（0.9.3 复核 B）；
+- 到期 → todo `status:"drifted"`（进 `[todo]` 显示 `挂起到期`，进 `[drift]` 原因）——**绝不自动关闭**，
+  必须由人/模型决定 `resume` / 重新 `suspend` / `close`；
+- 记录一个**未来** `at` 时，24h 兜底让位给这个明确截止时间（截止未到不判漂移）。
+
+#### 配置 / 常量与回滚
+
+```ts
+DRIFT_NO_ADVANCE_TURNS = 5      // 连续无 evidence 轮数
+DRIFT_PARKED_MS  = 2h           // 主线挂起多久算漂移
+SUSPEND_FALLBACK_MS = 24h       // 非 time 型 wakeWhen 的兜底
+```
+
+无新增工具（仍 26），无新配置文件；状态写在既有的 `collab-contract/<sid>.json`（`mission.parkedAt` /
+`turn.driftAt` / todo `status:"drifted"`）。回滚：
+`git restore -- src/core/contract.ts src/hooks/context.ts src/tools/mission.ts src/tools/todo.ts`、
+`rm -f src/core/drift.ts src/core/wake.ts`、`node test/drift.mjs` 从 `pnpm test` 移除。
+
+#### 验收
+
+`test/drift.mjs`（68 项）：4 轮安静 / **第 5 轮**出现 `[drift]` / 第 6 轮带 `[未处置]` · 推进一次后再静默 5 轮仍是第 5 轮触发（不再晚一轮）·
+`resume`（缺 `next` 拒绝）·
+`block`（缺 `on`/`reason` 拒绝、重复 block 复用行）· `done` 无 next-up 拒绝 / 有则通过（`doing` 不算 next-up、`set` 同校验）·
+`suspend` 缺 `wakeWhen` / `time` 已过期拒绝 · `time` 未来的对象写入与渲染 · 主线挂起 2.1h 触发 ·
+24h 未醒 → `drifted` 且不关闭、下一轮 `[未处置]` · 未来截止不被 24h 兜底误伤 · legacy 字符串 wakeWhen ·
+`close` mainline / `light` 归零计数 · `block → 25h → [drift] → resume` 后下一轮无 `[drift]` · 截断分支（段落整段丢弃，被丢的是 `[progress]`）· 工具数 26。
+变异（强制）：`DRIFT_NO_ADVANCE_TURNS` 5 → 0 → 「1–4 轮不出现 `[drift]`」必红（实测，退出码 1）。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

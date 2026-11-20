@@ -1,5 +1,6 @@
 /**
- * `collab_mission` (0.9.1) — the mainline anchor of one session.
+ * `collab_mission` (0.9.1; 0.9.3 adds the drift three-choice) — the mainline
+ * anchor of one session.
  *
  *   get      read-only: the stored mission, the resolved task anchor, and a
  *            suggestion when nothing is set yet (task title → first human
@@ -12,19 +13,35 @@
  *            and no inference can replace it. `by` is **required** — a human
  *            confirmation must be traceable to a person, not defaulted to the
  *            session id (review #6).
+ *
+ * 0.9.3 (`11-20-collab-drift`, R2): the three answers to `[drift]` — each one
+ * writes `mission.state` **and** clears the unresolved marker, so a reminder
+ * cannot be "acknowledged" by simply continuing:
+ *
+ *   resume { next }         state=active,    noAdvanceTurns=0, mainline todo
+ *                           created/updated to `next` (doing) **and every
+ *                           parked mainline row closed** (no zombie that
+ *                           re-enters `[drift]` after 24h)
+ *   block  { on, reason }   state=suspended, parkedAt=now, a suspended todo
+ *                           (`wakeWhen:{kind:"manual"}`, blockingOn=`on`); the
+ *                           park still expires on the 24h fallback (D17)
+ *   done                    state=done — only with an existing
+ *                           `kind:"mainline" && status:"open"` next-up todo
  */
 
-import { CONTRACT_ONE_LINE_LIMIT, CONTRACT_SCOPE_CHARS, CONTRACT_SCOPE_ITEMS } from '../constants.ts';
+import { CONTRACT_ONE_LINE_LIMIT, CONTRACT_SCOPE_CHARS, CONTRACT_SCOPE_ITEMS, CONTRACT_TODO_SUBJECT_LIMIT } from '../constants.ts';
 import {
   MISSION_STATES,
+  TODO_DONE_STATUSES,
   contractExists,
   contractFile,
   formatAge,
+  nextTodoSeq,
   openTodos,
   readContract,
   updateContract
 } from '../core/contract.ts';
-import type { ContractMission, MissionState } from '../core/contract.ts';
+import type { ContractMission, ContractTodo, MissionState, TodoStatus } from '../core/contract.ts';
 import { invalid } from '../core/errors.ts';
 import { firstHumanInstruction, resolveMissionAnchor } from '../core/mission-resolve.ts';
 import { asObject, dedupe, truncate } from '../util.ts';
@@ -61,6 +78,14 @@ function handoffMap(value: unknown): Record<string, string> | undefined {
   }
   return out;
 }
+
+/** `done` needs a placeholder: a finished mainline with nothing queued is refused (R5). */
+function nextUpTodos(contract: { todos: ContractTodo[] }): ContractTodo[] {
+  return contract.todos.filter(todo => todo.kind === 'mainline' && todo.status === 'open');
+}
+
+const NEXT_UP_HINT =
+  '先建 next-up 占位：collab_todo { action:"add", kind:"mainline", subject:"<下一步>", confirm:true }，再 collab_mission { action:"done" }';
 
 function renderMission(
   contract: ReturnType<typeof readContract>,
@@ -102,20 +127,26 @@ export function missionTool(kit: ToolKit): ToolDefinition {
   return {
     name: 'collab_mission',
     description:
-      'Read or write the **session contract mission** (0.9.1): the one-line mainline, the Trellis task path, the ' +
-      'in/out-of-scope keywords and the handoff targets. `get` is read-only and also shows the resolved task anchor ' +
-      '(session pointer → the workspace’s single in_progress task → nothing) plus a suggestion (task title, then the ' +
-      'first human instruction) when nothing is set yet. `set` writes the mission; after a human `confirm` it is ' +
-      'refused unless `reconfirm:true` and a non-empty `by` are given — inference never overwrites a human ' +
-      'confirmation. `confirm` fixes the mission once and **requires a non-empty `by`** (who confirmed it — ' +
-      'a session id is not a human); every later request keeps injecting it as `[mission]`. ' +
+      'Read or write the **session contract mission** (0.9.1; 0.9.3 adds the drift three-choice): the one-line ' +
+      'mainline, the Trellis task path, the in/out-of-scope keywords and the handoff targets. `get` is read-only ' +
+      'and also shows the resolved task anchor (session pointer → the workspace’s single in_progress task → ' +
+      'nothing) plus a suggestion (task title, then the first human instruction) when nothing is set yet. `set` ' +
+      'writes the mission; after a human `confirm` it is refused unless `reconfirm:true` and a non-empty `by` are ' +
+      'given — inference never overwrites a human confirmation. `confirm` fixes the mission once and **requires a ' +
+      'non-empty `by`** (who confirmed it — a session id is not a human); every later request keeps injecting it as ' +
+      '`[mission]`. When `[drift]` appears, answer with exactly one of: `resume {next}` (state=active, counter reset, ' +
+      'mainline todo created/updated — it also closes the parked rows), `block {on, reason}` (state=suspended + ' +
+      'parked todo; the park still hits the 24h fallback), or `done` (requires an existing `kind:"mainline"` open ' +
+      'next-up todo — a finished mainline with nothing queued is refused). ' +
       'The contract file is created lazily by the first writing call.',
     input: jsonInput({
       properties: {
         action: {
           type: 'string',
-          enum: ['get', 'set', 'confirm'],
-          description: 'get = 只读查看（含建议主线）· set = 写 mission · confirm = 一次确认后固定'
+          enum: ['get', 'set', 'confirm', 'resume', 'block', 'done'],
+          description:
+            'get = 只读查看（含建议主线）· set = 写 mission · confirm = 一次确认后固定 · ' +
+            'resume / block / done = 处置 [drift] 的三选一'
         },
         oneLine: {
           type: 'string',
@@ -151,6 +182,18 @@ export function missionTool(kit: ToolKit): ToolDefinition {
         by: {
           type: 'string',
           description: '确认人（confirm / reconfirm 必填）：写清是谁拍的板（如 "human" / "@长久同学"），不接受缺省。'
+        },
+        next: {
+          type: 'string',
+          description: `resume 必填：下一步做什么（≤${CONTRACT_TODO_SUBJECT_LIMIT} 字），会写成/更新一条 mainline doing 待办。`
+        },
+        on: {
+          type: 'string',
+          description: 'block 必填：阻塞方（`me` 或 `ses_…`），会写成 suspended 待办的 blockingOn。'
+        },
+        reason: {
+          type: 'string',
+          description: `block 必填：阻塞原因（≤${CONTRACT_TODO_SUBJECT_LIMIT} 字），作为挂起待办的标题。`
         }
       },
       required: ['action']
@@ -216,16 +259,28 @@ export function missionTool(kit: ToolKit): ToolDefinition {
         }
         if (!Object.keys(patch).length) throw invalid('没有可写字段：给 oneLine / taskPath / inScope / outOfScope / handoffTo / state 之一');
 
-        const written = await updateContract(sid, latest => ({
-          ...latest,
-          mission: {
-            ...latest.mission,
-            ...patch,
-            ...(current.confirmedBy && reconfirm
-              ? { confirmedBy: by, confirmedAt: now, source: 'confirm' as const }
-              : {})
+        const written = await updateContract(sid, latest => {
+          if (patch.state === 'done' && !nextUpTodos(latest).length) {
+            throw invalid(`mission.state=done 需要一个 mainline next-up 待办（当前 0 open）：${NEXT_UP_HINT}`);
           }
-        }));
+          return {
+            ...latest,
+            mission: {
+              ...latest.mission,
+              ...patch,
+              // `suspended` always gets a park stamp (what the 2h drift reads);
+              // any other state clears it so a stale stamp cannot fire drift.
+              ...(patch.state === 'suspended'
+                ? { parkedAt: Number(latest.mission.parkedAt) || now }
+                : patch.state
+                  ? { parkedAt: null }
+                  : {}),
+              ...(current.confirmedBy && reconfirm
+                ? { confirmedBy: by, confirmedAt: now, source: 'confirm' as const }
+                : {})
+            }
+          };
+        });
         const lines = [`已写入 mission（${contractFile(sid)}）`];
         if (current.confirmedBy && reconfirm) lines.push(`注: 按 reconfirm 覆盖了 ${current.confirmedBy} 的确认；新的确认人 ${by}。`);
         if (!written.mission.confirmedBy) lines.push('注: 仍是 [未确认] —— 确认一次：collab_mission { action:"confirm", by:"<你>" }');
@@ -282,7 +337,174 @@ export function missionTool(kit: ToolKit): ToolDefinition {
         };
       }
 
-      throw invalid('action 必须是 get | set | confirm');
+      if (action === 'resume' || action === 'block' || action === 'done') {
+        // The three answers to `[drift]` (R2). Every one of them clears
+        // `turn.driftAt`, so the reminder cannot be silenced by just continuing.
+        const next = truncate(input?.next, CONTRACT_TODO_SUBJECT_LIMIT);
+        const on = String(input?.on ?? '').trim();
+        const reason = truncate(input?.reason, CONTRACT_TODO_SUBJECT_LIMIT);
+
+        if (action === 'resume' && !next) {
+          throw invalid(
+            'resume 必填 next（下一步做什么）：没有下一步的「继续」等于没决定，' +
+              '例：collab_mission { action:"resume", next:"接线 M3 双写验证" }'
+          );
+        }
+        if (action === 'block') {
+          if (!on) throw invalid('block 必填 on（阻塞方）：等谁？`me` 或 `ses_…`');
+          if (on !== 'me' && !on.startsWith('ses_')) throw invalid('on 必须是 "me" 或一个 ses_… 会话 id');
+          if (!reason) throw invalid('block 必填 reason（一句话说明在等什么）：挂起没有理由 = 工作消失');
+        }
+        if (action === 'done' && !nextUpTodos(contract).length) {
+          throw invalid(`mission.state=done 需要一个 mainline next-up 待办（当前 0 open）：${NEXT_UP_HINT}`);
+        }
+
+        if (input?.confirm !== true) {
+          const preview =
+            action === 'resume'
+              ? `将 resume：state=active · noAdvanceTurns=0 · mainline 待办「${next}」`
+              : action === 'block'
+                ? `将 block：state=suspended · parkedAt=now · 挂起待办「${reason}」等 ${on}`
+                : `将 done：state=done（已有 next-up：${nextUpTodos(contract).map(todo => todo.id).join(' / ')}）`;
+          return {
+            content: [`未执行（confirm 不为 true，仅预览）。${preview}`, '确认后在同样参数下传 confirm:true。'].join('\n')
+          };
+        }
+
+        let createdID = '';
+        let touchedID = '';
+        const closedIDs: string[] = [];
+        const written = await updateContract(sid, latest => {
+          // Re-check inside the serialised mutate: another tool call may have
+          // closed the placeholder between the read above and this write.
+          if (action === 'done' && !nextUpTodos(latest).length) {
+            throw invalid(`mission.state=done 需要一个 mainline next-up 待办（当前 0 open）：${NEXT_UP_HINT}`);
+          }
+          let todos = latest.todos;
+          let seq = Number(latest.todoSeq) || 0;
+          if (action === 'resume') {
+            // `resume` is the "re-evaluate" answer to `[drift]`: every parked
+            // mainline row (suspended / drifted) is closed here, otherwise it
+            // stays behind, hits the 24h fallback and re-enters `[drift]` every
+            // round — a reminder that `resume` could never clear (review B).
+            const parkedIDs = new Set(
+              latest.todos
+                .filter(
+                  todo => todo.kind === 'mainline' && (todo.status === 'suspended' || todo.status === 'drifted')
+                )
+                .map(todo => todo.id)
+            );
+            for (const id of parkedIDs) closedIDs.push(id);
+            todos = parkedIDs.size
+              ? latest.todos.map(todo =>
+                  parkedIDs.has(todo.id)
+                    ? {
+                        ...todo,
+                        status: 'closed' as TodoStatus,
+                        closedAt: now,
+                        evidence: 'resume',
+                        updatedAt: now
+                      }
+                    : todo
+                )
+              : latest.todos;
+            const openMainline = todos.filter(
+              todo => todo.kind === 'mainline' && !TODO_DONE_STATUSES.includes(todo.status)
+            );
+            const target = openMainline.find(todo => todo.status === 'doing') ?? openMainline[0];
+            if (target) {
+              touchedID = target.id;
+              todos = todos.map(todo =>
+                todo.id === target.id
+                  ? { ...todo, subject: next, status: 'doing' as TodoStatus, updatedAt: now }
+                  : todo
+              );
+            } else {
+              seq = nextTodoSeq(latest);
+              createdID = `T${seq}`;
+              todos = [
+                ...todos,
+                {
+                  id: createdID,
+                  kind: 'mainline',
+                  subject: next,
+                  status: 'doing',
+                  blockingOn: 'me',
+                  since: now,
+                  updatedAt: now
+                } satisfies ContractTodo
+              ];
+            }
+          }
+          if (action === 'block') {
+            // Reuse the park row of the same blocker instead of growing the list
+            // every time the mainline is re-parked (each 2h drift round). A
+            // different blocker is genuinely a different wait → a new row.
+            const parked = latest.todos.find(
+              todo => todo.kind === 'mainline' && todo.status === 'suspended' && todo.blockingOn === on
+            );
+            if (parked) {
+              touchedID = parked.id;
+              todos = latest.todos.map(todo =>
+                todo.id === parked.id
+                  ? {
+                      ...todo,
+                      subject: reason,
+                      blockingOn: on,
+                      wakeWhen: { kind: 'manual' as const },
+                      parkedBy: sid,
+                      parkedAt: now,
+                      updatedAt: now
+                    }
+                  : todo
+              );
+            } else {
+              seq = nextTodoSeq(latest);
+              createdID = `T${seq}`;
+              todos = [
+                ...latest.todos,
+                {
+                  id: createdID,
+                  kind: 'mainline',
+                  subject: reason,
+                  status: 'suspended',
+                  blockingOn: on,
+                  wakeWhen: { kind: 'manual' as const },
+                  parkedBy: sid,
+                  parkedAt: now,
+                  since: now,
+                  updatedAt: now
+                } satisfies ContractTodo
+              ];
+            }
+          }
+          const state: MissionState = action === 'resume' ? 'active' : action === 'block' ? 'suspended' : 'done';
+          return {
+            ...latest,
+            todos,
+            todoSeq: seq,
+            mission: {
+              ...latest.mission,
+              state,
+              parkedAt: state === 'suspended' ? now : null
+            },
+            turn: { ...latest.turn, noAdvanceTurns: 0, driftAt: 0 }
+          };
+        });
+
+        const lines = [
+          action === 'resume'
+            ? `已 resume：state=active · noAdvanceTurns=0 · mainline 待办 ${touchedID || createdID}「${next}」`
+            : action === 'block'
+              ? `已 block：state=suspended · 挂起待办 ${touchedID || createdID}「${reason}」等 ${on}`
+              : `已 done：state=done · next-up ${nextUpTodos(written).map(todo => todo.id).join(' / ')}`
+        ];
+        if (closedIDs.length) lines.push(`已收尾旧挂起行 ${closedIDs.join(' / ')}（evidence=resume，不再进 [drift]）`);
+        lines.push(...renderMission(written, written.mission, hint, written.mission.oneLine, now));
+        return { content: lines.join('\n') };
+      }
+
+      throw invalid('action 必须是 get | set | confirm | resume | block | done');
     }
   };
 }

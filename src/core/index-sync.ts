@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS facts       (id TEXT PRIMARY KEY, claim TEXT, grade T
 
 CREATE TABLE IF NOT EXISTS todos       (id TEXT PRIMARY KEY, sid TEXT, kind TEXT,
                                        subject TEXT,
-                                       status TEXT CHECK (status IN ('open', 'doing', 'blocked', 'suspended', 'closed', 'dropped')),
+                                       status TEXT CHECK (status IN ('open', 'doing', 'blocked', 'suspended', 'drifted', 'closed', 'dropped')),
                                        blocking_on TEXT, parked_by TEXT, parked_at INTEGER,
                                        wake_when TEXT,
                                        since INTEGER, closed_at INTEGER, evidence TEXT);

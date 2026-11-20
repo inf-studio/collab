@@ -217,7 +217,7 @@ const eight = [...Array(4).fill('open'), ...Array(4).fill('doing'), 'closed', 'd
 
 // ================================================================ 1) surface
 section('1) tool surface stays 26 (no new tool)');
-expect('PLUGIN_VERSION / package.json agree (0.9.2)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.2', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree (0.9.3)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.3', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('26 tools are registered', tools.length === 26, `${tools.length} tools`);
 expect('the gate is exported for direct testing', typeof internals.evaluateGate === 'function');
 expect('GATE_TODO_LIMIT is 8', internals.GATE_TODO_LIMIT === 8, String(internals.GATE_TODO_LIMIT));

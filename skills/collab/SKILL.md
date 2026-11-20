@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），接单前模型表态（collab_accept 的 scopeCheck + 审计），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十六个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -374,7 +374,8 @@ collab_todo { action:"close", id:"T1", evidence:"test:reports/e2e.txt", confirm:
 - **每轮重算、不写 `injected[]`**：第二轮、第三轮仍能看到 `[mission]` 与 `[todo]`；
 - 0.9.2 删掉了 `[scope]` 小节（连同关键词/别名匹配）：边界只在 `[mission]` 作为**声明**展示，
   接单时由你自己在 `collab_accept` 的 `scopeCheck` 里判断这条是否在边界内；
-- `[drift]` 本版预留（0.9.3 才触发）；
+- `[drift]` **仅触发时出现**（0.9.3）：连续 5 轮无主线动作 / 主线挂起 > 2h / 挂起 24h 未醒 / 上次未处置；
+  必须用 `resume` / `block` / `done` 回答，见「一点十五」；
 - `[未收尾]`：上一轮结束时 `doing` 且本轮前没被更新的 todo 会被标出——插件**没有 idle 钩子**，
   这是下一轮回溯，不是「空闲时写入」；
 - 契约存 `~/.config/opencode/collab-contract/<sid>.json`，只读不建文件，写才 tmp+rename；
@@ -455,6 +456,63 @@ collab_accept { bid:"b_…", confirm:true,
 - 不要以为闸门能拦 shell：跨仓写仍然只能靠自觉 + 只读约束；
 - 不要用 `gate:"off"` 当日常配置——临时降级用完改回 `enforce`；
 - 不要把 `override` 当「先接了再说」的快捷键：它要求人类批准，且每一笔都留审计行。
+
+## 一点十五、漂移三选一 + 挂起唤醒（0.9.3）
+
+主线完结后没人给你下一项、或者「等 owner 批」的挂起永远没人再提——这两种「静悄悄停摆」由 `[drift]` 顶出来。
+
+### 触发（只有这四条）
+
+```text
+连续 5 轮无 mainline evidence（progress 点亮 / mainline todo 关闭 / 提交证据）
+主线 state=suspended 且挂起 > 2h
+suspended（或已 drifted）的 wakeWhen 到期：kind="time" 到点，其余 24h 兜底
+上一轮 [drift] 没被回答 → 继续出现并加 [未处置]
+```
+
+- 每轮最多 2 行，不触发时整段不出现；第 4 轮安静、**第 5 轮出现**（当前请求也计入）。
+- `[未处置]` = `turn.driftAt` 仍非零：光是「继续干活」不会清掉它。
+
+### 三选一（必须落账）
+
+```text
+# 继续：给下一步（会写成/更新一条 mainline doing 待办，并收尾旧的挂起/到期行）
+collab_mission { action:"resume", next:"接线 M3 双写验证", confirm:true }
+
+# 记阻塞：等谁、为什么（会建一条 suspended mainline 待办，wakeWhen={kind:"manual"}）
+collab_mission { action:"block", on:"ses_other", reason:"等 owner 批 D3", confirm:true }
+
+# 完结：必须已经有 next-up 占位，否则拒绝
+collab_todo { action:"add", kind:"mainline", subject:"next-up: 接手 11-21", confirm:true }
+collab_mission { action:"done", confirm:true }
+```
+
+- `done` 只看 `kind:"mainline" && status:"open"`：`doing` 不算占位；`set { state:"done" }` 走同一校验。
+  校验只在**迁移那一刻**发生：之后占位被关掉不会回滚 `done`，下一次 `[drift]` 会重新问。
+- `block` 每次重复会复用同一条挂起待办，不会把列表撑大；重新 block 会重置 `parkedAt`（2h 计时重新起算）。
+
+### 挂起必须给唤醒条件
+
+```text
+collab_todo { action:"suspend", id:"T2",
+              wakeWhen:{ kind:"reply", ref:"ses_e176…" }, confirm:true }   # 等回复
+collab_todo { action:"suspend", id:"T2", wakeWhen:{ kind:"time", at:1795200000000 } }  # 截止（必须未来）
+collab_todo { action:"suspend", id:"T2", wakeWhen:{ kind:"manual" } }        # 无自动触发源（仍受 24h 兜底）
+```
+
+- 缺 `wakeWhen`、`time` 给过去时间、`reply`/`decision` 缺 `ref` → 直接拒绝；
+- 0.9.1 的自由文本仍然有效（按 manual 处理，显示 `suspended(等 <原文>)`）；
+- **`manual` 不是「永久免打扰」**：它只表示没有 reply/decision/time 这类可自动观察的触发源，
+  仍受 **24h 兜底**——24h 未醒同样转 `drifted` 并进 `[drift]`；
+- 到期 → `status:"drifted"`（`[todo]` 显示 `挂起到期`、`[drift]` 说明原因），**绝不自动关闭**：
+  要么 `resume` 重新评估（会顺手关掉旧的挂起行），要么重新 `suspend`，要么 `close`（带 evidence）。
+- `defer` 不能用在挂起/到期项上——那不是「推迟」，是让活儿消失。
+
+### 别做
+
+- 不要用一句「我不再回执」当停机声明：没有 `done` + next-up 占位，`[drift]` 会一直问；
+- 不要把 `block` 当免打扰开关：主线挂起超过 2h 同样进 `[drift]`（这是设计，不是 bug）；
+- 不要给挂起项随便写一个过去的时间来「静音」——会被拒绝。
 
 ## 二、同工作区（local）
 

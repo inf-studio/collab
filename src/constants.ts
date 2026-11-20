@@ -543,6 +543,31 @@ export const CONTRACT_TODO_KEEP_CLOSED = 50;
 export const CONTRACT_MILESTONE_LIMIT = 30;
 /** `wakeWhen` / `parkedBy` are one-liners shown in the injection. */
 export const CONTRACT_WAKE_CHARS = 120;
+
+/* ------------------------- drift + wake (0.9.3, `11-20-collab-drift`) */
+
+/**
+ * R1/D8: consecutive requests without mainline evidence before `[drift]` fires.
+ * "Mainline evidence" = a lit milestone / a closed mainline todo / a commit that
+ * touches `mission.taskPath` (the first two are what this plugin can observe).
+ * Counting includes the request being rendered: the 5th request without evidence
+ * is drift, the 4th is not.
+ */
+export const DRIFT_NO_ADVANCE_TURNS = 5;
+/** R1: a suspended **mission** (`block`) older than this is drift too. */
+export const DRIFT_PARKED_MS = 2 * 60 * 60 * 1000;
+/**
+ * R4/D17: the 24h fallback. `wakeWhen.kind:"time"` has a real deadline; a
+ * `reply` / `decision` / `manual` wake cannot be observed cheaply from here, so
+ * any suspended todo that has been parked this long is marked `drifted` (never
+ * auto-closed) and enters the next `[drift]`.
+ */
+export const SUSPEND_FALLBACK_MS = 24 * 60 * 60 * 1000;
+/**
+ * What a suspended todo may wait for (`wakeWhen`). A legacy free-text string is
+ * accepted and treated as `manual` (it is what 0.9.1 wrote).
+ */
+export const WAKE_KINDS = ['reply', 'decision', 'time', 'manual'] as const;
 /** `collab_todo list` renders at most this many open rows, then "还有 N 条". */
 export const CONTRACT_TODO_LIST_MAX = 20;
 
@@ -583,4 +608,4 @@ export const GATE_TODO_LIMIT = 8;
 export const GATE_MODES: string[] = ['enforce', 'warn', 'off'];
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.9.2';
+export const PLUGIN_VERSION = '0.9.3';

@@ -214,8 +214,19 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - **诚实边界**：拦不住 bash 层跨仓写；文档不得暗示能拦。
 
 ### 漂移三选一
-- `resume`（给下一步）/ `block`（给 on+reason，转 suspended）/ `done`（**必须已有 mainline next-up todo**）。
-- 未处置 → 下一轮 `[drift]` 加 `[未处置]`；挂起必须 `wakeWhen`，`kind:'time'` 必须 `at > now`。
+- 判定只有四条，**不得放宽**：`noAdvanceTurns >= 5`（hook 在**请求开始**stamp：首个请求 / 上一轮刚推进 → 1，
+  否则 prev+1；`evaluate` 直接读、不再 `+1`。无 advance 与「推进一次后再静默」两条路径都是第 4 轮安静、第 5 轮触发）/
+  `mission.state='suspended'` 且 `parkedAt` 超 2h / suspended 或 drifted 待办的 `wakeWhen` 到期 / `turn.driftAt > 0`（未处置）。
+- `resume`（给 `next`，state=active、计数与 `driftAt` 归零、mainline todo 建/更新，**并关闭同一契约里的 mainline
+  `suspended`/`drifted` 行**——否则 `block → resume` 留僵尸行，24h 后每轮重新顶 `[drift]`）/
+  `block`（给 `on`+`reason`，转 suspended + `parkedAt` + suspended todo）/ `done`（**必须已有 `kind:'mainline' && status:'open'` 的 next-up**）。
+- 未处置 → 下一轮 `[drift]` 加 `[未处置]`；**只有三选一会清 `turn.driftAt`**，继续干活不清。
+- 挂起必须 `wakeWhen`（`reply` / `decision` / `time` / `manual`），`kind:'time'` 必须 `at > now`；
+  **`manual` 仍受 24h 兜底**（它只表示没有可自动观察的触发源，不是永久免打扰）；
+  0.9.1 的自由文本按 `manual` 兼容，不改写。到期在**每次注入时**扫描（不依赖定时器），到期转 `drifted`，**不自动关闭**；
+  非 `time` 型 24h 兜底；记录的未来 `at` 优先于 24h 兜底。
+- 评估 / 写入都在 `context` hook：读 → `evaluate` → 渲染 → 串行 `stampTurn` + `markDrifted`（一次写）。
+- `[drift]` ≤2 行；四段上限之和 11，生产预算 12 下截断分支不可达（测试用 `renderInjection {maxLines}` 驱动）。
 
 ### 投递节奏
 - 非紧急消息进 2min 窗口合并；`escalate` / `blocked` / protected 直通（<10s）。

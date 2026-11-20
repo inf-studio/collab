@@ -7,6 +7,7 @@ import {
   emptyContract,
   formatAge,
   normalizeContract,
+  nextTodoSeq,
   openTodos,
   readContract,
   renderInjection,
@@ -19,7 +20,9 @@ import {
 import { checkEvidence } from './core/evidence.ts';
 import { appendGateAudit, gateAuditFile } from './core/audit.ts';
 import { evaluate as evaluateGate, normalizeGateMode } from './core/gate.ts';
-import { GATE_TODO_LIMIT } from './constants.ts';
+import { DRIFT_NO_ADVANCE_TURNS, DRIFT_PARKED_MS, GATE_TODO_LIMIT, SUSPEND_FALLBACK_MS, WAKE_KINDS } from './constants.ts';
+import { evaluate as evaluateDrift, markDrifted, driftUnresolved } from './core/drift.ts';
+import { normalizeWakeWhen, parseWakeWhen, wakeExpired, wakeLabel, wakePhrase } from './core/wake.ts';
 import { firstHumanInstruction, messageTextOf, resolveMissionAnchor } from './core/mission-resolve.ts';
 import { createConfigReader } from './config.ts';
 import { COLLAB_TOOL_ACTIONS, EVENT_TYPES } from './constants.ts';
@@ -601,6 +604,7 @@ export const __internals = {
   unfinishedTodos,
   stampTurn,
   openTodos,
+  nextTodoSeq,
   formatAge,
   resolveMissionAnchor,
   messageTextOf,
@@ -613,5 +617,20 @@ export const __internals = {
   normalizeGateMode,
   appendGateAudit,
   gateAuditFile,
-  GATE_TODO_LIMIT
+  GATE_TODO_LIMIT,
+  // 0.9.3 (`11-20-collab-drift`): drift evaluation + the wake condition are pure
+  // (clock injected), so the harness can prove the 4th/5th turn boundary and the
+  // 24h transition without waiting, and drive `markDrifted` directly.
+  evaluateDrift,
+  markDrifted,
+  driftUnresolved,
+  parseWakeWhen,
+  normalizeWakeWhen,
+  wakeExpired,
+  wakeLabel,
+  wakePhrase,
+  DRIFT_NO_ADVANCE_TURNS,
+  DRIFT_PARKED_MS,
+  SUSPEND_FALLBACK_MS,
+  WAKE_KINDS
 };

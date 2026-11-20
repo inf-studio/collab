@@ -168,8 +168,8 @@ expect(
   indexDescription.slice(0, 140)
 );
 expect(
-  'PLUGIN_VERSION 与 package.json 一致（0.9.2）',
-  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.2',
+  'PLUGIN_VERSION 与 package.json 一致（0.9.3）',
+  internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.3',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
 const runIndexTool = input => indexDefinition.execute(input, { sessionID: 'ses_tool' });

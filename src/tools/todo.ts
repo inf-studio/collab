@@ -26,13 +26,15 @@ import {
   TODO_DONE_STATUSES,
   contractFile,
   formatAge,
+  nextTodoSeq,
   openTodos,
   readContract,
   updateContract
 } from '../core/contract.ts';
-import type { Contract, ContractTodo, TodoKind, TodoStatus } from '../core/contract.ts';
+import type { ContractTodo, TodoKind, TodoStatus } from '../core/contract.ts';
 import { InvariantError, invalid } from '../core/errors.ts';
 import { checkEvidence } from '../core/evidence.ts';
+import { parseWakeWhen, wakePhrase } from '../core/wake.ts';
 import { truncate } from '../util.ts';
 import type { ToolDefinition } from '../types.ts';
 import { jsonInput } from './shared.ts';
@@ -40,22 +42,9 @@ import type { ToolKit } from './shared.ts';
 
 const VERIFIABLE = /^(commit|file|test|decision):/i;
 
-/**
- * The next id is derived from `todoSeq` (highest ever issued) **and** the visible
- * rows. Closed history is trimmed on read, so max(visible) alone would reuse an
- * id that an old closed row already had — and the next add would overwrite it.
- */
-function nextTodoSeq(contract: Contract): number {
-  let visible = 0;
-  for (const todo of contract.todos) {
-    const match = /^T(\d+)$/.exec(todo.id);
-    if (match) visible = Math.max(visible, Number(match[1]));
-  }
-  return Math.max(Number(contract.todoSeq) || 0, visible) + 1;
-}
-
 function statusMark(todo: ContractTodo): string {
-  if (todo.status === 'suspended') return todo.wakeWhen ? `挂起(等 ${todo.wakeWhen})` : '挂起';
+  if (todo.status === 'suspended') return todo.wakeWhen ? `挂起(${wakePhrase(todo.wakeWhen)})` : '挂起';
+  if (todo.status === 'drifted') return '挂起到期（未醒）';
   if (todo.status === 'blocked') return '阻塞';
   if (todo.status === 'doing') return '进行中';
   return 'open';
@@ -107,12 +96,16 @@ export function todoTool(kit: ToolKit): ToolDefinition {
   return {
     name: 'collab_todo',
     description:
-      'Manage the session contract’s todo list (0.9.1). `add` creates `T1`, `T2`, … (`blockingOn` = "me" or a ' +
-      'session id; `status:"doing"` marks it in flight); `close` requires evidence (a verifiable `commit:` / ' +
-      '`file:` / `test:` / `decision:` form is checked, free text is stored but never moves a milestone); `defer` ' +
-      'keeps it open and pushes it down; `suspend` requires `wakeWhen` — without a wake condition the item is ' +
-      'refused. The `[todo]` injection shows the count + top 3 every request; `[未收尾]` marks a `doing` todo that ' +
-      'the previous request did not touch. `list` is read-only; every writing verb needs `confirm:true`.',
+      'Manage the session contract’s todo list (0.9.1; 0.9.3 wake conditions). `add` creates `T1`, `T2`, … ' +
+      '(`blockingOn` = "me" or a session id; `status:"doing"` marks it in flight); `close` requires evidence (a ' +
+      'verifiable `commit:` / `file:` / `test:` / `decision:` form is checked, free text is stored but never moves a ' +
+      'milestone); `defer` keeps it open and pushes it down; `suspend` requires `wakeWhen` — either an object ' +
+      '`{kind:"reply"|"decision"|"time"|"manual", ref?|at?}` or legacy free text, and without one the item is ' +
+      'refused (a park with no wake condition is how work disappears). A `time` deadline must be in the future; a ' +
+      'suspended item whose wake condition expired (or that stayed parked 24h) is marked `drifted` by the context ' +
+      'hook — never auto-closed. The `[todo]` injection shows the count + top 3 every request; `[未收尾]` marks a ' +
+      '`doing` todo that the previous request did not touch. `list` is read-only; every writing verb needs ' +
+      '`confirm:true`.',
     input: jsonInput({
       properties: {
         action: {
@@ -143,8 +136,11 @@ export function todoTool(kit: ToolKit): ToolDefinition {
           description: 'add 时的初始状态：open（默认）/ doing（进行中，下一轮若未更新会标 [未收尾]）。'
         },
         wakeWhen: {
-          type: 'string',
-          description: `suspend 必填：唤醒条件（≤${CONTRACT_WAKE_CHARS} 字），如「等 M2 点亮」「等 owner 回 D3」。`
+          type: ['string', 'object'],
+          description:
+            `suspend 必填：结构化唤醒条件 {kind:"reply",ref:"ses_…"} / {kind:"decision",ref:"D3"} / ` +
+            `{kind:"time",at:<epoch ms>} / {kind:"manual"}，或一句自由文本（≤${CONTRACT_WAKE_CHARS} 字，按 manual 处理）。` +
+            'manual 只是「不因 reply/decision/time 自动醒」，仍受 24h 兜底：到期未醒会转 drifted 并进 [drift]。'
         },
         evidence: {
           type: 'string',
@@ -284,18 +280,20 @@ export function todoTool(kit: ToolKit): ToolDefinition {
       }
 
       if (action === 'suspend') {
-        const wakeWhen = truncate(input?.wakeWhen, CONTRACT_WAKE_CHARS);
-        if (!wakeWhen) {
+        const parsed = parseWakeWhen(input?.wakeWhen, now);
+        if (!parsed.ok) {
           throw invalid(
-            'suspend 必填 wakeWhen：没有唤醒条件的挂起 = 工作永久消失（例：「等 M2 点亮」「等 owner 回 D3」）'
+            `suspend 必填 wakeWhen：没有唤醒条件的挂起 = 工作永久消失（${parsed.error}）。` +
+              '例：{kind:"manual"} / {kind:"reply",ref:"ses_…"} / {kind:"time",at:<未来的 epoch ms>}'
           );
         }
+        const wake = parsed.wake;
         if (input?.confirm !== true) {
           return {
             content: [
               `未执行（confirm 不为 true，仅预览）。将挂起 ${id}:`,
               `subject: ${target.subject}`,
-              `wakeWhen: ${wakeWhen}`,
+              `wakeWhen: ${typeof wake === 'string' ? wake : JSON.stringify(wake)}`,
               '确认后在同样参数下传 confirm:true。'
             ].join('\n')
           };
@@ -307,7 +305,7 @@ export function todoTool(kit: ToolKit): ToolDefinition {
               ? {
                   ...todo,
                   status: 'suspended' as TodoStatus,
-                  wakeWhen,
+                  wakeWhen: wake,
                   parkedBy: sid,
                   parkedAt: now,
                   updatedAt: now
@@ -315,12 +313,18 @@ export function todoTool(kit: ToolKit): ToolDefinition {
               : todo
           )
         }));
-        return { content: [`已挂起 ${id}（等 ${wakeWhen}）`, ...renderTodos(written, now)].join('\n') };
+        return { content: [`已挂起 ${id}（${wakePhrase(wake)}）`, ...renderTodos(written, now)].join('\n') };
       }
 
       // defer
       if (target.status === 'suspended') {
-        throw invalid(`${id} 已挂起（等 ${target.wakeWhen ?? '?'}）：先恢复或 close，不要再用 defer 重复推迟`);
+        throw invalid(`${id} 已挂起（${wakePhrase(target.wakeWhen)}）：先恢复或 close，不要再用 defer 重复推迟`);
+      }
+      if (target.status === 'drifted') {
+        throw invalid(
+          `${id} 的 wakeWhen 已过期（挂起到期）：先 collab_mission { action:"resume", next:"…" } 重新评估，` +
+            '或 close / 重新 suspend，不要用 defer'
+        );
       }
       if (input?.confirm !== true) {
         return {
