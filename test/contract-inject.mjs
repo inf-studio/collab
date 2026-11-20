@@ -35,6 +35,9 @@
  *  18. ambiguous anchor: silent without a contract, named with one
  *  19. a corrupt contract file never throws
  *  20. `confirm` requires a human `by`
+ *  21. 50 closed + 10 open: every active row is readable; new ids T61/T62
+ *  22. only closed history is trimmed; a dropped id is never reused (T66)
+ *  23. same-ms advance resets `noAdvanceTurns` (>=, symmetric with `[未收尾]`)
  *
  * Exits 1 if any check fails.
  */
@@ -600,6 +603,149 @@ expect(
   'confirm with by passes and records the human',
   /已确认 mission（by=human-owner）/.test(confirmWithBy) && contractOf('ses_confirm').mission.confirmedBy === 'human-owner',
   confirmWithBy.split('\n')[0]
+);
+
+
+// =========================== 21) read side keeps every active todo
+section('21) read side keeps every active todo (50 closed + 10 open)');
+const trimBase = internals.emptyContract('ses_trim');
+delete trimBase.todoSeq;
+trimBase.todos = [
+  ...Array.from({ length: 50 }, (_, index) => ({
+    id: `T${index + 1}`,
+    kind: 'mainline',
+    subject: `closed ${index + 1}`,
+    status: 'closed',
+    blockingOn: 'me',
+    since: 1000 + index,
+    closedAt: 1000 + index,
+    updatedAt: 1000 + index,
+    evidence: 'file:a.txt:1'
+  })),
+  ...Array.from({ length: 10 }, (_, index) => ({
+    id: `T${51 + index}`,
+    kind: 'mainline',
+    subject: `open ${51 + index}`,
+    status: 'open',
+    blockingOn: 'me',
+    since: 2000 + index,
+    updatedAt: 2000 + index
+  }))
+];
+writeFileSync(internals.contractFile('ses_trim'), JSON.stringify(trimBase));
+const trimRead = internals.readContract('ses_trim');
+expect(
+  'all 10 active rows survive a 60-row read',
+  trimRead.todos.filter(todo => todo.status === 'open').length === 10 &&
+    trimRead.todos.filter(todo => todo.status === 'closed').length === 50 &&
+    trimRead.todos.length === 60,
+  JSON.stringify({ open: trimRead.todos.filter(todo => todo.status === 'open').length, closed: trimRead.todos.filter(todo => todo.status === 'closed').length })
+);
+expect('todoSeq migrates from the raw ids', trimRead.todoSeq === 60, `todoSeq=${trimRead.todoSeq}`);
+const add61 = await call('collab_todo', { action: 'add', subject: '第 61 行', confirm: true }, 'ses_trim');
+const after61 = internals.readContract('ses_trim');
+expect(
+  'add reports T61 AND T61 is readable',
+  /已新增待办 T61/.test(add61) && after61.todos.some(todo => todo.id === 'T61' && todo.subject === '第 61 行'),
+  `${add61.split('\n')[0]} / readable=${after61.todos.some(todo => todo.id === 'T61')}`
+);
+const add62 = await call('collab_todo', { action: 'add', subject: '第 62 行', confirm: true }, 'ses_trim');
+const after62 = internals.readContract('ses_trim');
+const onDiskTrim = JSON.parse(readFileSync(internals.contractFile('ses_trim'), 'utf8'));
+expect(
+  'the next add is T62 (no id reuse) and visible',
+  /已新增待办 T62/.test(add62) && after62.todos.some(todo => todo.id === 'T62'),
+  `${add62.split('\n')[0]} / readable=${after62.todos.some(todo => todo.id === 'T62')}`
+);
+expect(
+  'on-disk tail is T61,T62 and todoSeq=62',
+  onDiskTrim.todos.slice(-2).map(todo => todo.id).join(',') === 'T61,T62' && onDiskTrim.todoSeq === 62,
+  `${onDiskTrim.todos.slice(-2).map(todo => todo.id).join(',')} / todoSeq=${onDiskTrim.todoSeq}`
+);
+const trimList = await call('collab_todo', { action: 'list' }, 'ses_trim');
+expect(
+  'list agrees with readContract (12 open, both new rows)',
+  trimList.includes('12 open') && trimList.includes('第 61 行') && trimList.includes('第 62 行'),
+  trimList.split('\n')[0]
+);
+
+// ============ 22) only closed history is trimmed; ids never reuse dropped rows
+section('22) only closed history is trimmed; ids never reuse dropped rows');
+const histBase = internals.emptyContract('ses_trim_history');
+delete histBase.todoSeq;
+histBase.todos = [
+  ...Array.from({ length: 60 }, (_, index) => ({
+    id: `T${index + 1}`,
+    kind: 'mainline',
+    subject: `old ${index + 1}`,
+    status: 'closed',
+    blockingOn: 'me',
+    since: 1000 + index,
+    closedAt: 1000 + index,
+    updatedAt: 1000 + index,
+    evidence: 'x'
+  })),
+  ...Array.from({ length: 5 }, (_, index) => ({
+    id: `T${61 + index}`,
+    kind: 'mainline',
+    subject: `open ${61 + index}`,
+    status: 'open',
+    blockingOn: 'me',
+    since: 2000 + index,
+    updatedAt: 2000 + index
+  }))
+];
+writeFileSync(internals.contractFile('ses_trim_history'), JSON.stringify(histBase));
+const hist = internals.readContract('ses_trim_history');
+expect(
+  'all 5 active rows + only the 50 most recent closed rows',
+  hist.todos.filter(todo => todo.status === 'open').length === 5 &&
+    hist.todos.filter(todo => todo.status === 'closed').length === 50 &&
+    hist.todos.length === 55,
+  JSON.stringify({ open: hist.todos.filter(todo => todo.status === 'open').length, closed: hist.todos.filter(todo => todo.status === 'closed').length })
+);
+expect(
+  'the dropped rows are closed history, never active work',
+  !hist.todos.some(todo => ['T1', 'T2', 'T10'].includes(todo.id)) &&
+    hist.todos.some(todo => todo.id === 'T11') &&
+    hist.todos.some(todo => todo.id === 'T60'),
+  hist.todos.filter(todo => todo.status === 'closed').slice(0, 3).map(todo => todo.id).join(',')
+);
+expect('todoSeq still remembers the dropped id range', hist.todoSeq === 65, `todoSeq=${hist.todoSeq}`);
+const addHist = await call('collab_todo', { action: 'add', subject: '历史之后的新行', confirm: true }, 'ses_trim_history');
+const histAfter = internals.readContract('ses_trim_history');
+expect(
+  'the next id is T66 (no reuse of a dropped row) and visible',
+  /已新增待办 T66/.test(addHist) && histAfter.todos.some(todo => todo.id === 'T66'),
+  addHist.split('\n')[0]
+);
+
+// ===================== 23) same-millisecond advance resets noAdvanceTurns
+section('23) same-millisecond advance resets noAdvanceTurns');
+const sameTurn = internals.emptyContract('ses_same');
+sameTurn.turn = { count: 1, lastAt: 1000, startedAt: 1000, lastAdvancedAt: 1000, noAdvanceTurns: 3 };
+const stampedSame = internals.stampTurn(sameTurn, 1000);
+expect(
+  'stampTurn treats lastAdvancedAt === lastAt as an advance (>=)',
+  stampedSame.turn.count === 2 && stampedSame.turn.noAdvanceTurns === 0,
+  JSON.stringify(stampedSame.turn)
+);
+const stampedBehind = internals.stampTurn({ ...sameTurn, turn: { ...sameTurn.turn, lastAdvancedAt: 999 } }, 1000);
+expect(
+  'a real gap still increments noAdvanceTurns',
+  stampedBehind.turn.noAdvanceTurns === 4,
+  JSON.stringify(stampedBehind.turn)
+);
+const sameMsBase = internals.emptyContract('ses_same_ms');
+sameMsBase.turn = { count: 1, lastAt: 5000, startedAt: 5000, lastAdvancedAt: 5000, noAdvanceTurns: 3 };
+sameMsBase.mission = { ...sameMsBase.mission, oneLine: '同毫秒', confirmedBy: 'human', confirmedAt: 5000 };
+writeFileSync(internals.contractFile('ses_same_ms'), JSON.stringify(sameMsBase));
+await ask('ses_same_ms');
+const sameMsAfter = internals.readContract('ses_same_ms').turn;
+expect(
+  'the next request sees the same-ms advance and resets',
+  sameMsAfter.count === 2 && sameMsAfter.noAdvanceTurns === 0,
+  JSON.stringify(sameMsAfter)
 );
 
 // ------------------------------------------------------------------- result

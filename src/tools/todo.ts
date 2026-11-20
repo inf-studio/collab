@@ -16,8 +16,8 @@
  */
 
 import {
-  CONTRACT_TODO_LIMIT,
   CONTRACT_TODO_LIST_MAX,
+  CONTRACT_TODO_MAX_OPEN,
   CONTRACT_TODO_SUBJECT_LIMIT,
   CONTRACT_WAKE_CHARS
 } from '../constants.ts';
@@ -30,8 +30,8 @@ import {
   readContract,
   updateContract
 } from '../core/contract.ts';
-import type { ContractTodo, TodoKind, TodoStatus } from '../core/contract.ts';
-import { invalid } from '../core/errors.ts';
+import type { Contract, ContractTodo, TodoKind, TodoStatus } from '../core/contract.ts';
+import { InvariantError, invalid } from '../core/errors.ts';
 import { checkEvidence } from '../core/evidence.ts';
 import { truncate } from '../util.ts';
 import type { ToolDefinition } from '../types.ts';
@@ -40,13 +40,18 @@ import type { ToolKit } from './shared.ts';
 
 const VERIFIABLE = /^(commit|file|test|decision):/i;
 
-function nextTodoID(todos: ContractTodo[]): string {
-  let max = 0;
-  for (const todo of todos) {
+/**
+ * The next id is derived from `todoSeq` (highest ever issued) **and** the visible
+ * rows. Closed history is trimmed on read, so max(visible) alone would reuse an
+ * id that an old closed row already had — and the next add would overwrite it.
+ */
+function nextTodoSeq(contract: Contract): number {
+  let visible = 0;
+  for (const todo of contract.todos) {
     const match = /^T(\d+)$/.exec(todo.id);
-    if (match) max = Math.max(max, Number(match[1]));
+    if (match) visible = Math.max(visible, Number(match[1]));
   }
-  return `T${max + 1}`;
+  return Math.max(Number(contract.todoSeq) || 0, visible) + 1;
 }
 
 function statusMark(todo: ContractTodo): string {
@@ -204,10 +209,11 @@ export function todoTool(kit: ToolKit): ToolDefinition {
         let newID = '';
         const written = await updateContract(sid, latest => {
           const open = openTodos(latest);
-          if (open.length >= CONTRACT_TODO_LIMIT) {
-            throw invalid(`open 待办已达上限 ${CONTRACT_TODO_LIMIT} 条：先关闭几条，列表不能无限增长`);
+          if (open.length >= CONTRACT_TODO_MAX_OPEN) {
+            throw invalid(`open 待办已达上限 ${CONTRACT_TODO_MAX_OPEN} 条：先关闭几条，列表不能无限增长`);
           }
-          newID = nextTodoID(latest.todos);
+          const seq = nextTodoSeq(latest);
+          newID = `T${seq}`;
           const todo: ContractTodo = {
             id: newID,
             kind,
@@ -217,8 +223,16 @@ export function todoTool(kit: ToolKit): ToolDefinition {
             since: now,
             updatedAt: now
           };
-          return { ...latest, todos: [...latest.todos, todo] };
+          // `todoSeq` is monotonic across closed-history trimming: an id is
+          // never issued twice, even after the row itself is gone.
+          return { ...latest, todoSeq: seq, todos: [...latest.todos, todo] };
         });
+        // `writeContract` returns the normalised (reader-visible) value, so this
+        // check fails loudly if a future retention change drops the new row —
+        // no "成功但读不到" and no silent overwrite on the next add.
+        if (!written.todos.some(todo => todo.id === newID)) {
+          throw new InvariantError(`新增待办 ${newID} 写后不可读：读侧丢弃了刚写入的行（拒绝静默丢数据）`);
+        }
         return { content: [`已新增待办 ${newID}`, ...renderTodos(written, now)].join('\n') };
       }
 

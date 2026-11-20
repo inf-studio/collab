@@ -286,7 +286,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_index` | `{ action, sinceDays?, confirm }` | **消息历史与可重建索引（0.9.0）**：`stats` 只读报索引状态（每表行数 / backend / 大小 / `backfilled`），不可用时回 `[索引不可用]` + 原因；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建到 `<dbPath>.tmp` → fsync → 原子 rename（**幂等**：同一输入两次的行数与每表 checksum 相同；失败保留旧库；默认只保留最近 180 天）；`backfill` 只回填 0.9.0 之前的状态级历史（handoff / thread，**不伪造正文**，写 `meta.backfilled=1`）。`rebuild` / `backfill` 需 `confirm:true`，`stats` 零写入。见 §11.21 |
 | `collab_mission` | `{ action, oneLine?, taskPath?, inScope?, outOfScope?, handoffTo?, state?, reconfirm?, by? }` | **会话契约主线（0.9.1）**：`get` 只读（含主线锚解析与建议主线，不写盘）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象 / 状态；`confirm` 一次确认后**固定**——此后注入与自动推断都不得覆盖，再改必须 `reconfirm:true` + `by`。主线锚按「会话指针 → 工作区唯一 `in_progress` 任务 → 空」解析，**不猜标题、不跑 python**。见 §11.22 |
 | `collab_progress` | `{ action, milestone?, title?, evidence?, confirm }` | **里程碑（0.9.1，只认证据）**：`list` 只读；`add` 规划 `M1` / `M2` …；`light` 必须给 `evidence`（`commit:<sha>` 存在且已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），校验不过**拒绝点亮**并给原因。点亮后才推进 `plan.lastAdvancedAt` 并把 `turn.noAdvanceTurns` 归零；同一 evidence 重复点亮不重复推进。见 §11.22 |
-| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；上一轮未动的 `doing` 项标 `[未收尾]`。见 §11.22 |
+| `collab_todo` | `{ action, id?, subject?, kind?, blockingOn?, status?, wakeWhen?, evidence?, reason?, until?, confirm }` | **契约待办（0.9.1）**：`add`（`T1`/`T2`…，`blockingOn` = `me` 或 `ses_…`，可 `status:"doing"`）/ `close`（**必填 evidence**，四类可校验形式先校验）/ `defer`（保持 open、排到末尾）/ `suspend`（**必填 `wakeWhen`**）/ `list`。`[todo]` 注入每轮只列 top3 + 计数；上一轮未动的 `doing` 项标 `[未收尾]`。读侧**保留全部 active**、只裁最近 50 条已关闭历史；id 由 `todoSeq` 单调分配、不复用。见 §11.22 |
 
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
@@ -1960,7 +1960,11 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 }
 ```
 
-- 写路径 **tmp + rename**；读路径**惰性创建**——只读永远不落盘，第一次 `set/confirm/add/light/close/...` 才建文件；
+- 写路径 **tmp + rename**（写前归一化，工具拿到的是读者可见的同一份）；读路径**惰性创建**——只读永远不落盘，
+  第一次 `set/confirm/add/light/close/...` 才建文件；
+- **todo 保留策略**：读侧保留**全部 active**（open/doing/blocked/suspended），只把 closed/dropped 历史裁到最近
+  `CONTRACT_TODO_KEEP_CLOSED=50`；`todoSeq` 记住「曾发行过的最大 id」，历史被裁也不会复用 id。
+  绝不能按总数 `slice()`——那会让刚 add 的行对所有读者不可见并在下一次写入被覆盖；
 - 文件可手工编辑：读时逐字段归一化（未知字段丢弃、长度截断、枚举回落），坏文件不会让一次请求失败；
 - `collab_mission confirm` **必填 `by`**（如 `"human"`）；不接受缺省成当前会话 id——确认必须能追溯到人。
 - `mission.confirmedBy` 一旦写入，`set` 必须 `reconfirm:true` **且** `by` 非空——**自动推断永不覆盖人工确认**（D7）。
@@ -2023,12 +2027,13 @@ compaction 或消息一多就什么都不剩。0.9.1 把任务层落成一份**�
 
 #### 验收
 
-`test/contract-inject.mjs`（复核后 69 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
+`test/contract-inject.mjs`（复审后 82 项）：工具面 23 → 26 · 连续两轮注入（变异「写回 `injected[]`」→ 第二轮必红）·
 无 evidence / 假 commit 拒绝 · 真 commit 点亮并推进时间 · 同 evidence 不重复推进 · confirm 后 set 拒绝 / reconfirm+by 通过 ·
 无任务仍显示 `[mission] … [未确认]` · 10 条 todo 只列 3 条 + 「还有 7 条」且整块 ≤12 行 ·
 suspend 缺 `wakeWhen` 拒绝 · close 缺 evidence / 文件不存在拒绝 · 截断时 `[progress]` 被整段丢弃 ·
 `[未收尾]` 下一轮标记 · 主线锚（指针 > 唯一任务 > 多任务不猜；无契约时 ambiguous 静默）· `get` 用会话首条人类指令作建议且不写盘 ·
-并发 `add` 不产生重复 id · mission-only / milestone-only 契约的 `turn.count` 正常递增 · `confirm` 缺 `by` 拒绝。
+并发 `add` 不产生重复 id · mission-only / milestone-only 契约的 `turn.count` 正常递增 · `confirm` 缺 `by` 拒绝 ·
+50 closed + 10 open 时新行可读（变异：读侧截断加回 → 必红）· 只裁关闭历史且 id 不复用 · 同毫秒 advance 归零 `noAdvanceTurns`。
 
 
 ## 12. 协作链路（handoff chain：local + peer）

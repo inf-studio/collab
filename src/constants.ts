@@ -513,8 +513,19 @@ export const CONTRACT_SCOPE_CHARS = 100;
 export const CONTRACT_HANDOFF_ITEMS = 20;
 /** One todo subject is one line — cut here. */
 export const CONTRACT_TODO_SUBJECT_LIMIT = 200;
-/** Hard cap on open todos: a full list refuses a new one (readable error, never evicts). */
-export const CONTRACT_TODO_LIMIT = 50;
+/**
+ * Hard cap on **active** todos (open / doing / blocked / suspended): a full list
+ * refuses a new one (readable error, never evicts). The 0.9.2 gate warns at 8
+ * open; this storage guard stays higher so the PRD's 10-open injection fixture
+ * is representable. Deliberately **not** a read-side truncation.
+ */
+export const CONTRACT_TODO_MAX_OPEN = 50;
+/**
+ * Read side: every active todo is kept; only closed/dropped history is trimmed
+ * to this many of the most recent. A total-row `slice()` used to drop freshly
+ * added open rows (silent loss + id reuse) — never reintroduce one.
+ */
+export const CONTRACT_TODO_KEEP_CLOSED = 50;
 /** Milestones are 3–8 in practice; a typo must not grow the file forever. */
 export const CONTRACT_MILESTONE_LIMIT = 30;
 /** `wakeWhen` / `parkedBy` are one-liners shown in the injection. */

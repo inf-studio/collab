@@ -34,7 +34,7 @@ import {
   CONTRACT_ONE_LINE_LIMIT,
   CONTRACT_SCOPE_CHARS,
   CONTRACT_SCOPE_ITEMS,
-  CONTRACT_TODO_LIMIT,
+  CONTRACT_TODO_KEEP_CLOSED,
   CONTRACT_TODO_SUBJECT_LIMIT,
   CONTRACT_VERSION,
   CONTRACT_WAKE_CHARS,
@@ -137,6 +137,12 @@ export interface Contract {
   mission: ContractMission;
   plan: ContractPlan;
   todos: ContractTodo[];
+  /**
+   * Highest `T<n>` ever issued. Closed history is trimmed on read, so the max
+   * visible id is **not** a safe source for the next id — this counter is
+   * (migration: derived from the raw rows when an old file has no counter).
+   */
+  todoSeq: number;
   peers: ContractPeer[];
   turn: ContractTurn;
 }
@@ -178,6 +184,7 @@ export function emptyContract(sessionID: string): Contract {
     },
     plan: { milestones: [], lastAdvancedAt: 0 },
     todos: [],
+    todoSeq: 0,
     peers: [],
     turn: { count: 0, lastAt: 0, startedAt: 0, lastAdvancedAt: 0, noAdvanceTurns: 0 }
   };
@@ -298,6 +305,47 @@ function normalizePeers(raw: unknown): ContractPeer[] {
     .slice(0, 50);
 }
 
+/** `T12` → 12; anything else → 0. */
+export function todoSeqOf(id: unknown): number {
+  const match = /^T(\d+)$/.exec(String(id ?? '').trim());
+  return match ? Number(match[1]) : 0;
+}
+
+/** Highest `T<n>` in a raw list (before closed-history trimming). */
+export function maxTodoSeq(todos: ContractTodo[]): number {
+  return todos.reduce((max, todo) => Math.max(max, todoSeqOf(todo.id)), 0);
+}
+
+/** Duplicate ids can exist in files written by the pre-review bug: last wins. */
+function dedupeTodos(todos: ContractTodo[]): ContractTodo[] {
+  const byID = new Map<string, ContractTodo>();
+  for (const todo of todos) byID.set(todo.id, todo);
+  return [...byID.values()];
+}
+
+/**
+ * Read-side retention: **every** active row survives; only `closed` / `dropped`
+ * history is trimmed to the most recent `CONTRACT_TODO_KEEP_CLOSED`.
+ *
+ * A total-row `slice(0, 50)` used to drop freshly added open rows (add reported
+ * success, every reader missed the row, the next id was reused and overwrote
+ * it). Retention must never be able to hide a write.
+ */
+export function keepTodos(todos: ContractTodo[]): ContractTodo[] {
+  const closed = todos.filter(todo => TODO_DONE_STATUSES.includes(todo.status));
+  const recent = new Set(
+    [...closed]
+      .sort(
+        (a, b) =>
+          (Number(b.closedAt ?? b.updatedAt ?? b.since) || 0) -
+          (Number(a.closedAt ?? a.updatedAt ?? a.since) || 0)
+      )
+      .slice(0, CONTRACT_TODO_KEEP_CLOSED)
+      .map(todo => todo.id)
+  );
+  return todos.filter(todo => !TODO_DONE_STATUSES.includes(todo.status) || recent.has(todo.id));
+}
+
 /** Tolerant read: junk fields are dropped, a wrong `v` is treated as empty. */
 export function normalizeContract(raw: unknown, sessionID: string): Contract {
   const value = asObject(raw);
@@ -306,16 +354,19 @@ export function normalizeContract(raw: unknown, sessionID: string): Contract {
   if (value.sid && String(value.sid) !== String(sessionID)) return base;
   if (version && version !== CONTRACT_VERSION) return base;
   const turn = asObject(value.turn);
+  const rawTodos = (Array.isArray(value.todos) ? value.todos : [])
+    .map(normalizeTodo)
+    .filter((item): item is ContractTodo => Boolean(item));
   return {
     v: CONTRACT_VERSION as 1,
     sid: String(sessionID ?? ''),
     updatedAt: num(value.updatedAt),
     mission: normalizeMission(value.mission),
     plan: normalizePlan(value.plan),
-    todos: (Array.isArray(value.todos) ? value.todos : [])
-      .map(normalizeTodo)
-      .filter((item): item is ContractTodo => Boolean(item))
-      .slice(0, CONTRACT_TODO_LIMIT),
+    todos: keepTodos(dedupeTodos(rawTodos)),
+    // Derived from the **raw** rows, so trimming old closed history on read can
+    // never make the next add reuse an id that was already issued.
+    todoSeq: Math.max(num(value.todoSeq), maxTodoSeq(rawTodos)),
     peers: normalizePeers(value.peers),
     turn: {
       count: num(turn.count),
@@ -340,9 +391,16 @@ export function readContract(sessionID: string): Contract {
   }
 }
 
-/** tmp + rename: a crash mid-write leaves the previous contract intact. */
+/**
+ * tmp + rename: a crash mid-write leaves the previous contract intact.
+ *
+ * The value is **normalised before writing and returned in that shape**, so the
+ * object a tool gets back is exactly what every reader will see. `collab_todo
+ * add` relies on this to assert its new row is readable (never a silent drop).
+ */
 export function writeContract(contract: Contract): Contract {
-  const next: Contract = { ...contract, v: CONTRACT_VERSION as 1, updatedAt: Date.now() };
+  const canonical = normalizeContract({ ...contract, v: CONTRACT_VERSION as 1 }, contract.sid);
+  const next: Contract = { ...canonical, v: CONTRACT_VERSION as 1, updatedAt: Date.now() };
   const file = contractFile(next.sid);
   mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randToken()}.tmp`;
@@ -470,7 +528,10 @@ export function stampTurn(contract: Contract, now = Date.now()): Contract {
   const previousStart = Number(contract.turn?.lastAt) || 0;
   const lastAdvancedAt = Number(contract.turn?.lastAdvancedAt) || 0;
   const previousNoAdvance = Number(contract.turn?.noAdvanceTurns) || 0;
-  const advancedLastTurn = previousStart > 0 && lastAdvancedAt > previousStart;
+  // `>=` mirrors `[未收尾]`'s `updatedAt <= 本轮开始`: a light and the request
+  // start can share one millisecond, and a strict `>` left `noAdvanceTurns`
+  // stuck at its old value in that case.
+  const advancedLastTurn = previousStart > 0 && lastAdvancedAt >= previousStart;
   const noAdvanceTurns =
     previousStart === 0 ? 0 : advancedLastTurn ? 0 : previousNoAdvance + 1;
   return {
