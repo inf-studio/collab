@@ -32,6 +32,12 @@
  *      day by day, resends excluded, `noop`/`late` from the pacing counters,
  *      the same checksum twice, `sinceDays` bounds the window, and `stats`
  *      prints the coverage range (「无」 when empty)
+ *  11. R1/R2/R5 (0.9.7, `11-21-collab-index-metrics`): the read-only `metrics`
+ *      action — newest day first, values straight from the table, `limit`
+ *      bounds the shown rows but not the coverage line, NULL prints `-`, an
+ *      empty table says 「metrics 无数据」, a missing database says
+ *      「[索引不可用]」 **and creates no file**, and `collab.db`'s size/mtime are
+ *      unchanged by the read.
  *
  * Exits 1 if any check fails.
  */
@@ -43,7 +49,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -154,14 +162,15 @@ expect(
   '工具面 23 → 26：collab_index 只注册一次，0.9.1 的三个工具也在',
   registered.length === 28 && Boolean(indexDefinition),
   `${registered.length} tool(s)`
-);
-expect(
-  'collab_index 的 schema 只有 rebuild | backfill | stats 与 confirm/sinceDays',
+);expect(
+  'collab_index 的 schema 只有 rebuild | backfill | stats | metrics 与 confirm/sinceDays/limit',
   Boolean(indexDefinition) &&
     indexDefinition.input.additionalProperties === false &&
-    JSON.stringify(indexDefinition.input.properties.action.enum) === JSON.stringify(['rebuild', 'backfill', 'stats']) &&
+    JSON.stringify(indexDefinition.input.properties.action.enum) ===
+      JSON.stringify(['rebuild', 'backfill', 'stats', 'metrics']) &&
     indexDefinition.input.properties.action.type === 'string' &&
-    indexDefinition.input.properties.confirm.type === 'boolean',
+    indexDefinition.input.properties.confirm.type === 'boolean' &&
+    indexDefinition.input.properties.limit.type === 'number',
   Object.keys(indexDefinition?.input?.properties ?? {}).join(',')
 );
 const indexDescription = String(indexDefinition?.description ?? '');
@@ -1136,6 +1145,120 @@ expect(
     .find(line => line.includes('metrics 覆盖'))}`
 );
 writeJson(configFile, { storage: 'sqlite' });
+
+// ========== 11) R1/R2/R5 (0.9.7, `11-21-collab-index-metrics`): `metrics` 动作
+// The daily rows were only reachable by opening `collab.db` directly (which the
+// repo rules require per-query authorization for, even read-only). `metrics`
+// exposes the same numbers read-only: newest day first, straight from the table
+// (no second calculation), `limit` bounds the printed rows only.
+fresh();
+const readDir = join(root, 'metrics-read');
+mkdirSync(readDir, { recursive: true });
+const readDb = join(readDir, 'collab.db');
+const readMessagesFile = join(readDir, 'collab-messages.jsonl');
+const readPacing = join(readDir, 'collab-pacing.json');
+const rDay1 = dayAt(2, 3);
+const rDay2 = dayAt(2, 4);
+const rDay3 = dayAt(2, 5);
+const appendReadMessage = (id, sentAt) =>
+  appendMessage(
+    internals.makeEnvelope({ id, from: 'ses_r_a', to: 'ses_r_b', sentAt, kind: 'note', body: `read ${id}` }),
+    { file: readMessagesFile }
+  );
+// Day 1: 3 messages (resend `_r1` excluded) → gaps 10s / 30s, median 20s.
+appendReadMessage('msg_read_1', rDay1);
+appendReadMessage('msg_read_1_r1', rDay1 + 1_000);
+appendReadMessage('msg_read_2', rDay1 + 10_000);
+appendReadMessage('msg_read_3', rDay1 + 40_000);
+// Day 2: 2 messages, gap 5s. Day 3: 1 message, median 0.
+appendReadMessage('msg_read_4', rDay2);
+appendReadMessage('msg_read_5', rDay2 + 5_000);
+appendReadMessage('msg_read_6', rDay3);
+writeJson(readPacing, {
+  v: internals.PACING_VERSION,
+  windows: [],
+  counters: { [mDay(rDay1)]: { noop: 5, late: 1 }, [mDay(rDay2)]: { noop: 2, late: 0 } },
+  lastSent: {},
+  noops: {}
+});
+fresh();
+const readRebuild = await rebuildIndex({
+  dbPath: readDb,
+  messagesFile: readMessagesFile,
+  pacingFile: readPacing,
+  broadcasts: [],
+  threads: {},
+  sinceDays: 0
+});
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: readDb });
+/** The rendered daily rows, in output order (`day · msg … · gap …`). */
+const metricLinesOf = content => content.split('\n').filter(line => /^\d{4}-\d{2}-\d{2} · msg /.test(line));
+const readBefore = statSync(readDb);
+const listed = await runIndexTool({ action: 'metrics' });
+const readAfter = statSync(readDb);
+const expectedMetricLines = [
+  `${mDay(rDay3)} · msg 1 · noop 0 · late 0 · gap 0ms`,
+  `${mDay(rDay2)} · msg 2 · noop 2 · late 0 · gap 5000ms`,
+  `${mDay(rDay1)} · msg 3 · noop 5 · late 1 · gap 20000ms`
+];
+expect(
+  'R1 `metrics` 按日期倒序输出 3 天，数值与 rebuild 写入的 `metrics` 表逐字一致',
+  readRebuild.ok && JSON.stringify(metricLinesOf(listed.content)) === JSON.stringify(expectedMetricLines),
+  JSON.stringify(metricLinesOf(listed.content))
+);
+expect(
+  'R1 末尾给出覆盖范围与总天数（整表口径）',
+  listed.content.includes(`覆盖 ${mDay(rDay1)}–${mDay(rDay3)}（3 天）`),
+  listed.content.split('\n').find(line => line.startsWith('覆盖')) ?? '-'
+);
+// R2 mutation target: sorting the SQL by `day` ASC flips this array → red.
+const limited = await runIndexTool({ action: 'metrics', limit: 2 });
+const limitedLines = metricLinesOf(limited.content);
+expect(
+  'R1 `limit:2` 只输出最近 2 天，覆盖范围仍报整表 3 天',
+  JSON.stringify(limitedLines) === JSON.stringify(expectedMetricLines.slice(0, 2)) &&
+    limited.content.includes(`覆盖 ${mDay(rDay1)}–${mDay(rDay3)}（3 天）`) &&
+    limited.content.includes('仅显示最近 2 天'),
+  JSON.stringify(limitedLines)
+);
+expect(
+  'R2 只读：调用前后 `collab.db` 的 size / mtime 不变',
+  readBefore.size === readAfter.size && readBefore.mtimeMs === readAfter.mtimeMs,
+  `${readBefore.size}B@${readBefore.mtimeMs} → ${readAfter.size}B@${readAfter.mtimeMs}`
+);
+// R5: a NULL column is "never written", not zero — print `-` (never invent).
+const nullHandle = await openDb({ path: readDb });
+nullHandle.prepare("INSERT INTO metrics (day) VALUES ('2030-01-01')").run();
+closeDb();
+const withNull = await runIndexTool({ action: 'metrics' });
+expect(
+  'R5 NULL 字段显示 `-`（不把「没写过」变成 0）',
+  metricLinesOf(withNull.content)[0] === '2030-01-01 · msg - · noop - · late - · gap -',
+  metricLinesOf(withNull.content)[0] ?? '-'
+);
+// R3: an existing projection with no `metrics` row is empty, not an error.
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: b2Db });
+const emptyMetrics = await runIndexTool({ action: 'metrics' });
+expect(
+  'R3 空库：输出「metrics 无数据」且不报错（无日期行）',
+  /metrics 无数据/.test(emptyMetrics.content) && metricLinesOf(emptyMetrics.content).length === 0,
+  emptyMetrics.content.split('\n')[0] ?? '-'
+);
+// R2: a cold start must not create the database (no `collab.db*` at all).
+const coldDir = join(root, 'metrics-cold');
+mkdirSync(coldDir, { recursive: true });
+const coldDb = join(coldDir, 'collab.db');
+await new Promise(resolve => setTimeout(resolve, 1100));
+writeJson(configFile, { storage: 'sqlite', dbPath: coldDb });
+const coldMetrics = await runIndexTool({ action: 'metrics' });
+const coldFiles = readdirSync(coldDir).filter(name => name.startsWith('collab.db'));
+expect(
+  'R2 冷启动（无库）：报 [索引不可用]，且目录里不产生 collab.db / -wal / -shm',
+  /\[索引不可用\]/.test(coldMetrics.content) && coldFiles.length === 0,
+  `files=${coldFiles.join(',') || '(none)'}`
+);
 
 // ============================ cleanup + summary
 rmSync(root, { recursive: true, force: true });

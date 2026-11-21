@@ -40,7 +40,7 @@
 | `collab_unlock`    | 释放**自己**持有的租约（`shared` 组只移除自己；无 force 抢占）             | 写本地租约        |
 | `collab_locks`     | 只读列出租约：持有者/模式/剩余 TTL/排队者（`collab_list` 也会显示本人持有/排队） | 只读              |
 | `collab_archive`   | 归档/恢复某个会话（**不是删除**）：`PATCH { archived }`，会话与消息保留；spawn 会话在交接终态 10 分钟后自动归档（可 `archiveSpawned:false` 关闭） | 写会话归档位      |
-| `collab_index`     | **消息历史 / 可重建索引（0.9.0）**：`stats` 只读看投影（12 表 + FTS5，行数/backend/大小/`backfilled`/`metrics` 覆盖范围「首日–末日（N 天）」或「无」，不可用回 `[索引不可用]`）；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建（锁 + tmp → fsync → 原子 rename，**幂等**，失败保留旧库），并**重算 `metrics`**（与投递侧同一个聚合函数，重发行不计入）；`backfill` 只补状态级历史（不伪造正文）。快照 / `collab_status` / `collab_threads` 在投影**新鲜**时优先读它，否则回落 JSON | 读/写本地投影     |
+| `collab_index`     | **消息历史 / 可重建索引（0.9.0）**：`stats` 只读看投影（12 表 + FTS5，行数/backend/大小/`backfilled`/`metrics` 覆盖范围「首日–末日（N 天）」或「无」，不可用回 `[索引不可用]`）；`metrics` 只读逐日指标（一天一行、按日期倒序，`limit` 默认 30，NULL 显示 `-`，空表 `metrics 无数据`，无库不建文件）；`rebuild` 从 `collab-messages.jsonl` + `collab-*.json` 全量重建（锁 + tmp → fsync → 原子 rename，**幂等**，失败保留旧库），并**重算 `metrics`**（与投递侧同一个聚合函数，重发行不计入）；`backfill` 只补状态级历史（不伪造正文）。快照 / `collab_status` / `collab_threads` 在投影**新鲜**时优先读它，否则回落 JSON | 读/写本地投影     |
 | `collab_mission`  | **会话契约主线（0.9.1；0.9.3 三选一）**：`get` 只读（主线锚：会话指针 → 工作区唯一 `in_progress` 任务 → 空；不猜标题、不跑 python）；`set` 写一句话主线 / 任务路径 / 做·不做边界 / 转交对象；`confirm` **必填 `by`**、一次确认后**固定**，再改必须 `reconfirm:true` + `by`（自动推断永不覆盖人工确认）；**`resume {next}` / `block {on,reason}` / `done`** 是回答 `[drift]` 的唯一三个动作（`done` 要求已有 mainline next-up 待办） | 写本地契约        |
 | `collab_progress` | **里程碑（0.9.1）**：`list` 只读；`add` 规划 `M1`…；`light` **必须给可校验 evidence**（`commit:` 已合入 HEAD / `file:<path>:<line>` / `test:<path>` / `decision:<id>`），无 evidence 或校验失败一律拒绝；点亮后 `plan.lastAdvancedAt` 推进、`noAdvanceTurns` 归零 | 写本地契约        |
 | `collab_todo`     | **契约待办（0.9.1；0.9.3 唤醒条件）**：`add`（`blockingOn`=`me` 或 `ses_…`，可 `status:"doing"`）/ `close`（必填 evidence）/ `defer` / `suspend`（必填 `wakeWhen`：`{kind:"reply"|"decision"|"time"|"manual"}` 或自由文本）/ `list`；`[todo]` 注入每轮只列 top3 + 计数，挂起显示 `suspended(等 X)`、到期未醒转 `drifted`（不自动关闭），上一轮未动的 `doing` 标 `[未收尾]`；读侧保留全部 active、只裁关闭历史，id 单调不复用 | 写本地契约        |
@@ -49,7 +49,7 @@
 0.9.0 起每条投递（`send` / `reply` / 接管请求 / 加急 / 冻结通知 / 回执通知 / ack / 受限重发 / 缺陷上报）
 都会在 `~/.config/opencode/collab-messages.jsonl` 留一行全文信封，并投影到可随时删除重建的 `collab.db`。
 投影只是缓存：读路径只在其 `synced_at` 不落后于任何源文件时使用，否则回落 JSON；删库不影响任何协作。
-另有 `collab_index { action:"rebuild"|"backfill"|"stats" }` 维护它。
+另有 `collab_index { action:"rebuild"|"backfill"|"stats"|"metrics" }` 维护它。
 
 另有一个 `context` hook：把「未读消息 + 未闭环交接 + 挂起提醒」各注入一次（≤ `maxInject` 条、
 单条 ≤200 字），不改历史、不影响别的会话；同一句话不会重复注入。
@@ -71,7 +71,9 @@
 窗口落在 `~/.config/opencode/collab-pacing.json`（定时器 `unref`，`context` 每轮先补投到期窗口；失败保留 item 重投）。
 每日 `metrics` 落 `msg_count`（按 `msg_…_r<n>` 形状排除重发行）/ `noop_count` / `late_count` / `median_gap_ms`（当天全机口径）；
 `collab_index rebuild` **重算**这些日行（与投递侧同一个聚合函数，`noop`/`late` 取 `collab-pacing.json` 的
-`counters[day]`，缺失记 0），`stats` 显示 `metrics 覆盖 <首日>–<末日>（N 天）`，无数据写「无」。
+`counters[day]`，缺失记 0），`stats` 显示 `metrics 覆盖 <首日>–<末日>（N 天）`，无数据写「无」；
+`collab_index { action:"metrics", limit? }`（0.9.7）**只读**打印这些日行（一天一行、按日期倒序，
+`limit` 默认 30，末尾给覆盖范围；NULL 显示 `-`；无库报 `[索引不可用]` 且不建文件）。
 `sinceDays`（默认 180，**0 = 不按时间过滤**）只裁剪投影——`messages` 与 `metrics` 同窗口，JSONL 真源永久保留，
 随时可用 `sinceDays:0` 重建全量。
 回滚：`collab.json` → `"windowMs": 0` + `"suppressNoDelta": false`（逐条投递）。详见 `docs/collab.md` §11.27。

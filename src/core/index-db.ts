@@ -29,10 +29,12 @@ import { DB_FILE, FTS_BODY_LIMIT, REBUILD_SINCE_DAYS } from '../constants.ts';
 import { errCode, errText, log } from '../log.ts';
 import type {
   BroadcastRecord,
+  IndexMetrics,
   IndexStats,
   IndexedMessage,
   LockRecord,
   MessageEnvelope,
+  MetricsDayRow,
   OwnerQueueItem,
   RebuildResult,
   SessionInfoLike,
@@ -791,6 +793,59 @@ async function computeStatus(options: StoreOptions): Promise<{
 
 export async function indexStats(options: StoreOptions = {}): Promise<IndexStats> {
   return computeStatus(options);
+}
+
+/** `metrics` rows per `collab_index metrics` call when the caller passes no `limit`. */
+export const METRICS_DEFAULT_LIMIT = 30;
+
+/** A stored integer / NULL — never coerced into a fabricated `0`. */
+function nullableCount(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+/**
+ * 0.9.7 (`11-21-collab-index-metrics`): the daily `metrics` rows, newest day
+ * first. **Read-only in the strict sense** (R2): a missing database is
+ * *reported*, never created, and nothing is written — the numbers come straight
+ * from the table (R5), so this view can never drift from `rebuild`.
+ *
+ * The span (`range`) is the **whole** table, not the limited slice: `limit:2` on
+ * three days still says 「覆盖 …–…（3 天）」.
+ */
+export async function indexMetrics(options: StoreOptions & { limit?: number } = {}): Promise<IndexMetrics> {
+  const dbPath = dbPathOf(options);
+  const mode = resolved(options).storage;
+  const base = { dbPath, rows: [] as MetricsDayRow[] };
+  if (mode === 'json') return { ...base, available: false, reason: 'storage:json（纯 JSON 模式）' };
+  // R2: a read must never leave `collab.db` / `-wal` / `-shm` behind.
+  if (!existsSync(dbPath)) return { ...base, available: false, reason: '未建立索引（先跑 collab_index rebuild）' };
+  const handle = await openDb({ path: dbPath, storage: mode });
+  if (!handle) {
+    return { ...base, available: false, reason: dbRuntimeState().broken?.reason ?? '索引不可用' };
+  }
+  try {
+    if (!hasSchema(handle)) return { ...base, available: false, reason: '未建立索引（先跑 collab_index rebuild）' };
+    const requested = Math.floor(Number(options.limit ?? METRICS_DEFAULT_LIMIT));
+    const limit = Number.isFinite(requested) && requested > 0 ? requested : METRICS_DEFAULT_LIMIT;
+    const rows = (
+      handle
+        .prepare(
+          'SELECT day, msg_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day DESC LIMIT ?'
+        )
+        .all(limit) as Record<string, any>[]
+    ).map(row => ({
+      day: String(row.day),
+      msgCount: nullableCount(row.msg_count),
+      noopCount: nullableCount(row.noop_count),
+      lateCount: nullableCount(row.late_count),
+      medianGapMs: nullableCount(row.median_gap_ms)
+    }));
+    const range = metricsCoverage(handle);
+    return { ...base, available: true, backend: handle.backend, rows, ...(range ? { range } : {}) };
+  } catch (error) {
+    log(`index metrics read failed: ${errText(error)}`);
+    return { ...base, available: false, reason: dbRuntimeState().broken?.reason ?? errText(error) };
+  }
 }
 
 /** The board's `[索引不可用]` verdict, cached so a 2 s poll costs nothing. */

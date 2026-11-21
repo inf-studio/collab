@@ -908,6 +908,31 @@ export interface IndexStats {
   metricsRange?: { first: string; last: string; days: number };
 }
 
+/**
+ * One `metrics` row as *stored* (0.9.7, `11-21-collab-index-metrics`). A column
+ * the projection never wrote is `null` — the renderer prints `-` instead of
+ * inventing a zero (R5: same numbers as the table, no second calculation).
+ */
+export interface MetricsDayRow {
+  day: string;
+  msgCount: number | null;
+  noopCount: number | null;
+  lateCount: number | null;
+  medianGapMs: number | null;
+}
+
+/** `collab_index metrics` — the daily rows plus the verdict that produced them. */
+export interface IndexMetrics {
+  available: boolean;
+  dbPath: string;
+  backend?: string;
+  reason?: string;
+  /** Newest day first, at most `limit` rows. */
+  rows: MetricsDayRow[];
+  /** The whole table's span (not just the shown rows); absent when empty. */
+  range?: { first: string; last: string; days: number };
+}
+
 /** The messages a `rebuild` / `backfill` actually produced. */
 export interface RebuildResult {
   ok: boolean;

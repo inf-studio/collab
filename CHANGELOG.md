@@ -90,6 +90,33 @@
 `git restore -- src/core/index-db.ts src/core/pacing.ts src/tools/store.ts src/constants.ts src/types.ts src/index.ts test/pacing.mjs test/store-rebuild.mjs README.md docs/collab.md`；
 删未跟踪文件 `rm src/core/metrics.ts`（回滚后 `rebuild` 再次清空 `metrics`，投递侧行为不变）。
 
+> **`collab_index` 增加 `metrics` 只读动作**（`11-21-collab-index-metrics`）。日指标只能直连 `collab.db` 看
+> （按仓库规矩只读查询也要逐次授权），`stats` 又只报覆盖范围不报数值——24h 对比与「空转率/间隔降没降」没有
+> 低成本入口。本批**只读**暴露那张表；工具面 **28 不增**（复用 `collab_index`），数值不二次计算。
+
+### Added
+
+- **`collab_index { action:"metrics", limit? }`（R1）**：一天一行、按日期**倒序**
+  （`2026-11-20 · msg 12 · noop 3 · late 0 · gap 20000ms`），末尾 `覆盖 <首日>–<末日>（N 天）`；
+  `limit` 默认 30、只裁剪**打印行数**，覆盖范围仍按整表算（省略时补「仅显示最近 N 天（limit）」）。
+  字段顺序与 `metrics` 表一致：`msg_count / noop_count / late_count / median_gap_ms`。
+
+### Changed
+
+- **严格只读（R2）**：走与 `stats` 同一条读路径——库不存在直接返回 `[索引不可用]`（**不创建**
+  `collab.db` / `-wal` / `-shm`），不写、不 import 之外的副作用、不触发 rebuild；`storage:"json"` 同样报
+  不可用。空表输出 `metrics 无数据`，不报错（R3）。
+- **NULL 显示 `-`（R5）**：某列从未写过就是 `null`，渲染成 `-` 而不是 `0`（不猜、不补）。新增
+  `indexMetrics()`（`src/core/index-db.ts`）与 `IndexMetrics` / `MetricsDayRow`（`src/types.ts`）。
+- 回归基线 `1801 → 1808`：`test/store-rebuild.mjs` **43 → 50 项**（倒序+数值逐字 / 覆盖范围 /
+  `limit:2` / 只读 size+mtime / NULL `-` / 空库 / 冷启动不建文件）；工具数仍 **28**。
+- 变异实测：`ORDER BY day DESC` 改 `ASC` → 3 条红（倒序 / `limit:2` / NULL 首行）。
+
+### 回滚
+
+`git restore -- src/core/index-db.ts src/tools/store.ts src/types.ts test/store-rebuild.mjs README.md docs/collab.md CHANGELOG.md skills/collab/SKILL.md`
+（`metrics` 动作消失，`collab_index` 回到 `rebuild | backfill | stats`，其余行为不变）。
+
 ## [0.9.6] - 2026-11-20
 
 > **2min 批量投递 + 无增量不发**。消息间隔 p10 **6.6s** / p50 **20s** / p90 **90s**，最长连续 **151 条**

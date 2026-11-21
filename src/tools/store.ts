@@ -1,10 +1,14 @@
 /**
  * `collab_index` (0.9.0, `11-20-collab-store`) — the **only** new tool of this
  * version, and deliberately the only one: storage is infrastructure, not a
- * collaboration action. Three verbs:
+ * collaboration action. Four verbs (three original + the 0.9.7 read view):
  *
  *   - `stats`   read-only: what the projection currently holds, or why it is
  *               unusable (`[索引不可用]` on the board).
+ *   - `metrics` read-only (0.9.7): the per-day rows of the `metrics` table,
+ *               newest first — `stats` says how many days there are, this says
+ *               what the numbers are. Same read-only rule as `stats`: no file
+ *               is created and nothing is written.
  *   - `rebuild` R3: full rebuild from `collab-messages.jsonl` + `collab-*.json`
  *               into `<dbPath>.tmp` → fsync → atomic rename. Idempotent; the
  *               old database survives a failure.
@@ -13,11 +17,12 @@
  *               no `messages` row is fabricated — `meta.backfilled=1` says so.
  *
  * `rebuild` / `backfill` write and therefore need `confirm:true` (the same
- * convention as every other writing tool); `stats` never writes.
+ * convention as every other writing tool); `stats` / `metrics` never write and
+ * never create the database.
  */
 import { REBUILD_SINCE_DAYS } from '../constants.ts';
-import { backfill, indexStats, rebuild } from '../core/index-db.ts';
-import type { RebuildResult } from '../types.ts';
+import { METRICS_DEFAULT_LIMIT, backfill, indexMetrics, indexStats, rebuild } from '../core/index-db.ts';
+import type { MetricsDayRow, RebuildResult } from '../types.ts';
 import { invalid } from '../core/errors.ts';
 import type { ToolDefinition } from '../types.ts';
 import { jsonInput } from './shared.ts';
@@ -50,6 +55,19 @@ function metricsCoverageLine(stats: { metricsRange?: { first: string; last: stri
   const range = stats.metricsRange;
   if (!range) return 'metrics 覆盖 无';
   return `metrics 覆盖 ${range.first}–${range.last}（${range.days} 天）`;
+}
+
+/**
+ * 0.9.7 (`11-21-collab-index-metrics`): one day per line so the output drops
+ * straight into a before/after table. A stored NULL prints `-` — the view never
+ * turns "never written" into a zero (R5).
+ */
+const metricText = (value: number | null): string => (value === null ? '-' : String(value));
+
+function metricsRowLine(row: MetricsDayRow): string {
+  return `${row.day} · msg ${metricText(row.msgCount)} · noop ${metricText(row.noopCount)} · late ${metricText(row.lateCount)} · gap ${
+    row.medianGapMs === null ? '-' : `${row.medianGapMs}ms`
+  }`;
 }
 
 function renderRebuild(result: RebuildResult, action: 'rebuild' | 'backfill'): string {
@@ -87,7 +105,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
     name: 'collab_index',
     description:
       'Maintain the rebuildable message index (`collab.db`). `stats` is read-only and reports the projection ' +
-      '(tables, rows, backend) or why it is unavailable. `rebuild` re-creates it from `collab-messages.jsonl` + ' +
+      '(tables, rows, backend) or why it is unavailable; `metrics` is read-only too and lists the per-day ' +
+      '`metrics` rows newest first (day · msg_count · noop_count · late_count · median_gap_ms, `limit` default 30) ' +
+      'with the day range they cover. `rebuild` re-creates it from `collab-messages.jsonl` + ' +
       'the `collab-*.json` files into a temp file, fsyncs and atomically renames (idempotent: the same input ' +
       'gives the same row counts and per-table checksums; a failure keeps the old database). It also recomputes ' +
       'the per-day `metrics` rows from the message log (resends excluded) and the pacing counters, and `stats` ' +
@@ -95,13 +115,18 @@ export function indexTool(kit: ToolKit): ToolDefinition {
       'status-level history of the pre-0.9.0 files (hand-offs / threads; bodies were never stored, so no messages ' +
       'rows are invented and `meta.backfilled=1` marks the partial history). The JSON files are the source of ' +
       'truth; deleting `collab.db` never loses a message. `rebuild` / `backfill` write and need `confirm:true`; ' +
-      '`stats` never writes.',
+      '`stats` and `metrics` never write and never create the database.',
     input: jsonInput({
       properties: {
         action: {
           type: 'string',
-          enum: ['rebuild', 'backfill', 'stats'],
-          description: 'rebuild = 全量重建（幂等）· backfill = 回填历史状态 · stats = 只读状态'
+          enum: ['rebuild', 'backfill', 'stats', 'metrics'],
+          description:
+            'rebuild = 全量重建（幂等）· backfill = 回填历史状态 · stats = 只读状态 · metrics = 只读逐日指标'
+        },
+        limit: {
+          type: 'number',
+          description: `metrics 输出最近 N 天（默认 ${METRICS_DEFAULT_LIMIT}，按日期倒序）。只读，不影响 rebuild。`
         },
         sinceDays: {
           type: 'number',
@@ -109,7 +134,7 @@ export function indexTool(kit: ToolKit): ToolDefinition {
         },
         confirm: {
           type: 'boolean',
-          description: 'rebuild / backfill 必须为 true 才写；false / 省略只预览。stats 不需要。'
+          description: 'rebuild / backfill 必须为 true 才写；false / 省略只预览。stats / metrics 不需要。'
         }
       },
       required: ['action']
@@ -151,8 +176,46 @@ export function indexTool(kit: ToolKit): ToolDefinition {
         };
       }
 
+      if (action === 'metrics') {
+        const requested = Number(input?.limit);
+        const limit = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : METRICS_DEFAULT_LIMIT;
+        const listing = await indexMetrics({ ...options, limit });
+        if (!listing.available) {
+          return {
+            content: [
+              `[索引不可用] ${listing.reason ?? 'unknown'}`,
+              `dbPath=${listing.dbPath}  storage=${config.storage}`,
+              '未建库时 metrics 不会创建任何文件（只读）。建立索引：collab_index { action:"rebuild", confirm:true }'
+            ].join('\n')
+          };
+        }
+        if (!listing.rows.length) {
+          return {
+            content: [
+              'metrics 无数据',
+              `dbPath=${listing.dbPath}  backend=${listing.backend ?? '?'}`,
+              '只读：metrics 不建库、不写入、不触发 rebuild。'
+            ].join('\n')
+          };
+        }
+        const lines = [
+          `metrics 逐日: ${listing.dbPath}  backend=${listing.backend ?? '?'}`,
+          ...listing.rows.map(metricsRowLine)
+        ];
+        const range = listing.range;
+        const coverage = range ? `覆盖 ${range.first}–${range.last}（${range.days} 天）` : '覆盖 无';
+        // The range is the whole table; say so when `limit` hid older days.
+        lines.push(
+          range && listing.rows.length < range.days
+            ? `${coverage} · 仅显示最近 ${listing.rows.length} 天（limit）`
+            : coverage
+        );
+        lines.push('只读：metrics 不建库、不写入、不触发 rebuild。');
+        return { content: lines.join('\n') };
+      }
+
       if (action !== 'rebuild' && action !== 'backfill') {
-        throw invalid('action 必须是 rebuild | backfill | stats');
+        throw invalid('action 必须是 rebuild | backfill | stats | metrics');
       }
       if (config.storage === 'json') {
         return {
