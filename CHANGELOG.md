@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.10.0-rc.1] - 2026-11-21
+
+> **预发布（dist-tag `next`）**：本版汇总「看板契约 / 人类决策清单 / metrics 读取 / 收尾修复」四批改动。
+> 工具面 **28 → 29**（新增 `collab_decision_inbox`），`collab_index` 多一个只读 `metrics` 动作。
+> **24h 上线指标数据待补**：0.9.6 于 2026-11-20 22:03 安装，满 24h 后回填与 11-20 基线的对比；
+> 本节不写未测出的数字。
+
 > **看板显示会话契约**（`11-21-collab-board-contract`）。契约数据一直在，界面上看不到——排钟会话 10.8 小时
 > 无主线推进，看板没有任何可见信号。本批只做**呈现**：快照多一个**可选** `contract` 字段，GUI 列表徽标 +
 > 右详情契约块，TUI 详情一行。工具面 **28 不增**，RPC 不新增方法，读路径不写文件。版本号留给父任务统一发布。
@@ -165,6 +172,7 @@
 `git restore -- src/rpc.ts src/core/snapshot.ts src/constants.ts src/index.ts src/tools/index.ts src/gui.tsx src/tui.tsx`；
 删未跟踪文件 `rm src/core/decision-inbox.ts src/core/decision-view.ts src/tools/decision-inbox.ts`
 （`src/index.ts` 必须一起恢复：它 import 了被删模块，否则编译失败；账本本身不受影响）。
+
 
 ## [0.9.6] - 2026-11-20
 

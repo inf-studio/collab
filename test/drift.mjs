@@ -570,7 +570,7 @@ expect(
   !tools.some(definition => /drift|wake/.test(definition.name)),
   tools.map(definition => definition.name).join(',')
 );
-expect('PLUGIN_VERSION is 0.9.6', internals.PLUGIN_VERSION === '0.9.6' && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION agrees with package.json', internals.PLUGIN_VERSION === pkg.version, `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect(
   'the drift threshold is 5 and the fallback 24h',
   internals.DRIFT_NO_ADVANCE_TURNS === 5 && internals.SUSPEND_FALLBACK_MS === 24 * 3_600_000,

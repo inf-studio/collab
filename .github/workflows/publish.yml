@@ -35,6 +35,16 @@ jobs:
         run: pnpm build
 
       - name: Publish
-        run: npm publish --access public --tag latest
+        # Prerelease versions (semver with a `-suffix`) go to the `next` dist-tag so
+        # `latest` always points at a stable release. Stable tags keep publishing to
+        # `latest` exactly as before.
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          case "$VERSION" in
+            *-*) TAG=next ;;
+            *)   TAG=latest ;;
+          esac
+          echo "publishing $VERSION to dist-tag $TAG"
+          npm publish --access public --tag "$TAG"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

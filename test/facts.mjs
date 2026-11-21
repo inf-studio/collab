@@ -203,7 +203,7 @@ const seedInbox = (sid, messages) =>
 
 // ============================================================ 1) surface
 section('1) surface: 29 tools + collab_fact');
-expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
+expect('PLUGIN_VERSION / package.json agree', internals.PLUGIN_VERSION === pkg.version, `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
 expect('29 tools are registered', tools.length === 29, `${tools.length} tools`);
 expect(
   'collab_fact is registered exactly once',

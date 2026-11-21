@@ -203,7 +203,7 @@ const settle = (ms = 10) => new Promise(done => setTimeout(done, ms));
 
 // ------------------------------------------------------------- 0) baseline
 section('0) surface');
-expect('version is 0.9.6 (or newer)', /^0\.9\.\d+/.test(pkg.version) && Number(pkg.version.split('.')[2]) >= 6, pkg.version);
+expect('PLUGIN_VERSION agrees with package.json', internals.PLUGIN_VERSION === pkg.version, pkg.version);
 expect('the tool surface is 29 (the read-only decision inbox)', tools.length === 29, `${tools.length}`);
 expect('the shipped default window is 120000ms (D3)', internals.PACING_WINDOW_MS === 120_000);
 // C4 (review): this used to write a typo config and then assert the *constant*
