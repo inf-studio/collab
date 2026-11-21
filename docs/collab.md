@@ -1279,7 +1279,7 @@ collab-contract/<sid>.json ──(每次快照直接读, 只读)──▶ snapsh
 | --- | --- |
 | 可选（R1/R5） | **无契约 = 没有该键**（不是 `contract:{}`）：无契约会话的 `snapshot` 与 0.9.6 **逐字节一致**（`test/snapshot-shape.mjs` 用 HEAD 构建出的黄金串逐字比对），且读路径**绝不创建**契约文件 |
 | 空面隐藏 | `mission` 无 `oneLine`/边界、`progress` 无里程碑、`todos` 无行、`drift` 未触发时**整面省略**；四面全空则整个 `contract` 省略 |
-| 损坏（R1） | **不可解析**（JSON 坏了 / 截断）：省略字段 + **一条日志**（`ignoring unreadable contract …`）+ 不抛。**可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt:0`）走同一条「没有契约」路径，但**不记日志**——旧文件不是损坏 |
+| 损坏（R1） | **不可解析**（JSON 坏了 / 截断）：省略字段 + **一条日志**（`ignoring unreadable contract …`）+ 不抛。0.10.x 去掉 mtime 缓存后，日志按 **文件路径 + mtime** 节流：同一版本的文件每 2 s 轮询（GUI / TUI 各一次）只记一条，文件被改写（mtime 变）后再记一条——与 `log.ts` 的「once per occurrence」一致。**可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt:0`）走同一条「没有契约」路径，但**不记日志**——旧文件不是损坏 |
 | 徽标数量 | `◑` 的数字就是 `todos.open`：**`open` 已经是全部未完成**（与注入的 `[todo] N open`、`collab_todo list` 同一口径），`blocked/suspended/drifted` 是它的**分解**，不能再相加（`open=3, blocked=2` → `◑3`，不是 `◑5`） |
 | 不做缓存（0.10.x） | 每次快照**直接读**契约文件，**不再按 `mtimeMs` 缓存**。本机 FS 的 mtime 粒度约 4 ms：同一桶内二次写会被旧实现当成「没变」，看板一直显示旧值直到下一次写入。100 会话每次全读的额外耗时实测约 **1–3 ms/轮询**（2 s 周期可接受）。决策清单的 2 s 缓存（另一个读取器）**保留** |
 | 派生位置 | `src/core/contract-view.ts`（纯函数，**不含 `node:` 导入**，GUI/TUI 共用）：徽标 + 详情行 + TUI 摘要行，只有这一份；漂移判定仍调 `core/drift.ts#evaluate`（服务端，纯函数），界面不另算 |
@@ -2683,7 +2683,9 @@ conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **co
   `msg_count=0` 的行仍保留，与写入侧同口径）。`noop_count` / `late_count` 只有 `collab-pacing.json`
   一个写点，重建时直接读它的 `counters[day]`：**缺失 → NULL（未知），不是 0**——counters 只保留
   `PACING_COUNTER_KEEP_DAYS`（30）天，而重建窗口默认 180 天，更早的日子计数已过期，写 0 会被读成
-  「当天没有抑制」。`collab_index metrics` 对 NULL 显示 `-`，`stats` 一并说明该语义。`stats` 用
+  「当天没有抑制」。**两侧不对称是故意的**：写入侧只写**当天**（当天 counter 一定存在，`0` 是真实值 = 当天确实没抑制）；
+  重建要覆盖历史，历史计数可能已过期 → 写 NULL（不知道，不是 0）。`collab_index metrics` 对 NULL 显示 `-`，
+  `stats` 一并说明该语义。`stats` 用
   `metrics 覆盖 <首日>–<末日>（N 天）` 说清覆盖到哪，无数据时写 `无`；安装前的历史不存在，不补造。
 
 #### 回滚

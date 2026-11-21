@@ -319,7 +319,10 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   `mtimeMs` 缓存：本机 FS 粒度约 4ms，同桶内二次写会被当成「没变」，看板会显示旧值直到下一次写入
   （100 会话全读实测额外 ≈1–3ms/轮询，2s 周期可接受）。决策清单的 2s 缓存（另一个读取器）保留。
   **绝不**在快照里调 `updateContract*`。两种情况都省略字段，但**只有一种算损坏**：
-  **不可解析的 JSON** → 省略 + **一条**日志 + 不抛（`ignoring unreadable contract …`）；
+  **不可解析的 JSON** → 省略 + **一条**日志 + 不抛（`ignoring unreadable contract …`）。**日志按
+  「文件路径 + mtime」节流**（0.10.x，C2）：同一版本的文件每 2s 轮询（GUI + TUI 各一次）只记一条，
+  文件被改写（mtime 变）后再记一条——去掉缓存后不能退化成「每快照一条」，那与 `log.ts` 的
+  「once per occurrence」自相矛盾。测试断言：同一坏文件连续 3 次快照 → 1 条；改写后再快照 → 第 2 条。
   **可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt === 0`）→ 同样省略，**不记日志**（旧文件不是错误）。
 - **徽标**：1 字符 + ≤3 位数字（`>99` → `99+`），插在 GUI 第二行末尾 / TUI 同一行末尾，**不新增行**；
   优先级 `drift ◇红 > suspended+drifted ◐琥珀 > todos.open ◑蓝+数量 > 正常 ●灰 > 无契约不显示`。

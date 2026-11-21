@@ -20,7 +20,7 @@
  * convention as every other writing tool); `stats` / `metrics` never write and
  * never create the database.
  */
-import { REBUILD_SINCE_DAYS } from '../constants.ts';
+import { PACING_COUNTER_KEEP_DAYS, REBUILD_SINCE_DAYS } from '../constants.ts';
 import { METRICS_DEFAULT_LIMIT, backfill, indexMetrics, indexStats, rebuild } from '../core/index-db.ts';
 import type { MetricsDayRow, RebuildResult } from '../types.ts';
 import { invalid } from '../core/errors.ts';
@@ -216,7 +216,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
         );
         // F3 (0.10.x): a `-` is not a zero — say what it means where it shows.
         if (listing.rows.some(row => row.noopCount === null || row.lateCount === null)) {
-          lines.push('注: `-` = 该日 pacing 计数已过期/缺失（NULL，不是 0；counters 只保留 30 天）。');
+          lines.push(
+            `注: \`-\` = 该日 pacing 计数已过期/缺失（NULL，不是 0；counters 只保留 ${PACING_COUNTER_KEEP_DAYS} 天）。`
+          );
         }
         lines.push('只读：metrics 不建库、不写入、不触发 rebuild。');
         return { content: lines.join('\n') };

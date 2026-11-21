@@ -990,6 +990,32 @@ writeContractFixture('ses_c2', {
   );
 }
 
+// 0.10.x (C2 review): a 2 s poll reads every contract file, so an unparseable
+// one must not print a line twice a second (GUI + TUI poll independently). The
+// log is throttled by **file + mtime**: same bytes → one line, rewrite → one
+// more.
+{
+  writeContractFixture('ses_c2', '{ still not json', nextStamp());
+  const logged = [];
+  const original = console.error;
+  console.error = (...args) => logged.push(args.map(value => String(value)).join(' '));
+  try {
+    for (let index = 0; index < 3; index += 1) await buildSnapshot(compatSource(), {}, now);
+    const sameVersion = logged.filter(line => line.includes('ignoring unreadable contract')).length;
+    // A rewrite moves the mtime: that is a new occurrence, so it logs again.
+    writeContractFixture('ses_c2', '{ rewritten, still not json', nextStamp());
+    await buildSnapshot(compatSource(), {}, now);
+    const afterRewrite = logged.filter(line => line.includes('ignoring unreadable contract')).length;
+    expect(
+      'C2 损坏契约日志按「路径 + mtime」节流：同一版本 3 次快照只 1 条，改写后第 2 条',
+      sameVersion === 1 && afterRewrite === 2,
+      JSON.stringify({ sameVersion, afterRewrite, logged })
+    );
+  } finally {
+    console.error = original;
+  }
+}
+
 // Parseable but **not ours** (`v: 2`): also "no contract", but silently — an
 // older / newer file is not corruption, so it must not log.
 {

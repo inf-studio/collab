@@ -25,7 +25,7 @@
  *     once-only bug this version exists to remove (PRD R5).
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
   CONTRACT_DIR,
@@ -590,15 +590,43 @@ export function normalizeContract(raw: unknown, sessionID: string): Contract {
   };
 }
 
+/**
+ * Broken-file log throttle (0.10.x, C2 review): **one line per file + mtime**.
+ *
+ * The snapshot reads every contract file on **every** 2 s poll (0.10.x removed
+ * the `mtimeMs` cache), and both the GUI board and the TUI poll — so an
+ * unparseable file used to print a line twice a second per reader, which is
+ * exactly the "per event" logging `log.ts` promises never to do. An occurrence
+ * is the file's current contents: log once for a given `mtimeMs`, and again
+ * only after the file is rewritten (new mtime).
+ */
+const brokenLogged = new Map<string, number>();
+
+function shouldLogBroken(file: string, mtimeMs: number): boolean {
+  if (brokenLogged.get(file) === mtimeMs) return false;
+  brokenLogged.set(file, mtimeMs);
+  return true;
+}
+
 /** Read-only: missing / unreadable / wrong-version files all return an empty contract. */
 export function readContract(sessionID: string): Contract {
   const file = contractFile(sessionID);
   if (!existsSync(file)) return emptyContract(sessionID);
+  // The throttle key: the mtime read **before** parsing (a stat failure falls
+  // back to 0 — the read below still decides whether the file is broken).
+  let mtimeMs = 0;
+  try {
+    mtimeMs = statSync(file).mtimeMs;
+  } catch {
+    /* raced with a delete / permission change: the read below is authoritative */
+  }
   try {
     const raw = JSON.parse(readFileSync(file, 'utf8'));
     return normalizeContract(raw, sessionID);
   } catch (error) {
-    log(`ignoring unreadable contract ${file}: ${(error as Error)?.message ?? error}`);
+    if (shouldLogBroken(file, mtimeMs)) {
+      log(`ignoring unreadable contract ${file}: ${(error as Error)?.message ?? error}`);
+    }
     return emptyContract(sessionID);
   }
 }

@@ -360,9 +360,16 @@ export interface MetricsRowInput {
   drift_ms?: number;
   median_gap_ms?: number;
   /**
-   * `null` = explicitly unknown (the pacing counters for that day are gone).
-   * `undefined` = "this writer does not own the field" — the UPSERT keeps what
-   * is stored. The two are different and must stay so.
+   * `null` = **explicitly unknown** (that day's pacing counters are pruned /
+   * unreadable); `undefined` = "this writer does not own the field".
+   *
+   * They are *documentation-level* different, not behaviour-level: the single
+   * `METRICS_UPSERT` below maps both to SQL NULL (`metricsValues`), so
+   * `COALESCE(excluded.x, metrics.x)` keeps the stored value on UPDATE and
+   * leaves the column NULL on INSERT — identical for the two inputs. Do not
+   * read the distinction as "null clears the stored number"; nothing clears a
+   * metrics column today, and a writer that needs to would need a different
+   * statement.
    */
   noop_count?: number | null;
   late_count?: number | null;
