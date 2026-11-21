@@ -1,19 +1,43 @@
-# 人类决策清单（跨会话汇总）
+# PRD：人类决策清单（跨会话汇总）
 
-## Goal
+## 问题
 
-把所有会话的 open 决策汇总到一处（工具只读 + GUI 面板），人类一眼看完全部待拍板项
+0.9.5 有了决策账本，但**只有当事人能看到**：`[decide]` 注入给提问方/owner，`collab_decide list` 要指定 key。
+人类想知道「现在有哪些事在等我/等某个会话拍板」，只能逐个会话看注入或逐个 thread 查——这正是 0.9.x 盘点里「人类被降级为路由器」的那一环。
 
-## Requirements
+## 目标
 
-- TBD
+- 一眼看完**当前工作区所有 open 决策**：谁在等、等了多久、问什么。
+- 只读、零写入、不投递。
+- GUI 与 TUI 都能看到；人类不需要记住 thread id。
 
-## Acceptance Criteria
+## 需求
 
-- [ ] TBD
+- **R1 新工具 `collab_decision_inbox`（只读）**：
+  - 聚合 `collab-decisions/*.json` 里 `status='open'` 的全部条目；
+  - 每行：`<key>#<D#> · owner · 已等 <age> · <question 截断 60 字>`；
+  - 按「等待时长降序」排，默认 ≤20 行，末尾给「共 N 条 · 其中冲突 M 条」；
+  - 支持 `owner?: "ses_…"` 过滤（只看等某会话的）。
+- **R2 冲突可见**：`origin='conflict'` 的条目单独标注（`⚠冲突`），并显示 24h TTL 剩余时间。
+- **R3 GUI**：看板顶部一行 `待决策 N`（有冲突时 `⚠`），点击展开列表（只读，不允许在看板里 answer）。
+- **R4 TUI**：详情区一行 `待决策 3（最老 4.2h）`。
+- **R5 只读**：不建目录、不写文件、不投递；账本不存在时返回「无待决策」。
+- **R6 兼容**：工具数 28 → **29**；既有 28 个工具输出不变。
 
-## Notes
+## 非目标
 
-- Keep `prd.md` focused on requirements, constraints, and acceptance criteria.
-- Lightweight tasks can remain PRD-only.
-- For complex tasks, add `design.md` for technical design and `implement.md` for execution planning before `task.py start`.
+- 不做「在看板里直接拍板」（写动作留到后续；本任务只解决**看见**）。
+- 不聚合 0.7.0 写在 handoff 记录里的 `decisions[]`（那是已定结论，不是待办）。
+
+## 验收
+
+- [ ] 造 3 个 key × 若干 open 决策 → 工具按等待时长降序、行数/总数正确；
+- [ ] `owner` 过滤生效；空账本 → 「无待决策」；
+- [ ] 冲突条目带 `⚠冲突` 与 TTL 剩余；
+- [ ] 只读：调用前后 `collab-decisions/` 目录内容与 mtime 不变；不存在时不创建目录；
+- [ ] GUI 顶部计数与工具输出一致；TUI 详情行含最老等待时长；
+- [ ] 回归全绿；工具数 **29**。
+
+## 依赖
+
+- 依赖 0.9.5 决策账本与 0.9.6 契约（`[decide]` 已有数据来源）。
