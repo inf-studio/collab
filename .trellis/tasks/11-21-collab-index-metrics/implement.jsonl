@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "metrics 表结构与只读查询"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "库不存在/空表的降级"}

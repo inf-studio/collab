@@ -295,6 +295,8 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `messages.resend_of` 标记重发行（`_r<n>`）；统计消息数时必须排除，否则重发会被重复计数。
 - `messages_fts` 截的是 **8192 字符**（CJK ≈ 24KB），不是 8KB 字节；文档不要写成字节。
 - `backfill` 只写 `meta.backfilled`，**不造 `messages` 行**（历史正文不可得；造空行会污染计数与 FTS）。
+- **指标读取走工具、不直连库**：`collab_index { action:"metrics" }` 是唯一入口（默认 `limit:30`、按 day 倒序、覆盖范围报整表）；
+  NULL 显示 `-`，不做二次计算；**先 `existsSync` 再 `openDb`**，读路径不得建库或建表（`ensureSchema` 只有 `rebuild` 调）。
 
 ### 2.14 看板显示会话契约（0.9.7）
 
