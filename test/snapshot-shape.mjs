@@ -706,9 +706,9 @@ const contractDir = process.env.COLLAB_CONTRACT_DIR;
 mkdirSync(contractDir, { recursive: true });
 const contractPath = sid => resolve(contractDir, `${sid}.json`);
 /**
- * A fresh mtime per write. The snapshot caches on `mtimeMs`, so two fixtures
- * written at the same timestamp would silently keep the first value — exactly
- * what the cache is supposed to do.
+ * A fresh mtime per fixture write, so a fixture never depends on two writes
+ * landing in different filesystem buckets. `stamp` pins it explicitly (the
+ * "same mtime, new bytes" case the removed cache could not see).
  */
 let stampCursor = now;
 const nextStamp = () => new Date((stampCursor += 1_000));
@@ -934,13 +934,17 @@ writeContractFixture('ses_c2', {
   );
 }
 
-// Cache: same mtime + different bytes → the cached read; a touched mtime → re-read.
+// 0.10.x: no mtime cache — a write inside the same mtime bucket is visible.
+// The local filesystem's mtime granularity is ~4 ms, so `write → poll → write
+// → poll` can land both writes on one stamp. The old cache then served the
+// first value **until the next write** (unbounded staleness); reading every
+// snapshot makes the second value visible immediately.
 {
-  // The **current** mtime, whatever the last fixture write stamped — restoring a
-  // made-up timestamp would look like a change and defeat the cache test.
+  // The **current** mtime, whatever the last fixture write stamped.
   const before = new Date(statSync(contractPath('ses_c2')).mtimeMs);
   const snapshotA = await buildSnapshot(compatSource(), {}, now);
   const first = snapshotA.sessions.find(session => session.sid === 'ses_c2')?.contract?.mission?.oneLine;
+  // Same mtime, different bytes — the exact case a cache cannot see.
   writeContractFixture('ses_c2', {
     v: 1,
     sid: 'ses_c2',
@@ -952,13 +956,11 @@ writeContractFixture('ses_c2', {
     peers: [],
     turn: { count: 1, lastAt: 1, startedAt: 1, lastAdvancedAt: 0, noAdvanceTurns: 0 }
   }, before);
-  const cached = (await buildSnapshot(compatSource(), {}, now)).sessions.find(session => session.sid === 'ses_c2');
-  utimesSync(contractPath('ses_c2'), new Date(), new Date());
-  const fresh = (await buildSnapshot(compatSource(), {}, now)).sessions.find(session => session.sid === 'ses_c2');
+  const sameStamp = (await buildSnapshot(compatSource(), {}, now)).sessions.find(session => session.sid === 'ses_c2');
   expect(
-    'C10 the contract read is mtime-cached: unchanged mtime keeps the old value, a touch re-reads',
-    first === '排钟 B4 接线' && cached?.contract?.mission?.oneLine === '排钟 B4 接线' && fresh?.contract?.mission?.oneLine === '改过的契约',
-    JSON.stringify({ first, cached: cached?.contract?.mission?.oneLine, fresh: fresh?.contract?.mission?.oneLine })
+    'C10 契约不走 mtime 缓存：同一 mtime 桶内的二次写，下一次快照就读到新值',
+    first === '排钟 B4 接线' && sameStamp?.contract?.mission?.oneLine === '改过的契约',
+    JSON.stringify({ first, sameStamp: sameStamp?.contract?.mission?.oneLine })
   );
 }
 
@@ -1021,7 +1023,9 @@ writeContractFixture('ses_c2', {
   );
 }
 
-// Cost with 100 sessions: cold (100 files) vs warm (mtime hit) vs no files at all.
+// Cost with 100 sessions, no cache: every poll re-reads 100 contract files.
+// 0.10.x traded the (stale-capable) mtime cache for correctness — the numbers
+// below are the price, and the assertion is that a 2 s tick can afford it.
 {
   const many = Array.from({ length: 100 }, (_, index) => ({
     id: `ses_perf${String(index).padStart(3, '0')}`,
@@ -1061,11 +1065,11 @@ writeContractFixture('ses_c2', {
     }, nextStamp());
   }
   const cold = await time(() => buildSnapshot(source(), {}, now), 1);
-  const warm = await time(() => buildSnapshot(source(), {}, now), 5);
+  const every = await time(() => buildSnapshot(source(), {}, now), 5);
   expect(
-    'C10 100 sessions: the warm (mtime-cached) poll costs far less than the cold one (reported)',
-    warm < cold && warm <= bare * 5 + 5,
-    `no contracts ${bare.toFixed(2)}ms · cold (100 files) ${cold.toFixed(2)}ms · warm ${warm.toFixed(2)}ms/poll (+${(warm - bare).toFixed(2)}ms)`
+    'C10 100 sessions 无缓存：每次轮询都读 100 个契约文件，额外耗时在 2s 轮询预算内（报数）',
+    every < cold + 5 && every - bare <= 40,
+    `no contracts ${bare.toFixed(2)}ms · first (100 files) ${cold.toFixed(2)}ms · every poll ${every.toFixed(2)}ms/poll (+${(every - bare).toFixed(2)}ms)`
   );
 
   // Leave the shared temp contract dir as we found it: a stray contract here

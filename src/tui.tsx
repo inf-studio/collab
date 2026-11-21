@@ -114,22 +114,55 @@ function pad(value: string, width: number): string {
   return `${text}${' '.repeat(Math.max(0, width - text.length))}`;
 }
 
-/** A CJK / fullwidth code point takes two terminal cells (the renderer counts cells). */
+/**
+ * A CJK / fullwidth code point takes two terminal cells (the renderer counts
+ * cells). The regex is applied to a **grapheme cluster**, not a code point —
+ * `clipCells` segments first (0.10.x: emoji used to count as one cell and a
+ * `for…of` truncation could cut a ZWJ family in half).
+ */
 const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/;
+/**
+ * Emoji take two cells: pictographs (`🚀`), regional-indicator flags, skin-tone
+ * modifiers, the emoji presentation selector and the keycap combiner. A ZWJ
+ * sequence (`👨‍👩‍👧‍👦`) renders as **one** 2-cell glyph, so it is measured as a
+ * single cluster too.
+ */
+const EMOJI = /\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{20E3}]/u;
 
-/** `clip`, but measured in **cells**: long CJK text must not wrap past the panel. */
+/** Grapheme segmentation when the runtime has it (Node ≥ 16 / every supported shell). */
+const segmenter =
+  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : undefined;
+
+/** The text as user-perceived characters (ZWJ sequences stay whole). */
+function graphemes(text: string): string[] {
+  if (!segmenter) return Array.from(text);
+  return Array.from(segmenter.segment(text), part => part.segment);
+}
+
+/** Terminal cells of one grapheme cluster: 0 for nothing, 2 for wide/emoji, else 1. */
+function cellWidth(cluster: string): number {
+  if (!cluster) return 0;
+  if (cluster.includes('\u200d') || EMOJI.test(cluster)) return 2;
+  return WIDE.test(cluster) ? 2 : 1;
+}
+
+/** `clip`, but measured in **cells**: long CJK / emoji text must not wrap past the panel. */
 function clipCells(value: string, width: number): string {
   const text = String(value ?? '');
   if (width <= 1) return '';
+  const parts = graphemes(text);
   let used = 0;
-  for (const char of text) used += WIDE.test(char) ? 2 : 1;
+  for (const part of parts) used += cellWidth(part);
   if (used <= width) return text;
   let out = '';
   let taken = 0;
-  for (const char of text) {
-    const cells = WIDE.test(char) ? 2 : 1;
+  for (const part of parts) {
+    const cells = cellWidth(part);
+    // Never split a cluster: a truncated ZWJ family / flag is a broken glyph.
     if (taken + cells > width - 1) break;
-    out += char;
+    out += part;
     taken += cells;
   }
   return `${out}…`;

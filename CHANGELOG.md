@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+> 0.10.x 遗留小修（`11-21-collab-0p9-nits`）：五条低风险修正，工具面仍 **29**，不改任何工具的输出契约
+> （仅 `metrics` 的 NULL 显示语义）。版本号留给 0.10.0 正式版。
+
+### Fixed
+
+- **`metrics` 计数保真（F3）**：`pacing` 的 `counters` 只留 30 天，而 `rebuild` 默认覆盖 180 天——更早的日子
+  以前被写成 `noop 0 / late 0`（像是「当天没有抑制」）。现在**缺失即 NULL**，`collab_index metrics` 显示 `-`，
+  `stats` 与 `docs/collab.md` 写明「NULL = 该日计数已过期」。
+- **只有重发行的日期（F4）**：某日只有 `_r<n>` 重发行时，写入侧产出一行 `msg_count=0`，但 `rebuild` 分组前
+  排除重发行 → 该日没有 key、行消失。现在重建的日期集合取**全部消息**，与写入侧同口径。
+- **幂等断言假绿（F5）**：`test/store-rebuild.mjs` 的 checksum 相等断言在两侧都是 `undefined` 时也判绿；
+  改为先断言 checksum 是字符串。
+- **emoji 宽度（TUI）**：`clipCells` 只把 CJK 记 2 格，emoji 记 1 格且可能切开 ZWJ 组合。改为按
+  `Intl.Segmenter` 字素簇切分、emoji/组合按 2 格计，截断不切开组合序列。
+- **契约快照陈旧**：去掉 `collab-contract/<sid>.json` 的 `mtimeMs` 缓存（本机 FS 粒度 ~4 ms，同桶内二次写
+  会读到旧值并持续到下次写入），每次快照直接读；100 会话额外耗时实测 ≈1.2 ms/轮询。决策清单的 2 s 缓存保留。
+
 ## [0.10.0-rc.1] - 2026-11-21
 
 > **预发布（dist-tag `next`）**：本版汇总「看板契约 / 人类决策清单 / metrics 读取 / 收尾修复」四批改动。

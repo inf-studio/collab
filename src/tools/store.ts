@@ -107,7 +107,8 @@ export function indexTool(kit: ToolKit): ToolDefinition {
       'Maintain the rebuildable message index (`collab.db`). `stats` is read-only and reports the projection ' +
       '(tables, rows, backend) or why it is unavailable; `metrics` is read-only too and lists the per-day ' +
       '`metrics` rows newest first (day · msg_count · noop_count · late_count · median_gap_ms, `limit` default 30) ' +
-      'with the day range they cover. `rebuild` re-creates it from `collab-messages.jsonl` + ' +
+      'with the day range they cover (`-` = NULL: the pacing counters for that day expired after their 30-day retention, ' +
+      'so the count is unknown, not zero). `rebuild` re-creates it from `collab-messages.jsonl` + ' +
       'the `collab-*.json` files into a temp file, fsyncs and atomically renames (idempotent: the same input ' +
       'gives the same row counts and per-table checksums; a failure keeps the old database). It also recomputes ' +
       'the per-day `metrics` rows from the message log (resends excluded) and the pacing counters, and `stats` ' +
@@ -171,6 +172,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             `行数: ${tableLine(stats.counts, ['messages', 'threads', 'handoffs', 'locks', 'queue', 'sessions', 'facts', 'todos', 'decisions', 'progress', 'metrics'])}`,
             metricsCoverageLine(stats),
             `backfilled=${stats.backfilled}${stats.rebuiltAt ? `  rebuilt_at=${new Date(stats.rebuiltAt).toISOString()}` : ''}`,
+            // F3 (0.10.x): pacing counters are pruned after 30 days while rebuild
+            // covers 180 — a missing count is NULL (unknown), never 0.
+            '注: metrics 的 noop/late 为 NULL = 该日 pacing 计数已过期/缺失（不是 0），`collab_index metrics` 显示 `-`。',
             '只读：stats 不建库、不写入（没有索引时看板显示 [索引不可用]）。'
           ].join('\n')
         };
@@ -210,6 +214,10 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             ? `${coverage} · 仅显示最近 ${listing.rows.length} 天（limit）`
             : coverage
         );
+        // F3 (0.10.x): a `-` is not a zero — say what it means where it shows.
+        if (listing.rows.some(row => row.noopCount === null || row.lateCount === null)) {
+          lines.push('注: `-` = 该日 pacing 计数已过期/缺失（NULL，不是 0；counters 只保留 30 天）。');
+        }
         lines.push('只读：metrics 不建库、不写入、不触发 rebuild。');
         return { content: lines.join('\n') };
       }

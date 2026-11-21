@@ -24,8 +24,8 @@ import type {
   SnapshotQueueItem,
   SnapshotSession
 } from '../rpc.ts';
-import { asObject, mtime, sessionState, truncate, withTimeout } from '../util.ts';
-import { contractFile, readContract, TODO_DONE_STATUSES, type Contract } from './contract.ts';
+import { asObject, sessionState, truncate, withTimeout } from '../util.ts';
+import { readContract, TODO_DONE_STATUSES, type Contract } from './contract.ts';
 import { snapshotDecisions } from './decision-inbox.ts';
 import { driftUnresolved, evaluate, type DriftEvaluation } from './drift.ts';
 import { freezeFor } from './freeze.ts';
@@ -103,26 +103,22 @@ function toFreeze(hit: { entry: FreezeEntry }): SnapshotFreeze {
 /* ------------------------------------------------- 0.9.7: the contract block */
 
 /**
- * `collab-contract/<sid>.json`, **mtime-cached**: the panel polls every 2 s and
- * a contract only changes when a contract tool writes it, so re-parsing 100
- * files per tick would be pure waste. Same pattern as `createConfigReader`
- * (`config.ts`): the stat is the cache key, a changed file is re-read, a deleted
- * file evicts the entry.
+ * `collab-contract/<sid>.json`, read **every** snapshot (0.10.x removed the
+ * `mtimeMs` cache).
+ *
+ * The measured defect the cache caused: this filesystem's mtime granularity is
+ * ~4 ms, so two writes inside one bucket looked like one file change and the
+ * board kept the stale value **until the next write**. A 2 s poll exists to
+ * show the truth; a cache that can lie for an unbounded time is the wrong trade
+ * — reading 100 contract files costs single-digit milliseconds (reported by
+ * `test/snapshot-shape.mjs`), which a 2 s tick can afford. The decision-inbox
+ * 2 s cache (a different reader) is unchanged.
  *
  * Read-only: `readContract` never writes (lazy creation, `contract.ts`), so a
  * board poll cannot create a contract file for a session that never had one —
  * R5's "no file, byte-identical output" depends on that.
  */
-const contractCache = new Map<string, { stamp: number; contract?: Contract }>();
-
-function cachedContract(sessionID: string): Contract | undefined {
-  const stamp = mtime(contractFile(sessionID));
-  if (!stamp) {
-    contractCache.delete(sessionID);
-    return undefined;
-  }
-  const hit = contractCache.get(sessionID);
-  if (hit && hit.stamp === stamp) return hit.contract;
+function contractView(sessionID: string): Contract | undefined {
   const read = readContract(sessionID);
   // Two different kinds of "no contract here", both of which must **omit** the
   // field rather than paint an empty block — but only one of them is an error:
@@ -134,9 +130,7 @@ function cachedContract(sessionID: string): Contract | undefined {
   //     normalised to the empty contract **silently** — an older / newer file is
   //     not corruption, so no log line. `updatedAt === 0` is the marker: every
   //     `writeContract` stamps it, so a real contract always has one.
-  const contract = Number(read.updatedAt) > 0 ? read : undefined;
-  contractCache.set(sessionID, { stamp, contract });
-  return contract;
+  return Number(read.updatedAt) > 0 ? read : undefined;
 }
 
 /**
@@ -175,10 +169,10 @@ function driftSince(contract: Contract, evaluation: DriftEvaluation, now: number
  * Each face is derived only when it has content (R3: 缺项隐藏), and a contract
  * with nothing to say yields `undefined` — so a stray empty file does not paint
  * a `●` badge. Nothing here writes or throws: a broken file has already been
- * turned into "absent" by `cachedContract`.
+ * turned into "absent" by `contractView`.
  */
 function toContract(sessionID: string, now: number): SnapshotContract | undefined {
-  const contract = cachedContract(sessionID);
+  const contract = contractView(sessionID);
   if (!contract) return undefined;
 
   const mission = contract.mission;

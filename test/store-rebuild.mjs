@@ -257,10 +257,15 @@ expect(
 );
 const first = await rebuildIndex({ dbPath, messagesFile, broadcasts: [], threads: {}, sinceDays: 0 });
 const second = await rebuildIndex({ dbPath, messagesFile, broadcasts: [], threads: {}, sinceDays: 0 });
+// F5 (0.10.x): `undefined === undefined` was green — a rebuild that stopped
+// returning checksums at all passed the "same checksum" comparison. Pin the
+// shape first (a real sha-16 string), then compare.
 expect(
   'rebuild 幂等：两次行数与每表 checksum 完全相同',
   first.ok &&
     second.ok &&
+    typeof first.checksums?.messages === 'string' &&
+    typeof second.checksums?.messages === 'string' &&
     JSON.stringify(first.counts) === JSON.stringify(second.counts) &&
     JSON.stringify(first.checksums) === JSON.stringify(second.checksums),
   `messages=${first.counts.messages} / checksum=${first.checksums?.messages}`
@@ -931,7 +936,11 @@ writeJson(metricsPacing, {
   lastSent: {},
   noops: {}
 });
-// Write-side rows: exactly what `refreshMetrics` persists (pacingMetrics → upsertMetrics).
+// Write-side rows: exactly what `refreshMetrics` persists (pacingMetrics →
+// upsertMetrics). `counterOf` normalises a missing day to `{noop:0,late:0}` —
+// the write path only ever writes *today*, where that zero is real. A rebuild
+// cannot know that for an old day, so it writes NULL (F3); the comparison below
+// therefore covers the days the pacing file still holds counters for.
 for (const [day, time] of [
   [mDay(mDay1), mDay1],
   [mDay(mDay2), mDay2],
@@ -943,15 +952,18 @@ for (const [day, time] of [
 }
 const readMetricRows = async path => {
   const handle = await openDb({ path });
+  // F3 (0.10.x): keep NULL distinguishable from 0 — `Number(null)` is 0 and
+  // would have hidden the "counters expired" rows behind a fake zero.
+  const num = value => (value === null || value === undefined ? null : Number(value));
   const rows = handle
     .prepare('SELECT day, msg_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day')
     .all()
     .map(row => ({
       day: String(row.day),
-      msg_count: Number(row.msg_count),
-      noop_count: Number(row.noop_count),
-      late_count: Number(row.late_count),
-      median_gap_ms: Number(row.median_gap_ms)
+      msg_count: num(row.msg_count),
+      noop_count: num(row.noop_count),
+      late_count: num(row.late_count),
+      median_gap_ms: num(row.median_gap_ms)
     }));
   closeDb();
   return rows;
@@ -977,11 +989,22 @@ const mSecond = await rebuildIndex({
   sinceDays: 0
 });
 expect(
-  'R1 rebuild 重算 metrics：与写入侧（pacingMetrics + upsertMetrics）逐日、逐字段一致',
+  'R1 rebuild 重算 metrics：与写入侧（pacingMetrics + upsertMetrics）逐日、逐字段一致（有 counters 的两天）',
   mFirst.ok &&
     writeSideRows.length === 3 &&
-    JSON.stringify(rebuiltSideRows) === JSON.stringify(writeSideRows),
+    JSON.stringify(rebuiltSideRows.slice(0, 2)) === JSON.stringify(writeSideRows.slice(0, 2)),
   `${JSON.stringify(rebuiltSideRows)} vs ${JSON.stringify(writeSideRows)}`
+);
+expect(
+  'F3 缺失的 pacing 计数写 NULL（不是 0）：01-07 无 counters 行 → noop/late 为 null',
+  rebuiltSideRows[2]?.day === mDay(mDay3) &&
+    rebuiltSideRows[2]?.noop_count === null &&
+    rebuiltSideRows[2]?.late_count === null &&
+    writeSideRows[2]?.noop_count === 0,
+  JSON.stringify({
+    rebuilt: rebuiltSideRows[2] ?? null,
+    writeSide: writeSideRows[2] ?? null
+  })
 );
 expect(
   'R1 重发行（_r1/_r2）不计入 msg_count，median_gap_ms 用同一函数（20s / 5s / 0）',
@@ -994,19 +1017,20 @@ expect(
   JSON.stringify(rebuiltSideRows)
 );
 expect(
-  'R1 noop_count / late_count 来自 collab-pacing.json 的 counters[day]（文件缺失记 0）',
+  'R1 noop_count / late_count 来自 collab-pacing.json 的 counters[day]（有计数时逐字一致）',
   rebuiltSideRows[0]?.noop_count === 5 &&
     rebuiltSideRows[0]?.late_count === 1 &&
     rebuiltSideRows[1]?.noop_count === 2 &&
-    rebuiltSideRows[1]?.late_count === 0 &&
-    rebuiltSideRows[2]?.noop_count === 0 &&
-    rebuiltSideRows[2]?.late_count === 0,
+    rebuiltSideRows[1]?.late_count === 0,
   JSON.stringify(rebuiltSideRows.map(row => `${row.day}:${row.noop_count}/${row.late_count}`))
 );
 expect(
   'R1 幂等：两次 rebuild 的 metrics checksum（以及整表 checksum）相同',
   mFirst.ok &&
     mSecond.ok &&
+    // F5 (0.10.x): pin the shape first — `undefined === undefined` used to pass.
+    typeof mFirst.checksums?.metrics === 'string' &&
+    typeof mSecond.checksums?.metrics === 'string' &&
     mFirst.checksums?.metrics === mSecond.checksums?.metrics &&
     JSON.stringify(mFirst.checksums) === JSON.stringify(mSecond.checksums),
   `metrics=${mFirst.checksums?.metrics} / ${mSecond.checksums?.metrics}`
@@ -1149,6 +1173,107 @@ expect(
 );
 writeJson(configFile, { storage: 'sqlite' });
 
+// ========== 10b) F3 / F4 (0.10.x): expired counters are NULL, resend-only days stay
+// F3: pacing keeps `PACING_COUNTER_KEEP_DAYS` (30) days of counters while a
+// rebuild covers `REBUILD_SINCE_DAYS` (180). A 100-day-old day with no counters
+// used to be written as `noop 0 / late 0` — "nobody was suppressed that day",
+// which the data cannot say. It must be NULL, and `collab_index metrics` must
+// print `-`.
+// F4: a day whose only rows are `_r<n>` resends produced a `msg_count=0` row on
+// the write path; the rebuild grouped on resend-excluded rows, so that day had
+// no key and the row vanished. Both writers must produce a row for every day
+// the log has *any* message on.
+{
+  fresh();
+  const nitsDir = join(root, 'metrics-nits');
+  mkdirSync(nitsDir, { recursive: true });
+  const nitsDb = join(nitsDir, 'collab.db');
+  const nitsMessages = join(nitsDir, 'collab-messages.jsonl');
+  const nitsPacing = join(nitsDir, 'collab-pacing.json');
+  const nitsNow = dayAt(6, 1); // injected "today": 2026-06-01 12:00 local
+  const oldDayTime = nitsNow - 100 * 24 * 3600_000; // inside 180d, outside 30d counters
+  const resendDayTime = nitsNow - 2 * 24 * 3600_000; // only a `_r1` row
+  const recentDayTime = nitsNow - 24 * 3600_000; // has counters
+  const appendNits = (id, sentAt) =>
+    appendMessage(
+      internals.makeEnvelope({ id, from: 'ses_nits_a', to: 'ses_nits_b', sentAt, kind: 'note', body: `nits ${id}` }),
+      { file: nitsMessages }
+    );
+  appendNits('msg_nits_old', oldDayTime);
+  appendNits('msg_nits_recent', recentDayTime);
+  appendNits('msg_nits_resendonly_r1', resendDayTime);
+  writeJson(nitsPacing, {
+    v: internals.PACING_VERSION,
+    windows: [],
+    counters: { [mDay(recentDayTime)]: { noop: 3, late: 2 } },
+    lastSent: {},
+    noops: {}
+  });
+  // Baseline (the write path): a resend-only day is a real `msg_count: 0` row.
+  const resendDayWriteSide = internals.pacingMetrics(mDay(resendDayTime), { noop: 0, late: 0 }, { file: nitsMessages });
+  expect(
+    'F4 对照基准：写入侧（pacingMetrics）对「只有 _r1」的一天产出 msg_count=0 的行',
+    resendDayWriteSide.msg_count === 0 && resendDayWriteSide.day === mDay(resendDayTime),
+    JSON.stringify(resendDayWriteSide)
+  );
+  const nitsRebuilt = await rebuildIndex({
+    dbPath: nitsDb,
+    messagesFile: nitsMessages,
+    pacingFile: nitsPacing,
+    broadcasts: [],
+    threads: {},
+    sinceDays: 180,
+    now: nitsNow
+  });
+  const nitsRows = await readMetricRows(nitsDb);
+  const rowOfDay = day => nitsRows.find(row => row.day === day);
+  const oldRow = rowOfDay(mDay(oldDayTime));
+  const recentRow = rowOfDay(mDay(recentDayTime));
+  const resendRow = rowOfDay(mDay(resendDayTime));
+  expect(
+    'F3 100 天前的一天（counters 已过期）→ rebuild 写 NULL，不是 0',
+    nitsRebuilt.ok &&
+      oldRow?.msg_count === 1 &&
+      oldRow?.noop_count === null &&
+      oldRow?.late_count === null,
+    JSON.stringify(oldRow ?? null)
+  );
+  expect(
+    'F3 当天仍有 counters 的行保持真实数值（NULL 只用于缺失的计数）',
+    recentRow?.noop_count === 3 && recentRow?.late_count === 2,
+    JSON.stringify(recentRow ?? null)
+  );
+  expect(
+    'F4 只有 `_r1` 的一天在 rebuild 后仍有行，且 msg_count=0（与写入侧同口径）',
+    Boolean(resendRow) && resendRow.msg_count === 0 && resendRow.median_gap_ms === 0,
+    JSON.stringify(resendRow ?? null)
+  );
+  // The rendered view: NULL prints `-`; the real counters keep their numbers.
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  writeJson(configFile, { storage: 'sqlite', dbPath: nitsDb });
+  const nitsListed = await runIndexTool({ action: 'metrics' });
+  const lineOfDay = day =>
+    nitsListed.content.split('\n').find(line => line.startsWith(`${day} · msg `)) ?? '';
+  expect(
+    'F3 `collab_index metrics` 对过期计数显示 `-`（当天行仍是真实值）',
+    lineOfDay(mDay(oldDayTime)).includes('noop - · late -') &&
+      lineOfDay(mDay(recentDayTime)).includes('noop 3 · late 2'),
+    `${lineOfDay(mDay(oldDayTime))} | ${lineOfDay(mDay(recentDayTime))}`
+  );
+  expect(
+    'F3 `collab_index metrics` 说明 `-` 的语义（NULL = 计数已过期，不是 0）',
+    nitsListed.content.includes('计数已过期'),
+    nitsListed.content.split('\n').find(line => line.includes('计数已过期')) ?? '-'
+  );
+  const nitsStats = await runIndexTool({ action: 'stats' });
+  expect(
+    'F3 `collab_index stats` 写明 NULL 语义（30 天 counters vs 180 天窗口）',
+    nitsStats.content.includes('NULL = 该日 pacing 计数已过期'),
+    nitsStats.content.split('\n').find(line => line.includes('NULL')) ?? '-'
+  );
+  writeJson(configFile, { storage: 'sqlite' });
+}
+
 // ========== 11) R1/R2/R5 (0.9.7, `11-21-collab-index-metrics`): `metrics` 动作
 // The daily rows were only reachable by opening `collab.db` directly (which the
 // repo rules require per-query authorization for, even read-only). `metrics`
@@ -1201,7 +1326,7 @@ const readBefore = statSync(readDb);
 const listed = await runIndexTool({ action: 'metrics' });
 const readAfter = statSync(readDb);
 const expectedMetricLines = [
-  `${mDay(rDay3)} · msg 1 · noop 0 · late 0 · gap 0ms`,
+  `${mDay(rDay3)} · msg 1 · noop - · late - · gap 0ms`,
   `${mDay(rDay2)} · msg 2 · noop 2 · late 0 · gap 5000ms`,
   `${mDay(rDay1)} · msg 3 · noop 5 · late 1 · gap 20000ms`
 ];

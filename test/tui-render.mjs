@@ -1237,6 +1237,64 @@ const contractFrameLines = frame => frame.split('\n').map(line => line.trimEnd()
   await narrowCleanup();
 }
 
+/* ---- 9b. 0.10.x: emoji / ZWJ clusters are 2 cells and are never split ------ */
+
+// `clipCells` used a code-point loop and a CJK-only wide table: `🚀` counted as
+// **1** cell (so a narrow panel did not clip at all and the renderer wrapped),
+// and a `for…of` truncation could stop in the middle of a ZWJ family. Both are
+// pinned here by asserting the exact clipped line and that it fits in 34 cells.
+{
+  const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+  /** Terminal cells, the way the renderer counts them (wide CJK / emoji = 2). */
+  const cells = text => {
+    const wide = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/;
+    const emoji = /\p{Extended_Pictographic}|\p{Regional_Indicator}|[\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{20E3}]/u;
+    let total = 0;
+    for (const part of segmenter.segment(text)) {
+      total += part.segment.includes('\u200d') || emoji.test(part.segment) || wide.test(part.segment) ? 2 : 1;
+    }
+    return total;
+  };
+  const family = '👨‍👩‍👧‍👦';
+  const cjk = '排钟接线验证'.repeat(6); // 36 CJK chars = 72 cells
+  const cases = [
+    { label: '🚀 ×18', oneLine: '🚀'.repeat(18), expected: `  主线 ${'🚀'.repeat(13)}…` },
+    { label: 'family ZWJ ×18', oneLine: family.repeat(18), expected: `  主线 ${family.repeat(13)}…` },
+    { label: 'CJK ×36', oneLine: cjk, expected: `  主线 ${cjk.slice(0, 13)}…` }
+  ];
+  for (const item of cases) {
+    const tree = harness({
+      snapshot: {
+        ...CONTRACT_TREE,
+        sessions: CONTRACT_TREE.sessions.map((session, index) =>
+          index === 0
+            ? { ...session, contract: { ...session.contract, mission: { ...session.contract.mission, oneLine: item.oneLine } } }
+            : session
+        )
+      }
+    });
+    const cleanup = await plugin.setup(tree.context);
+    const mounted = await mount(
+      tree.context,
+      () => tree.slots['session.panel'](panelInput({ width: 34, sessionID: 'ses_ct_a1' })),
+      { width: 34, height: 30 }
+    );
+    hostPress(tree, 'j');
+    hostPress(tree, 'j');
+    await mounted.setup.renderOnce();
+    const frame = await mounted.setup.captureCharFrame();
+    const lines = contractFrameLines(frame);
+    const line = lines.find(entry => entry.startsWith('  主线 ')) ?? '';
+    expect(
+      `T14 ${item.label}：宽 34 按 2 格计并整簇截断（不切 ZWJ，不折行）`,
+      line === item.expected && cells(line) <= 34 && !lines.some(entry => entry.includes('· drift')),
+      JSON.stringify({ line, cells: cells(line), lines: lines.filter(entry => entry.includes('主线') || entry.includes('drift')) })
+    );
+    await mounted.setup.dispose();
+    await cleanup();
+  }
+}
+
 /* ---- 9c. 0.9.7: the decision inbox is one detail line (R4) ----------------- */
 
 {

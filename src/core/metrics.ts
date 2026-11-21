@@ -14,9 +14,11 @@
  * under the "one global database, kept forever" policy.
  *
  * The module is pure except `readPacingCounters` (a tolerant read of the pacing
- * file): `noop_count` / `late_count` have their only write point there, and a
- * missing / unreadable / foreign-version file is zero — never a throw, never a
- * fabricated number.
+ * file): `noop_count` / `late_count` have their only write point there. A
+ * missing / unreadable / foreign-version file is `{}` — never a throw, never a
+ * fabricated number; a day absent from `counters` yields `null` (unknown), not
+ * `0` (F3, 0.10.x: the counters are pruned after 30 days while rebuild covers
+ * 180, so `0` was a claim the data could not support).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PACING_FILE, PACING_VERSION } from '../constants.ts';
@@ -27,8 +29,15 @@ import type { PacingDayCounters } from '../types.ts';
 export interface DayMetricsRow {
   day: string;
   msg_count: number;
-  noop_count: number;
-  late_count: number;
+  /**
+   * `null` = the counter is **unknown**, not zero. `pacing` keeps only
+   * `PACING_COUNTER_KEEP_DAYS` days (30) while `rebuild` covers a 180-day
+   * window, so a day older than the retention has no counters left — writing
+   * `0` there claimed "nobody was suppressed that day", which is not what the
+   * data says. `collab_index metrics` prints `-` for these.
+   */
+  noop_count: number | null;
+  late_count: number | null;
   median_gap_ms: number;
 }
 
@@ -62,13 +71,22 @@ export function isResendID(id: string): boolean {
 /**
  * One day's row — the single aggregation implementation. `times` are that day's
  * message timestamps with resend rows **already excluded** (see `timesByDay`).
+ *
+ * `counters === null` means the pacing counters for that day are gone (pruned
+ * after the retention window) or never existed: the row carries `null`, never a
+ * fabricated `0`. The delivery path always passes a real counter object (it only
+ * ever writes *today*), so its rows keep real numbers.
  */
-export function aggregateDay(day: string, times: number[], counters: PacingDayCounters): DayMetricsRow {
+export function aggregateDay(
+  day: string,
+  times: number[],
+  counters: PacingDayCounters | null
+): DayMetricsRow {
   return {
     day,
     msg_count: times.length,
-    noop_count: counters.noop,
-    late_count: counters.late,
+    noop_count: counters ? counters.noop : null,
+    late_count: counters ? counters.late : null,
     median_gap_ms: medianGapMs(times)
   };
 }
@@ -84,6 +102,19 @@ export function timesByDay(messages: { id: string; sentAt: number }[]): Map<stri
     else groups.set(day, [message.sentAt]);
   }
   return groups;
+}
+
+/**
+ * Every local day the log has a message on, **resends included** (F4,
+ * 0.10.x): a day whose only rows are `_r1` resends still gets a `metrics` row
+ * (`msg_count: 0`), exactly like the write path produced one. Grouping on
+ * `timesByDay` alone dropped that day from a rebuild — the row existed before
+ * the rebuild and vanished after it.
+ */
+export function daysWithMessages(messages: { id: string; sentAt: number }[]): string[] {
+  const days = new Set<string>();
+  for (const message of messages) days.add(dayKey(message.sentAt));
+  return [...days].sort((left, right) => left.localeCompare(right));
 }
 
 /** Tolerant counters normalisation: same rule as `normalizePacingState`. */
@@ -102,7 +133,7 @@ export function normalizeCounters(raw: unknown): Record<string, PacingDayCounter
 /**
  * `counters[day]` of the pacing file — the only place `noop_count` /
  * `late_count` are accumulated. Missing file, unreadable JSON or a foreign
- * version → `{}` (a rebuild then writes 0, which is the honest answer).
+ * version → `{}` (a rebuild then writes NULL = unknown, never `0`).
  */
 export function readPacingCounters(file?: string): Record<string, PacingDayCounters> {
   const path = String(file ?? PACING_FILE);

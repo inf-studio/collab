@@ -47,7 +47,7 @@ import { envelopeHead } from './envelope.ts';
 import { readFreezes } from './freeze.ts';
 import { freezeFor } from './freeze-pure.ts';
 import { allLocks } from './locks.ts';
-import { aggregateDay, readPacingCounters, timesByDay } from './metrics.ts';
+import { aggregateDay, daysWithMessages, readPacingCounters, timesByDay } from './metrics.ts';
 import type { DayMetricsRow } from './metrics.ts';
 import { allQueueItems } from './owner-queue.ts';
 import { appendMessage, readMessages } from './store.ts';
@@ -150,13 +150,20 @@ function cutoffOf(options: StoreOptions): number {
  * policy the history was untraceable. `msg_count` / `median_gap_ms` come from
  * the log (resends excluded), `noop_count` / `late_count` from the pacing
  * file's `counters[day]` — the only place they are accumulated.
+ *
+ * Two 0.10.x corrections, both "match the write path":
+ *
+ *   - F4: the day list is `daysWithMessages` (resends **included**), so a day
+ *     whose only rows are `_r1` resends keeps its `msg_count: 0` row instead of
+ *     disappearing on rebuild.
+ *   - F3: a day the pacing file no longer holds counters for (the 30-day
+ *     retention vs the 180-day rebuild window) gets `NULL`, not `0` — `0` read
+ *     as "nobody was suppressed that day", which the data cannot say.
  */
 function metricsRowsOf(messages: MessageEnvelope[], options: StoreOptions): DayMetricsRow[] {
   const counters = readPacingCounters(options.pacingFile);
   const byDay = timesByDay(messages);
-  return [...byDay.keys()]
-    .sort((left, right) => left.localeCompare(right))
-    .map(day => aggregateDay(day, byDay.get(day) ?? [], counters[day] ?? { noop: 0, late: 0 }));
+  return daysWithMessages(messages).map(day => aggregateDay(day, byDay.get(day) ?? [], counters[day] ?? null));
 }
 
 /** Which hand-off bids a freeze covers right now (`handoffs.frozen`, display only). */
@@ -352,8 +359,13 @@ export interface MetricsRowInput {
   idle_count?: number;
   drift_ms?: number;
   median_gap_ms?: number;
-  noop_count?: number;
-  late_count?: number;
+  /**
+   * `null` = explicitly unknown (the pacing counters for that day are gone).
+   * `undefined` = "this writer does not own the field" — the UPSERT keeps what
+   * is stored. The two are different and must stay so.
+   */
+  noop_count?: number | null;
+  late_count?: number | null;
 }
 
 const METRIC_FIELDS = [

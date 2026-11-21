@@ -305,6 +305,9 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `backfill` 只写 `meta.backfilled`，**不造 `messages` 行**（历史正文不可得；造空行会污染计数与 FTS）。
 - **指标读取走工具、不直连库**：`collab_index { action:"metrics" }` 是唯一入口（默认 `limit:30`、按 day 倒序、覆盖范围报整表）；
   NULL 显示 `-`，不做二次计算；**先 `existsSync` 再 `openDb`**，读路径不得建库或建表（`ensureSchema` 只有 `rebuild` 调）。
+- **metrics 的 NULL 是「未知」不是 0**：`noop_count` / `late_count` 来自 `collab-pacing.json` 的 `counters[day]`，
+  只保留 30 天；180 天窗口里更早的日子必须写 NULL（`-`）。写 0 会被读成「当天没有抑制」。
+  重建的**日期集合取全部消息**（含只有 `_r<n>` 的日期 → `msg_count=0` 的行仍保留）。
 
 ### 2.14 看板显示会话契约（0.9.7）
 
@@ -312,8 +315,10 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   `contractSummary()`；GUI 与 TUI 必须调这三个，禁止各自算。徽标颜色是 `collab-tone-*`，TUI 用行 tone。
 - **快照字段可选**：`sessions[].contract` 缺失即「没有契约」。**无契约时不得写 `contract: {}`**——整份 `snapshot`
   要与 0.9.6 逐字节一致（`test/snapshot-shape.mjs` 的黄金串就是 HEAD 构建出来的），测试里这是硬断言。
-- **读路径只读 + mtime 缓存**：`snapshot.ts` 读 `collab-contract/<sid>.json`，`mtimeMs` 作缓存键（与 `createConfigReader`
-  同一模式）；**绝不**在快照里调 `updateContract*`。两种情况都省略字段，但**只有一种算损坏**：
+- **读路径只读、不缓存（0.10.x 起）**：`snapshot.ts` 每次快照**直接读** `collab-contract/<sid>.json`。**不要**按
+  `mtimeMs` 缓存：本机 FS 粒度约 4ms，同桶内二次写会被当成「没变」，看板会显示旧值直到下一次写入
+  （100 会话全读实测额外 ≈1–3ms/轮询，2s 周期可接受）。决策清单的 2s 缓存（另一个读取器）保留。
+  **绝不**在快照里调 `updateContract*`。两种情况都省略字段，但**只有一种算损坏**：
   **不可解析的 JSON** → 省略 + **一条**日志 + 不抛（`ignoring unreadable contract …`）；
   **可解析但不是本版**（`v` 不认识 / 外部 `sid` / `updatedAt === 0`）→ 同样省略，**不记日志**（旧文件不是错误）。
 - **徽标**：1 字符 + ≤3 位数字（`>99` → `99+`），插在 GUI 第二行末尾 / TUI 同一行末尾，**不新增行**；
@@ -325,7 +330,8 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   一律回落 `now` 会让 TUI 打 `drift <1m`，而注入同时说「已挂起 4.0d 未醒」；`unresolved` 的 reason 已含
   「未处置」，不要追加第二个。
 - **详情固定顺序** `主线 / 边界 / 进度 / 待办 / 漂移`，缺项隐藏；GUI 槽位 `data-collab-slot="contract"` 位于
-  会话头与图槽之间，无契约整块不渲染。TUI 在计数行后追加**一行**摘要，用 `clipCells`（CJK 记 2 格）截断，不换行。
+  会话头与图槽之间，无契约整块不渲染。TUI 在计数行后追加**一行**摘要，用 `clipCells` 截断（按**字素簇**、
+  CJK/全角/emoji/ZWJ 组合均记 2 格；`Intl.Segmenter` 切分，不得切开组合序列），不换行。
 - 测试要点：三种徽标优先级各一例 + 无契约不显示；断言行体只有两个子元素（徽标不新增行）；`639px` 单栏仍有徽标；
   详情子元素类名数组逐字比对；TUI 宽 34 的摘要行以 `…` 结尾且下一行不是续行。
 
