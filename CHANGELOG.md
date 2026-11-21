@@ -117,6 +117,55 @@
 `git restore -- src/core/index-db.ts src/tools/store.ts src/types.ts test/store-rebuild.mjs README.md docs/collab.md CHANGELOG.md skills/collab/SKILL.md`
 （`metrics` 动作消失，`collab_index` 回到 `rebuild | backfill | stats`，其余行为不变）。
 
+### 人类决策清单（`11-21-collab-decision-inbox`）
+
+> 0.9.5 有决策账本，但**只有当事人看得见**：`[decide]` 注入给提问方 / owner，`collab_decide list` 要指定 `key`。
+> 人类想知道「现在有哪些事在等我 / 等某个会话拍板」，只能逐个会话看注入或逐个 thread 查——人类被降级成路由器。
+> 本批只解决**看见**：一个新工具 + 看板顶部计数 + TUI 一行，**零写入、零投递**，不在看板里拍板。
+
+#### Added
+
+- **`collab_decision_inbox { owner?, limit? }`（R1，工具 28 → 29，只读）**：聚合 `collab-decisions/*.json` 里
+  `status:"open"` 的全部条目，按等待时长（`at` 升序，**最老在上**）排序。行 =
+  `<key>#<D#> · 等 <owner|人工> · <age> · [⚠冲突（TTL 剩 …）·] <question≤60>`；默认 20 行，超出给
+  「还有 N 条未显示（limit=X）」；header / footer 按已扫描账本的全部 open 计数（`共 N 条 · 其中冲突 M 条`）；
+  `owner` 只看等该会话（`ses_…`）的，过滤后计数按过滤集算。
+- **完整扫描 + 显式上限（复核修复）**：不复用 `readAllDecisions` 的 `.sort().slice(-500)`（它保留字典序最大的
+  500 个 key = 最新，520 key 时丢掉最老待办且把 `total` 报成 500）。改为直接扫目录，显式
+  `DECISION_INBOX_SCAN_LIMIT`（默认 **2000**）：超过时 header 写 `已扫描 M/N 个 key`、单独一行
+  `⚠账本 N 个 key，仅扫描 M 个（可能漏更老待办）`，**绝不**把扫描数冒充成「共 N 条」。
+  扫描结果按**目录 mtime + 文件数**缓存 **2s**（与看板轮询同周期），2s 一拍不重复全量读。
+- **冲突可见（R2）**：`origin:"conflict"` → `⚠冲突` + 24h TTL 剩余（小时一位小数，`19.8h`）；已过期不显示
+  TTL，但**不隐藏**该行（账本仍叫它 open）。
+- **看板（R3/R4）**：快照多一个**可选** `decisions{total,conflicts,oldestAgeMs,items[]}`（≤20 行）——
+  GUI 顶部一行 `待决策 3（⚠1）`，点击展开只读列表；**行点击只 `tabs.open(ownerSid)`**，owner 非会话 →
+  `人工`、不可点 + hover 提示；列表里没有 answer / supersede 按钮。TUI 在计数行后追加一行
+  `待决策 N（最老 X）`（无 → 不显示，按终端格数截断不换行）。
+- 派生一份：`src/core/decision-inbox.ts`（读 + 排序 + TTL）+ `src/core/decision-view.ts`（纯展示，GUI/TUI 共用），
+  工具、快照块、两个窗口读同一组数字。
+
+#### Changed
+
+- 工具面 **28 → 29**（既有 28 个工具输出不变）；`test/{facts,decide,drift,gate,contract-inject,pacing,store-rebuild,
+  handoff-harness,readonly-default}.mjs` 的工具数断言同步到 29。
+- 快照 **R5 兼容**：没有 open 决策时 `decisions` 字段**整个省略**，0.9.6 的快照逐字节不变
+  （`test/snapshot-shape.mjs` 的黄金串仍逐字比对）；RPC 不新增方法，只多一个可选输出字段。
+- 读路径**只读**：扫描器不建目录、不写文件；账本不存在 → 「无待决策」；单文件损坏 → 跳过 + 一条日志。
+- 快照的 `decisions` 在扫描被截断时多 `truncated/keys/scannedKeys`；GUI 标题与 TUI 行写 `已扫描 M/N key`。
+- 回归：全套 17 个套件全绿；新增 `test/decision-inbox.mjs` **53 项**（含 520 key / 显式上限 / 缓存）
+  + GUI PN15/15b **13 项**（含截断计数）+ TUI T15 **3 项**，其余套件数字不变（仅工具数断言 28 → 29）。
+- 复核修复回归：520 key（最老在 `t_k0001`）→ 最老可见、`total=520`；`scanLimit:200` → 显式告警且不写「共 520 条」。
+- 缓存实测（本机）：520 key 冷扫 **8.9ms**；2000 文件冷扫 **19.5ms**、命中缓存 **1.9ms**（2s 一拍）。
+- hermetic：`store-rebuild` / `handoff-harness` / `graph-shape` 也 pin `COLLAB_DECISIONS_DIR` 到空临时目录。
+- 变异实测（强制三条）：M1 排序改 `at` 降序 → 「最老在上」红；M2 不过滤 `status:"open"` → 「answered 不出现 / 5 行」红；
+  M3 行点击改调写动作（`escalate`）→ GUI「全程 0 次写 RPC」红。
+
+#### 回滚
+
+`git restore -- src/rpc.ts src/core/snapshot.ts src/constants.ts src/index.ts src/tools/index.ts src/gui.tsx src/tui.tsx`；
+删未跟踪文件 `rm src/core/decision-inbox.ts src/core/decision-view.ts src/tools/decision-inbox.ts`
+（`src/index.ts` 必须一起恢复：它 import 了被删模块，否则编译失败；账本本身不受影响）。
+
 ## [0.9.6] - 2026-11-20
 
 > **2min 批量投递 + 无增量不发**。消息间隔 p10 **6.6s** / p50 **20s** / p90 **90s**，最长连续 **151 条**

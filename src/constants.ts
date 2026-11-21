@@ -748,6 +748,24 @@ export const DECISION_REASON_LIMIT = 200;
 /** `collab_decide list` renders at most this many rows. */
 export const DECISION_LIST_MAX = 20;
 /**
+ * 0.9.7 (`11-21-collab-decision-inbox`): how many rows the inbox shows by
+ * default (tool `limit`, and the snapshot block's `items`). The header / total
+ * still counts every open decision **of the scanned ledger**, so a truncated
+ * list never understates the set it actually read.
+ */
+export const DECISION_INBOX_LIMIT = 20;
+/**
+ * 0.9.7 (review): how many ledger **files** the inbox reads. `readAllDecisions`
+ * is bounded to the newest 500 names, which silently dropped the oldest waits
+ * (520 keys → `total:500`, `k0001` missing); the inbox therefore scans the
+ * directory itself with this explicit bound. Past it the answer says
+ * `已扫描 M/N 个 key` and warns `⚠账本 N 个 key，仅扫描 M 个` — it never reports
+ * the scanned subset as the whole ledger.
+ */
+export const DECISION_INBOX_SCAN_LIMIT = 2000;
+/** The board polls every 2 s; a scan result is reused for one poll period. */
+export const DECISION_INBOX_CACHE_MS = 2000;
+/**
  * Design §6: a `conflict` verdict (both sides ahead in different dimensions) is
  * not a conversation topic — it opens a decision with these options.
  */

@@ -104,6 +104,8 @@ import { computeDelta, deltaSnapshot, noDeltaLine, todoStatusHash } from './core
 import { upsertMetrics } from './core/index-db.ts';
 import { allQueueItems, mineFor } from './core/owner-queue.ts';
 import { buildSnapshot, createSnapshotReader } from './core/snapshot.ts';
+import { decisionInbox, formatDecisionInbox, snapshotDecisions } from './core/decision-inbox.ts';
+import { decisionHeadline, decisionRowText, decisionSummaryLine } from './core/decision-view.ts';
 import { buildBoard, boardOrphans } from './core/board.ts';
 import { buildGraph } from './core/graph.ts';
 import {
@@ -621,6 +623,15 @@ export const __internals = {
   buildBoard,
   // The orphan fallback (0.6.0 / pure-tested in 0.6.1) — rows no session owns.
   boardOrphans,
+  // 0.9.7 (`11-21-collab-decision-inbox`): the read-only aggregation + the
+  // presentation both windows share (the snapshot block comes from the same
+  // function, so the GUI count cannot disagree with the tool).
+  decisionInbox,
+  snapshotDecisions,
+  formatDecisionInbox,
+  decisionHeadline,
+  decisionSummaryLine,
+  decisionRowText,
   // Three-level relation graph (0.8.0) — the one pure derivation GUI / TUI share.
   buildGraph,
   // 0.8.2 (`graph-zoom`): the pure layout + view transform (zoom / pan / labels).

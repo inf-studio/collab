@@ -257,7 +257,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 > 若 reload 后仍失败（例如安装报 `NpmInstallFailedError`），才需要 `opencode service restart`（会打断会话）或新开会话。
 > `opencode plugin list` 只是*已安装*版本；诊断*运行时*版本用 `collab_report {confirm:false}` 预览里的「版本: x.y.z」。
 
-### 11.2 二十八个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约/事实账本/决策账本各一组）
+### 11.2 二十九个工具（协作链路六个 + 权限/上报/追加/决策/租约/归档/状态/thread 聚合/加急/冻结/存储/会话契约/事实账本/决策账本/人类决策清单各一组）
 
 | 工具 | 入参 | 说明 |
 | --- | --- | --- |
@@ -290,6 +290,7 @@ opencode plugin add @inf-studio/collab@0.1.0
 | `collab_fact` | `{ action, claim?, evidence?, grade?, factIds?, id?, reason?, since?, includeAll?, limit?, confirm }` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`/`F2`…（`claim`/`evidence`/`grade` 必填；同 claim 覆盖旧 active 行；`relayed`/`unknown` 事实**不得**被引用为证据，按正文 `F3` 或 `factIds` 都会被拒）；`retract {id, reason}` 撤回单条并写当日 `metrics.retract_count` + 原因分类；`invalidate {since}` 作废一条事实及其**显式引用**（`basedOn.factIds`）的派生，或 epoch 数字作废该 epoch 及之前 settled 的 active 事实，`epoch+1`，工作区级传播，并在途 todo 标 `staleWork`（**不关闭**）；`list` 只读（默认 active，`includeAll` 含历史，并显示当日 `settled`/`retracted`/`stale` 计数）。写动作需 `confirm:true`。见 §11.25 |
 
 | `collab_decide` | `{ action, key?, threadID?, bid?, question?, options?, owner?, id?, answer?, reason?, includeAll?, limit?, confirm }` | **决策账本（0.9.5，工具 27 → 28）**：`open { key, question, options[≥2], owner? }` —— `key` 是 threadID（`t_…`）**或** bid（`b_…`），所以没有交接记录的 thread 也能开决策；`owner` 缺省 = 契约里的 `decider`，再退到发单方（thread 发起人 / 交接单 `from.sid`）。同问（NFKC + 去空白/标点 + 小写后 sha1 相同）已 open → 拒绝并返回既有 `D#` + owner；同一 `key` 同时 open 的**手工**决策 ≤ **3**（D9，conflict 决策单独配额），第 4 条可读拒绝并提示先关。`answer { id, answer }` **只有 owner** 能写（提问方不得代答，提问方也不会被当成 owner），已回答不可再答（先 `supersede`）；`supersede { id, reason }` **提问方 / owner / 该 thread（或交接单）的参与方**都能作废（记 `by` + `reason`）；`list { key? }` 只读（省略 key = 本会话作为提问方 / owner / 参与方的全部 open）。存 `~/.config/opencode/collab-decisions/<key>.json`（`tmp+rename` + 跨进程 `<file>.lock`；`COLLAB_DECISIONS_DIR` 可覆盖）。双方下一轮注入一行 `[decide]`；`decision:<key>#D3` 作为 evidence 走**唯一 resolver**（账本优先、旧 hand-off `decisions[]` 兼容）。见 §11.26 |
+| `collab_decision_inbox` | `{ owner?: string, limit?: number }` | **人类决策清单（0.9.7，工具 28 → 29，只读）**：跨 key 聚合 `collab-decisions/*.json` 里 `status:"open"` 的**全部**条目，按等待时长（`at` 升序，最老在上）排序；行 = `<key>#<D#> · 等 <owner\|人工> · <age> · [⚠冲突（TTL 剩 …）·] <question≤60>`。默认 **20** 行，超出给「还有 N 条」，末尾「共 N 条 · 其中冲突 M 条」（扫描被截断时改为「已扫描 M/N 个 key」）；`owner` 只看等某个会话（`ses_…`）的。**零写入**：不 answer / supersede / 投递 / 排队，账本不存在时返回「无待决策」且**不创建目录**（`COLLAB_DECISIONS_DIR` 可覆盖）。**全量扫描**（不复用 `readAllDecisions` 的 500 截断）；扫描上限 `DECISION_INBOX_SCAN_LIMIT`（默认 2000），超过时写「已扫描 M/N 个 key」+ `⚠账本 N 个 key，仅扫描 M 个（可能漏更老待办）`，不把扫描数冒充「共 N 条」；扫描结果按目录 mtime + 文件数缓存 2s。冲突 = `origin:"conflict"`，24h TTL 剩余按小时一位小数（`19.8h`）；已过期不显示 TTL。见 §11.28 |
 `kind`：`request`（默认）／`reply`（必须带 `threadID`，缺失会被当作新请求并在返回里提示）／`note`（不改线程状态）。
 `expected`：`implement`（默认，改代码）／`review`（确认/复核）／**`research`**（0.4.0，只读排查 + 结论；对 `build` 也合法）。
 若承接方是只读 agent（`explore` / `plan`）而 `expected:"implement"`，结果里会明确提示**能力不匹配**并建议 `expected:"research"` 或先 `collab_promote`。
@@ -2588,7 +2589,7 @@ drift 2 + progress 2 = **12**，与生产预算相等：六段全满时**没有�
 
 #### 验收
 
-`test/decide.mjs`（**79 项**）：28 个工具 · thread 路径 open/list · bid 路径 open 且与 thread 命名空间隔离 · 非 owner
+`test/decide.mjs`（**79 项**）：29 个工具 · thread 路径 open/list · bid 路径 open 且与 thread 命名空间隔离 · 非 owner
 answer 拒绝（0 写入）· 已回答再 answer 拒绝（提示 supersede）· 同问变体（大小写/空白/标点 + **NFKC 全角**）拒绝并返回
 既有 `D#` + owner · 第 4 条 open 拒绝（上限 3）+ supersede 释放槽位 · owner 缺省（decider → 交接发起方）· 四元组推导 +
 `[role:…]` 静态声明（三句常见话都不产生建议）· **提问方是当事人**（owner≠asker：看得见、可 supersede、不能 answer）·
@@ -2703,6 +2704,81 @@ conflict → 一个 open 决策 + 同 thread 只读（answer 后恢复）· **co
 「最长 151 条连续」的分簇结构重建，**两个 target 轮转**（单 target 会得到虚高上界），增量率按 **25%**
 （69% 是状态镜像）：per-target **p50 410s**、总量 **5.11×**。上界参考：把「所有非镜像消息都算增量」（31%）时为
 **4.46×** —— 两个口径的增量率不同，**不跨口径比较临界值**；降幅跟着**增量率**走（抑制才是主因，窗口只是把剩下的合并）。
+
+### 11.28 人类决策清单（0.9.7，`collab_decision_inbox`，只读）
+
+> 问题：0.9.5 的决策账本**只有当事人看得见**——`[decide]` 只注入提问方 / owner，`collab_decide list` 要指定
+> `key`。人类想知道「现在有哪些事在等我 / 等某个会话拍板」，只能逐个会话看注入或逐个 thread 查；这正是
+> 0.9.x 盘点里「人类被降级为路由器」的那一环。
+
+本版只解决**看见**：一行只读清单 + 看板顶部计数，不做「在看板里直接拍板」。
+
+#### 数据与排序
+
+```
+~/.config/opencode/collab-decisions/<key>.json
+  { v, key, next, items: [{ id, question, options, owner, status, origin, at, … }] }
+```
+
+- 只取 `status === "open"`（`answered` / `superseded` 是历史）；
+- `age = now − at`（`at` 缺失 → 年龄记 0、渲染 `?`）；
+- `origin === "conflict"` → `⚠冲突` + `TTL 剩 X`（`24h − age`，小时一位小数）；已过期**不显示 TTL**，但**不隐藏**
+  该行（账本还叫它 open，读路径不得替它作决定）；
+- 按 `at` **升序**（最老在上），`key` / `D#` 仅用于同刻并列的稳定排序；
+- 目录不存在 = 空清单，**绝不 `mkdir`**；单文件损坏 → `readDecisions` 跳过 + **一条日志**，不抛；
+- **不复用 `readAllDecisions`**（它 `.sort().slice(-500)`，保留字典序最大的 500 个 key ≈ 最新，520 key 时
+  会丢掉最老的 `k0001` 并把 total 报成 500）。清单自己扫目录：显式上限 `DECISION_INBOX_SCAN_LIMIT`
+  （默认 **2000**），超过时 header 写 `已扫描 M/N 个 key`、单独一行
+  `⚠账本 N 个 key，仅扫描 M 个（可能漏更老待办）`，footer 也写 `已扫描 M/N 个 key`——**不得**把扫描数
+  冒充成「共 N 条」；扫描结果按**目录 mtime + 文件数**缓存 **2s**（与看板轮询同周期）。
+
+工具 `collab_decision_inbox { owner?, limit? }`（默认 `limit:20`）：
+
+```
+待决策 3 条（冲突 1） · 最老 4.2h
+  t_mwlp…#D3 · 等 ses_e176… · 4.2h · dev/prod 键空间是否隔离
+  b_1bb1…#D1 · 等 ses_edc3… · 1.1h · ⚠冲突（TTL 剩 22.9h） · 客户端增量帧的判据
+  t_mwnm…#D2 · 等 人工 · 18m · 是否回退前缀隔离
+共 3 条 · 其中冲突 1 条
+只读：未写入、未投递。
+```
+
+- 超 `limit`：先列 `limit` 行，再给「还有 N 条未显示（limit=X）」；header / footer 仍按**全部** open 计数；
+- `owner` 过滤后 header / footer 按过滤集算；过滤后为空 → 「无待决策（owner=… 名下没有 open 决策）」；
+- owner 不是 `ses_…`（例如手写的「人工」）→ 行内显示 `人工`，看板里是**不可点**的 div。
+
+#### 界面（R3 / R4）
+
+- **GUI**：看板顶部一行 `待决策 3（⚠1）`，点击展开只读列表；列表行 = `#D3 · 等 <会话短名> · 4.2h · <问题>`，
+  冲突行 `warn` tone。**行点击只做 `tabs.open(ownerSid)`**（跳到该会话，由人和该会话的模型自己
+  `collab_decide answer`）；owner 缺失 / 非会话 → 不可点 + hover 提示。列表里**没有** answer / supersede 按钮，
+  也没有任何写 RPC —— 看板不成为第二个写入面。
+- **TUI**：详情区（计数行 + 图例之后）追加一行 `待决策 N（最老 X）`；无 open 决策 → 不显示；按终端格数截断不换行。
+- 派生同源：工具、快照块、两个窗口都读 `src/core/decision-inbox.ts`（展示在 `core/decision-view.ts`，纯函数），
+  所以 GUI 计数不可能与工具计数不一致。
+
+#### 兼容
+
+- 工具面 **28 → 29**，既有 28 个工具输出不变；
+- 快照多一个**可选** `decisions{total,conflicts,oldestAgeMs,items[]}`，**没有 open 决策时整个字段省略**
+  （0.9.6 的快照逐字节不变；`test/snapshot-shape.mjs` 的黄金串仍成立）；
+- RPC 不新增方法（`snapshot` 输出 schema 多一个可选字段）；TUI 的 `normalize` 会原样透传该字段。
+
+#### 验收
+
+`test/decision-inbox.mjs`（**53 项**）：29 个工具 · 3 key 混合（排序 / 总数 / 冲突数）· `answered` 不出现 ·
+520 key（最老 `t_k0001`）全部扫描且最老可见 / `total=520` · `scanLimit:200` 出现显式告警且不写「共 520 条」·
+2000 文件冷 / 暖扫描计时（缓存生效）·
+`owner` 过滤 + 空过滤集 · 空账本「无待决策」且**不建目录** · 坏文件跳过 + 1 条日志 · 冲突 TTL（22.9h）与过期无 TTL ·
+`limit` 20 行 + 「还有 9 条」但总数仍 29 · 两次调用前后目录 / 每个文件 mtime 与文件集不变 · 快照块 / GUI 标题 /
+TUI 摘要与工具同一组数字 · 空账本 `snapshotDecisions` 为 `undefined`。
+`test/gui-panel.mjs` PN15/PN15b（**13 项**）：顶部计数 `待决策 3（⚠1）`（截断时追加 `（已扫描 M/N key）`）、默认折叠、三行渲染（冲突 tone + TTL）、
+owner 缩短 / `人工`、人工行是 div 且点击无效、会话行点击只触发 `tabs.open({server,id,focus})`、
+**全程 0 次写 RPC**、无 answer/supersede 按钮、再次点击折叠。
+`test/tui-render.mjs` T15（**3 项**）：一行 `待决策 3（最老 4.2h）`、宽 24 不换行、无决策不显示。
+
+**变异（强制）**：① 排序改成 `at` 降序 → 「最老在上」必红；② 不过滤 `status:"open"` → 「answered 不出现 / 5 行」
+必红；③ 行点击改成调用写动作（`escalate`）→ PN15 的「0 次写 RPC」必红。
 
 ## 12. 协作链路（handoff chain：local + peer）
 

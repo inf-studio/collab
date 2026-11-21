@@ -208,6 +208,14 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   supersede；24h 未回答由注入时的扫描自动作废（`by=system`）。`openConflictOf` 对超 TTL 的决策直接放行，不等扫描。
 - **升级闸门同时对 `threadID` 与 `bid` 生效**（`b_…` 曾经漏掉，消息照发）。
 
+### 人类决策清单（只读聚合）
+- `collab_decision_inbox` 只解决「看见」：**不得**复用 `readAllDecisions` 的 500 截断——它保留字典序最大（≈最新），
+  会**静默丢掉最老的待办**并把总数低报。独立扫描，显式上限 `DECISION_INBOX_SCAN_LIMIT`（默认 2000）。
+- 超限必须输出 `⚠账本 N 个 key，仅扫描 M 个（可能漏更老待办）`，且**不得**把扫描数写成「共 N 条」；
+  GUI/TUI 同步追加 `（已扫描 M/N key）`。
+- 2s 缓存：键 = 目录 `mtime` + 文件数；**新增文件必须失效**，不得跨目录串。
+- 行点击只 `tabs.open(owner)`，**零写 RPC**；owner 不是 `ses_…` → 标「人工」、不可点。
+
 ### 闸门（只拦接单；**不推断语义**）
 - **不写关键词 / 别名 / 子串匹配**：`mission.outOfScope` 与 bid 文案之间没有任何自动比对
   （**0.9.5 的角色行同样只做静态声明**：不要根据消息正文给「应转 decider / 该由 implementer 执行」这类

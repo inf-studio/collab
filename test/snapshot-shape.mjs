@@ -30,7 +30,7 @@
  *   9. 0.4.2: `dist/tui.js` exists, imports only host-provided modules, keeps
  *      the panel/slash names, and the package exports `./tui` with OpenTUI peers.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // B1 (0.9.0 review): the built server module computes the global message log /
@@ -42,6 +42,11 @@ import { join } from 'node:path';
 process.env.COLLAB_MESSAGES_FILE = join(tmpdir(), 'collab-test-messages.jsonl');
 process.env.COLLAB_DB_FILE = join(tmpdir(), 'collab-test.db');
 process.env.COLLAB_CONTRACT_DIR = join(tmpdir(), 'collab-test-contract');
+// 0.9.7 (`11-21-collab-decision-inbox`): the snapshot also carries the open
+// decision ledger — pin it to a **fresh empty** temp dir, so the golden below
+// still proves "nothing open → no key" and the suite never reads the operator's
+// real `~/.config/opencode/collab-decisions/`.
+process.env.COLLAB_DECISIONS_DIR = mkdtempSync(join(tmpdir(), 'collab-test-decisions-'));
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const built = await import(`file://${entry}`);

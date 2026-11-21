@@ -56,9 +56,10 @@ import {
   type PanelTab
 } from '@opencode/plugin/gui';
 import { CollabState } from './rpc.ts';
-import type { ActionReceipt, Snapshot, SnapshotContract, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
+import type { ActionReceipt, Snapshot, SnapshotContract, SnapshotDecision, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 import { contractBadge, contractRows, type ContractRowKey } from './core/contract-view.ts';
+import { decisionRowText } from './core/decision-view.ts';
 import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
 import {
   GRAPH_BADGE_W,
@@ -358,6 +359,16 @@ const CSS = `
 .collab-contract-row{display:flex;align-items:baseline;gap:8px;min-width:0;overflow:hidden;white-space:nowrap;}
 .collab-contract-label{flex:none;width:34px;}
 .collab-contract-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.collab-decisions{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.collab-decisions-head{appearance:none;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:0;margin:0;width:100%;cursor:pointer;border-radius:4px;white-space:nowrap;}
+.collab-decisions-head:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
+.collab-decisions-head:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+.collab-decisions-list{display:flex;flex-direction:column;gap:1px;padding-left:12px;min-width:0;}
+.collab-decision-row{appearance:none;border:0;background:transparent;color:inherit;font:inherit;font-size:11px;text-align:left;padding:0;margin:0;width:100%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-radius:4px;}
+button.collab-decision-row{cursor:pointer;}
+button.collab-decision-row:hover{background:color-mix(in srgb, currentColor 6%, transparent);}
+button.collab-decision-row:focus-visible{outline:1px solid currentColor;outline-offset:1px;}
+.collab-decisions-foot{font-size:10px;opacity:.5;padding-left:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .collab-error{display:flex;flex-direction:column;gap:2px;border-radius:6px;padding:6px 8px;color:#f85149;background:color-mix(in srgb, #f85149 10%, transparent);}
 .collab-error-title{font-weight:600;}
 .collab-empty{opacity:.6;padding:2px 0;}
@@ -728,6 +739,72 @@ function ContractSection(props: { contract?: SnapshotContract }) {
           )}
         </For>
       </div>
+    </Show>
+  );
+}
+
+/**
+ * 0.9.7 (`11-21-collab-decision-inbox`, R3): the board's **decision inbox** —
+ * one line at the top (`待决策 3 ⚠1`), click to expand the read-only list.
+ *
+ * Read-only in the strict sense: expanding writes nothing, and a row click does
+ * exactly one thing — `tabs.open` on the decision's `owner` session, where the
+ * human (or that session's model) answers with `collab_decide answer`. There is
+ * no answer / supersede button here, so the board never becomes a second write
+ * surface. An owner that is not a session (`人工`, or a hand-edited id) is a
+ * plain, non-clickable row with a hover title.
+ *
+ * The list is capped server-side (`DECISION_INBOX_LIMIT`); the headline counts
+ * **every** open decision, from the same derivation the tool prints.
+ */
+function DecisionInbox() {
+  const ctx = usePlugin();
+  const store = storeFor(ctx);
+  const [open, setOpen] = createSignal(false);
+  const block = () => store.state.data?.decisions;
+  const head = (): string => {
+    const data = block();
+    if (!data || data.total <= 0) return '';
+    const scanned = data.truncated
+      ? ctx.t('decision.scanned', { scanned: String(data.scannedKeys), keys: String(data.keys) })
+      : '';
+    return `${ctx.t('decision.head', {
+      count: String(data.total),
+      conflicts: data.conflicts > 0 ? ctx.t('decision.conflict', { count: String(data.conflicts) }) : ''
+    })}${scanned}`;
+  };
+  const clickable = (row: SnapshotDecision): boolean => /^ses_/.test(String(row.owner ?? '').trim());
+  /**
+   * Jump only. The server comes from the snapshot's source (all rows come from
+   * one server), exactly like the left list's row jump. A throw (archived /
+   * vanished session) is a toast — it changes no state and writes nothing.
+   */
+  const jump = (row: SnapshotDecision): void => {
+    const server = store.state.source?.server ?? ctx.sessions.current()?.server?.id;
+    try {
+      if (!server) throw new Error('no server');
+      ctx.tabs.open({ server, id: row.owner }, { focus: true });
+    } catch {
+      ctx.toast.show({ title: ctx.t('decision.jumpFailed'), description: row.owner, variant: 'error' });
+    }
+  };
+  return (
+    <Show when={block() && block()!.total > 0}>
+      <section class="collab-decisions" data-collab-slot="decisions">
+        <button type="button" class="collab-decisions-head" aria-expanded={open()} title={ctx.t('decision.title')} onClick={() => setOpen(value => !value)}>{`${open() ? '▾' : '▸'} ${head()}`}</button>
+        <Show when={open()}>
+          <div class="collab-decisions-list">
+            <For each={block()!.items}>
+              {row => (
+                <Show when={clickable(row)} fallback={<div class={`collab-decision-row collab-muted${row.origin === 'conflict' ? ' collab-tone-warning' : ''}`} title={ctx.t('decision.noSession')}>{decisionRowText(row)}</div>}>
+                  <button type="button" class={`collab-decision-row${row.origin === 'conflict' ? ' collab-tone-warning' : ''}`} title={`${row.owner} · ${ctx.t('decision.jumpHint')}`} onClick={() => jump(row)}>{decisionRowText(row)}</button>
+                </Show>
+              )}
+            </For>
+            <div class="collab-decisions-foot" title={ctx.t('decision.readonly')}>{ctx.t('decision.readonly')}</div>
+          </div>
+        </Show>
+      </section>
     </Show>
   );
 }
@@ -1626,6 +1703,10 @@ function PanelView(props: { session: { id: string } }) {
           </Show>
         }
       >
+        {/* 0.9.7: the decision inbox sits above the split, so it is visible
+            even when the board has no session rows (a decision can outlive the
+            session that opened it). Read-only; a row opens its owner session. */}
+        <DecisionInbox />
         <Show when={groups().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
           <div class={`collab-split${narrow() ? ' collab-split-narrow' : ''}`}>
             <Show when={!narrow() || (!selected() && selectedWorkspace() === null)}>
@@ -1825,6 +1906,14 @@ export default Plugin.define({
       'panel.detailSpawned': 'Spawned ({{count}})',
       'panel.detailEmpty': 'No leases, hand-offs or queue items for this session.',
       'panel.contract': 'Contract',
+      'decision.head': 'Decisions waiting: {{count}}{{conflicts}}',
+      'decision.conflict': ' (⚠{{count}})',
+      'decision.scanned': ' (scanned {{scanned}}/{{keys}} keys)',
+      'decision.title': 'Open decisions — read-only; click a row to open its session',
+      'decision.jumpHint': 'open this session',
+      'decision.jumpFailed': 'Could not open the session',
+      'decision.noSession': 'No session to open for this decision',
+      'decision.readonly': 'read-only · answer in that session',
       'panel.contract.mission': 'Mainline',
       'panel.contract.scope': 'Scope',
       'panel.contract.progress': 'Progress',
@@ -1922,6 +2011,14 @@ export default Plugin.define({
       'panel.detailSpawned': '拉起的会话 ({{count}})',
       'panel.detailEmpty': '该会话没有锁 / 交接 / 队列 / 拉起的会话。',
       'panel.contract': '会话契约',
+      'decision.head': '待决策 {{count}}{{conflicts}}',
+      'decision.conflict': '（⚠{{count}}）',
+      'decision.scanned': '（已扫描 {{scanned}}/{{keys}} key）',
+      'decision.title': '待决策（只读；点一行打开对应会话）',
+      'decision.jumpHint': '打开该会话',
+      'decision.jumpFailed': '无法打开会话',
+      'decision.noSession': '该决策没有对应会话',
+      'decision.readonly': '只读 · 请在该会话里回答',
       'panel.contract.mission': '主线',
       'panel.contract.scope': '边界',
       'panel.contract.progress': '进度',

@@ -47,6 +47,7 @@ import type { Snapshot, SnapshotHandoff, SnapshotLock, SnapshotQueueItem, Snapsh
 import { countsOf, pendingCountOf } from './core/counts.ts';
 import { buildBoard, boardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
 import { contractBadgeText, contractSummary } from './core/contract-view.ts';
+import { decisionSummaryLine } from './core/decision-view.ts';
 import { buildGraph, type GraphEdge, type GraphLevel } from './core/graph.ts';
 
 /** Two seconds: a lease list changes on human timescales, and this is cheap. */
@@ -198,6 +199,13 @@ function normalize(reply: unknown, now: number): Snapshot {
           ...(value.index.reason ? { reason: String(value.index.reason) } : {})
         }
       : undefined;
+  // 0.9.7 (`11-21-collab-decision-inbox`): the board's optional decision block
+  // must survive this normaliser (it is the one place the TUI validates a server
+  // reply). Absent (an older server) = no line, exactly as before.
+  const decisions =
+    value.decisions && typeof value.decisions === 'object' && Array.isArray(value.decisions.items)
+      ? value.decisions
+      : undefined;
   return {
     at: Number(value.at) || now,
     sessions: arrayOf<SnapshotSession>(value.sessions),
@@ -205,6 +213,7 @@ function normalize(reply: unknown, now: number): Snapshot {
     handoffs: arrayOf<SnapshotHandoff>(value.handoffs),
     queue: arrayOf<SnapshotQueueItem>(value.queue),
     ...(index ? { index } : {}),
+    ...(decisions ? { decisions } : {}),
     reachable: true
   };
 }
@@ -740,6 +749,11 @@ function panelLines(
       counts.held || counts.waiting ? 'base' : 'muted'
     );
     push('图例: 持有=真实持有者 · 排队=FIFO 等候 · 待受保护=我交给受保护会话的请求 · 宿主排队=宿主 prompt 队列', 'muted');
+    // 0.9.7 (`11-21-collab-decision-inbox`, R4): one detail line with the open
+    // decision count and the longest wait. No decision → no line at all; a
+    // narrow panel clips (never wraps), like every other row.
+    const inbox = decisionSummaryLine(data.decisions);
+    if (inbox) push(clipCells(inbox, width), 'muted');
   }
   if (state.error) {
     push(`RPC 不可达：${state.error}`, 'danger');

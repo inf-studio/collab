@@ -1237,6 +1237,72 @@ const contractFrameLines = frame => frame.split('\n').map(line => line.trimEnd()
   await narrowCleanup();
 }
 
+/* ---- 9c. 0.9.7: the decision inbox is one detail line (R4) ----------------- */
+
+{
+  const DECISIONS = {
+    total: 3,
+    conflicts: 1,
+    oldestAgeMs: 4.2 * 3_600_000,
+    items: [
+      {
+        key: 't_mwlp0001',
+        id: 'D3',
+        question: 'dev/prod 键空间是否隔离',
+        owner: 'ses_owner_dec01',
+        at: Date.now() - 4.2 * 3_600_000,
+        ageMs: 4.2 * 3_600_000,
+        origin: 'manual'
+      }
+    ]
+  };
+  const withDecisions = harness({ snapshot: { ...SNAPSHOT, decisions: DECISIONS } });
+  const decisionsCleanup = await plugin.setup(withDecisions.context);
+  const wide = await mount(
+    withDecisions.context,
+    () => withDecisions.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_probe' })),
+    { width: 100, height: 40 }
+  );
+  const wideLines = linesOf(wide.frame);
+  expect(
+    'T15 the panel shows `待决策 3（最老 4.2h）` on one line',
+    wideLines.some(line => line.trim() === '待决策 3（最老 4.2h）'),
+    JSON.stringify(wideLines.filter(line => line.includes('待决策')))
+  );
+  await wide.setup.dispose();
+
+  // Narrow: the same line, clipped in cells by the shared renderer — still one
+  // line (a wrapped summary would put the tail on a second row).
+  const narrow = await mount(
+    withDecisions.context,
+    () => withDecisions.slots['session.panel'](panelInput({ width: 24, sessionID: 'ses_probe' })),
+    { width: 24, height: 40 }
+  );
+  const narrowHits = linesOf(narrow.frame).filter(line => line.includes('待决策'));
+  expect(
+    'T15 at width 24 the summary stays one line (no wrapping)',
+    narrowHits.length === 1 && narrowHits[0].trim().startsWith('待决策 3'),
+    JSON.stringify(narrowHits)
+  );
+  await narrow.setup.dispose();
+  await decisionsCleanup();
+
+  const withoutDecisions = harness({ snapshot: SNAPSHOT });
+  const emptyCleanup = await plugin.setup(withoutDecisions.context);
+  const empty = await mount(
+    withoutDecisions.context,
+    () => withoutDecisions.slots['session.panel'](panelInput({ width: 100, sessionID: 'ses_probe' })),
+    { width: 100, height: 40 }
+  );
+  expect(
+    'T15 no open decision → no line at all (nothing invented)',
+    !empty.frame.includes('待决策'),
+    JSON.stringify(linesOf(empty.frame).slice(0, 6))
+  );
+  await empty.setup.dispose();
+  await emptyCleanup();
+}
+
 /* ---- 9b. 0.9.7: an expired suspension is `drift 4.0d`, not `drift <1m` ------ */
 
 // End-to-end for the bug the review found: the injection said 「T1 已挂起 4.0d
@@ -1247,6 +1313,9 @@ const contractFrameLines = frame => frame.split('\n').map(line => line.trimEnd()
 {
   const contractDir = mkdtempSync(join(tmpdir(), 'collab-tui-contract-'));
   process.env.COLLAB_CONTRACT_DIR = contractDir;
+  // 0.9.7: the snapshot also reads the decision ledger — pin it to an empty temp
+  // dir so this end-to-end run never touches the operator's real `~/.config`.
+  process.env.COLLAB_DECISIONS_DIR = mkdtempSync(join(tmpdir(), 'collab-tui-decisions-'));
   const t0 = Date.now();
   writeFileSync(
     join(contractDir, 'ses_ct_susp01.json'),

@@ -2155,6 +2155,204 @@ const CONTRACT = {
   dispose();
 }
 
+/* ---- 15. 0.9.7 decision inbox: top line, read-only list, jump only ---------- */
+
+{
+  const DECISION = {
+    at: 1_800_000_000_000,
+    reachable: true,
+    sessions: [
+      {
+        sid: 'ses_dec_probe',
+        title: 'inbox reader',
+        agent: 'build',
+        busy: false,
+        workspace: '/data/project/collab'
+      },
+      {
+        sid: 'ses_owner_dec01',
+        title: 'decider',
+        agent: 'build',
+        busy: false,
+        workspace: '/data/project/collab'
+      }
+    ],
+    locks: [],
+    handoffs: [],
+    queue: [],
+    decisions: {
+      total: 3,
+      conflicts: 1,
+      oldestAgeMs: 4.2 * 3_600_000,
+      items: [
+        {
+          key: 't_mwlp0001',
+          id: 'D3',
+          question: 'dev/prod 键空间是否隔离',
+          owner: 'ses_owner_dec01',
+          at: 1_800_000_000_000 - 4.2 * 3_600_000,
+          ageMs: 4.2 * 3_600_000,
+          origin: 'manual'
+        },
+        {
+          key: 'b_1bb1aaaa',
+          id: 'D1',
+          question: '客户端增量帧的判据',
+          owner: 'ses_owner_dec01',
+          at: 1_800_000_000_000 - 1.1 * 3_600_000,
+          ageMs: 1.1 * 3_600_000,
+          origin: 'conflict',
+          ttlLeftMs: 22.9 * 3_600_000
+        },
+        {
+          key: 't_mwnm0002',
+          id: 'D2',
+          question: '是否回退前缀隔离',
+          owner: 'human-reviewer',
+          at: 1_800_000_000_000 - 18 * 60_000,
+          ageMs: 18 * 60_000,
+          origin: 'manual'
+        }
+      ]
+    }
+  };
+  // Every write method is recorded: the inbox must never call one (design §4.1).
+  const writes = [];
+  const client = {
+    rpc: () => ({
+      snapshot: async () => DECISION,
+      escalate: async () => writes.push('escalate'),
+      freeze: async () => writes.push('freeze'),
+      unfreeze: async () => writes.push('unfreeze'),
+      archive: async () => writes.push('archive')
+    })
+  };
+  const SESSION = serverSession('ses_dec_probe', 'srv-decisions', client);
+  const h = harness(SESSION, { locale: 'zh', client });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SESSION);
+  const text = () => el?.textContent ?? '';
+  const byClass = name => findIn(el, node => String(node.className).includes(name));
+
+  expect(
+    'PN15 the board top line counts the open decisions and marks conflicts',
+    text().includes('待决策 3（⚠1）'),
+    JSON.stringify(text().slice(0, 160))
+  );
+  expect(
+    'PN15 the list is folded until the line is clicked (no rows yet)',
+    !text().includes('#D3') && !text().includes('#D1'),
+    JSON.stringify(text())
+  );
+
+  const head = byClass('collab-decisions-head');
+  expect('PN15 the top line is a real button', Boolean(head) && head.tagName === 'button', head?.tagName);
+  fireClick(head);
+  await sleep(30);
+
+  const rowOf = marker =>
+    findIn(el, node => String(node.className).includes('collab-decision-row') && node.textContent.includes(marker));
+  const manualRow = rowOf('#D3');
+  const conflictRow = rowOf('#D1');
+  const humanRow = rowOf('#D2');
+  expect(
+    'PN15 the list renders all three rows, conflict tone + TTL included',
+    Boolean(manualRow) &&
+      Boolean(conflictRow) &&
+      Boolean(humanRow) &&
+      text().includes('dev/prod 键空间是否隔离') &&
+      text().includes('⚠冲突（TTL 剩 22.9h）') &&
+      String(conflictRow?.className).includes('collab-tone-warning'),
+    JSON.stringify(text().slice(0, 300))
+  );
+  expect(
+    'PN15 the owner is shortened, a non-session owner reads 人工',
+    text().includes('等 ses_owne…') && text().includes('等 人工'),
+    JSON.stringify(text().slice(0, 300))
+  );
+  expect(
+    'PN15 a decision without a session is not clickable (a div, with a hover title)',
+    humanRow?.tagName === 'div' && humanRow?.attrs?.title === '该决策没有对应会话',
+    JSON.stringify({ tag: humanRow?.tagName, title: humanRow?.attrs?.title })
+  );
+  fireClick(humanRow);
+  expect('PN15 clicking 人工 does nothing (no tab, no write)', h.opened.length === 0 && writes.length === 0, JSON.stringify(h.opened));
+
+  expect('PN15 a session decision is a clickable button', manualRow?.tagName === 'button', manualRow?.tagName);
+  fireClick(manualRow);
+  expect(
+    'PN15 clicking it only opens that session tab (tabs.open, focus)',
+    h.opened.length === 1 &&
+      h.opened[0].id === 'ses_owner_dec01' &&
+      h.opened[0].server === 'srv-decisions' &&
+      h.opened[0].focus === true,
+    JSON.stringify(h.opened)
+  );
+  expect('PN15 the whole interaction wrote nothing (no RPC write method)', writes.length === 0, JSON.stringify(writes));
+  expect(
+    'PN15 the list is read-only: no write button inside it',
+    !findIn(el, node => ['answer', 'supersede'].some(word => String(node.textContent ?? '').includes(word))),
+    JSON.stringify(text().slice(0, 300))
+  );
+
+  // A snapshot replaced by the next poll keeps the expanded list (no local reset).
+  fireClick(head);
+  await sleep(30);
+  expect(
+    'PN15 clicking the line again folds the list',
+    !text().includes('#D3'),
+    JSON.stringify(text().slice(0, 160))
+  );
+  dispose();
+}
+
+/* ---- 15b. 0.9.7 review: a bounded scan says 已扫描 M/N, not a fake total ---- */
+
+{
+  const DECISION_TRUNCATED = {
+    at: 1_800_000_000_000,
+    reachable: true,
+    sessions: [
+      { sid: 'ses_dec_probe', title: 'inbox reader', agent: 'build', busy: false, workspace: '/data/project/collab' }
+    ],
+    locks: [],
+    handoffs: [],
+    queue: [],
+    decisions: {
+      total: 3,
+      conflicts: 1,
+      oldestAgeMs: 4.2 * 3_600_000,
+      truncated: true,
+      keys: 5200,
+      scannedKeys: 2000,
+      items: [
+        {
+          key: 't_mwlp0001',
+          id: 'D3',
+          question: 'dev/prod 键空间是否隔离',
+          owner: 'ses_owner_dec01',
+          at: 1_800_000_000_000 - 4.2 * 3_600_000,
+          ageMs: 4.2 * 3_600_000,
+          origin: 'manual'
+        }
+      ]
+    }
+  };
+  const client = { rpc: () => ({ snapshot: async () => DECISION_TRUNCATED }) };
+  const SESSION = serverSession('ses_dec_probe', 'srv-decisions', client);
+  const h = harness(SESSION, { locale: 'zh', client });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SESSION);
+  expect(
+    'PN15b a bounded ledger scan says 已扫描 M/N in the board count',
+    (el?.textContent ?? '').includes('待决策 3（⚠1）（已扫描 2000/5200 key）'),
+    JSON.stringify((el?.textContent ?? '').slice(0, 120))
+  );
+  dispose();
+}
+
 const failed = checks.filter(check => !check.ok);
 console.log(`\n=== ${checks.length - failed.length}/${checks.length} panel checks passed`);
 if (failed.length) {

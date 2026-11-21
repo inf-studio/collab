@@ -75,6 +75,9 @@ const ownerQueueDir = join(root, 'owner-queue');
 process.env.COLLAB_MESSAGES_FILE = messagesFile;
 process.env.COLLAB_DB_FILE = dbPath;
 process.env.COLLAB_CONTRACT_DIR = join(root, 'contract');
+// 0.9.7 (`11-21-collab-decision-inbox`): `buildSnapshot` also scans the decision
+// ledger — pin it to an empty temp dir (hermetic; never the operator's real one).
+process.env.COLLAB_DECISIONS_DIR = join(root, 'decisions');
 process.env.COLLAB_BROADCAST_DIR = broadcastDir;
 process.env.COLLAB_THREAD_INDEX_FILE = threadIndexFile;
 process.env.COLLAB_CONFIG = configFile;
@@ -159,8 +162,8 @@ const dispose = await plugin.setup(host);
 const byName = name => registered.find(definition => definition.name === name);
 const indexDefinition = byName('collab_index');
 expect(
-  '工具面 23 → 26：collab_index 只注册一次，0.9.1 的三个工具也在',
-  registered.length === 28 && Boolean(indexDefinition),
+  '工具面 28 → 29：collab_index 只注册一次，0.9.1 的契约工具 / 0.9.7 的决策清单都在',
+  registered.length === 29 && Boolean(indexDefinition),
   `${registered.length} tool(s)`
 );expect(
   'collab_index 的 schema 只有 rebuild | backfill | stats | metrics 与 confirm/sinceDays/limit',

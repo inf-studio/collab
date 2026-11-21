@@ -1,6 +1,6 @@
 ---
 name: collab
-description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十八个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork）、决策账本与角色（collab_decide：open/answer/supersede/list，key 是 threadID 或 bid，owner 独占 answer、提问方为当事人，同问去重、手工 open ≤3（conflict 单独配额），conflict 自动开决策且该 thread/bid 只读（任一方可 supersede，24h 自动解除），静态 [role:…] 并入 [mission]、[decide] 一行，decision:<key>#D# 单一 resolver）、投递节奏（0.9.6：非紧急消息 2 分钟窗口合并为一条 items[]，escalate/blocked/protected/交接单/force 直通，无增量不发只记 noopCount，定时器 unref + context 每轮补投），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
+description: 当需要在 OpenCode 会话之间派活或交接时使用——同一工作区的多个会话互相接手，或跨工作区（如 muke-interface / std-ui）把提案交给对端实施。覆盖 collab_* 二十九个工具的选路、交接包模板、匹配分与原子领取、会话级权限补丁与 agent 升降级、protected 护栏、送达确认（admitted/seen）与受限重发、即时状态回执（collab_status，只读非阻塞）、thread 聚合（collab_threads，列一个 target 的全部未闭环 thread）、加急催办（collab_escalate，delivery=steer）、临时冻结（collab_freeze，会话/工作区/一单，可逆可过期）、看板动作行（加急/冻结/解冻/归档四个需确认的写动作 + append-only 审计）、自动感知提示（context 尾部一行「本工作区候选 N · 其它工作区候选 M」+ 承接方两行协议头）、交接对接人（origin，转发链不再丢链头）、结构化 BLOCKED（blocked：需要对方/已排除/最小判别）、契约决策记录（collab_decisions：退出码/事件型/断言口径这类决定写进交接记录，只读可拉取）、闭环后追加（collab_followup + 提案文件）、受保护目标请求队列（collab_request_owner）、spawn 会话自动归档（collab_archive，归档≠删除）、缺陷自上报与挂起监控（collab_report / collab-triage）、会话契约（collab_mission / collab_progress / collab_todo：主线锚、证据门槛、挂起必须给 wakeWhen）与每轮四段注入（[mission]/[todo]/[drift]/[progress]，≤12 行、不写 injected[]），漂移三选一（resume/block/done）与挂起唤醒（wakeWhen reply/decision/time/manual，24h 兜底转 drifted），接单前模型表态（collab_accept 的 scopeCheck + 审计）、事实账本（collab_fact：settle/retract/invalidate/list，证据等级 measured/inferred/relayed/unknown，三态 fresh/stale/conflict，[settled]/[retracted]/[未标注]/[基线未知]/[stale]/[glossary] 注入，在途 todo 标 staleWork）、决策账本与角色（collab_decide：open/answer/supersede/list，key 是 threadID 或 bid，owner 独占 answer、提问方为当事人，同问去重、手工 open ≤3（conflict 单独配额），conflict 自动开决策且该 thread/bid 只读（任一方可 supersede，24h 自动解除），静态 [role:…] 并入 [mission]、[decide] 一行，decision:<key>#D# 单一 resolver）、人类决策清单（collab_decision_inbox：只读聚合全部 open 决策、最老在上、冲突 TTL，看板顶部计数，点行只跳会话）、投递节奏（0.9.6：非紧急消息 2 分钟窗口合并为一条 items[]，escalate/blocked/protected/交接单/force 直通，无增量不发只记 noopCount，定时器 unref + context 每轮补投），以及常见排障（npm scope 大小写、location.directory、allowWrite、热重载、重复插件 id）。
 ---
 
 # collab：会话间派活与交接
@@ -47,6 +47,7 @@ description: 当需要在 OpenCode 会话之间派活或交接时使用——同
 | `collab_fact` | `action`(`settle`/`retract`/`invalidate`/`list`), `claim?`, `evidence?`, `grade?`, `factIds?`, `id?`, `reason?`, `since?`, `includeAll?`, `limit?`, `confirm` | **事实账本（0.9.4，工作区级）**：`settle` 登记 `F1`…（claim/evidence/grade 必填；relayed/unknown 不得被引用为证据）；`retract` 需要 reason 并按日计数；`invalidate` 作废一条及其显式派生的引用或一个 epoch（epoch+1，工作区级传播，在途 todo 标 `staleWork` 且不关闭）；`list` 只读 | 写工作区账本 |
 
 | `collab_decide` | `action`(`open`/`answer`/`supersede`/`list`), `key?`/`threadID?`/`bid?`, `question?`, `options?`, `owner?`, `id?`, `answer?`, `reason?`, `confirm` | **决策账本（0.9.5）**：`open`（key = threadID **或** bid，`options≥2`；同问去重、同 key 手工 open ≤3、conflict 单独配额；owner 缺省 = 契约 decider → 发单方）；`answer` **只有 owner**，已回答需先 `supersede`；`supersede` 提问方 / owner / 该 thread 的参与方都能做（记 `by`+`reason`）；`list` 只读。提问方是当事人（看得见 `[decide]`、可撤回）；双方下一轮注入一行 `[decide]`，`decision:<key>#D#` 作为 evidence | 写本地决策账本 |
+| `collab_decision_inbox` | `owner?`（只看等某会话的）, `limit?`（默认 20） | **人类决策清单（0.9.7，只读）**：跨 key 聚合全部 open 决策，按等待时长升序；行 = `<key>#<D#> · 等 <owner\|人工> · <age> · [⚠冲突（TTL 剩 …）·] <question≤60>`；末尾「共 N 条 · 其中冲突 M 条」，超 limit 给「还有 N 条」；**全量扫描**（`DECISION_INBOX_SCAN_LIMIT` 默认 2000，超过时「已扫描 M/N」+ 显式告警，不冒充「共 N 条」；2s 缓存）；**零写入**（不 answer/supersede/投递/排队，账本不存在不建目录）。看板顶部 `待决策 N（⚠M）`，点行只 `tabs.open(owner)` | 只读 |
 
 ### 事实账本（0.9.4）：撤回要能传播
 
@@ -594,7 +595,32 @@ collab_decide { action:"list", key:"t_mwoy…" }
 - **逃生口**：该 thread 的任一方都能 `supersede` 解除；**24h 未回答自动作废**（`by=system`），不会永久只读；
 - 不要在 thread 里继续争论——那正是这个开关要停掉的行为；有分歧就 `answer` 或 `supersede` 后重开。
 
-## 一点十七、投递节奏与增量（0.9.6）
+## 一点十七、人类决策清单（`collab_decision_inbox`，0.9.7，只读）
+
+决策账本只有当事人看得见（`[decide]` 注入 + `collab_decide list {key}`）。人类问「现在有什么在等我」时，
+不需要逐个会话翻：
+
+```text
+collab_decision_inbox { }
+collab_decision_inbox { owner:"ses_e176…" }   # 只看等这个会话的
+```
+
+输出（最老在上）：
+
+```text
+待决策 3 条（冲突 1） · 最老 4.2h
+  t_mwlp…#D3 · 等 ses_e176… · 4.2h · dev/prod 键空间是否隔离
+  b_1bb1…#D1 · 等 ses_edc3… · 1.1h · ⚠冲突（TTL 剩 22.9h） · 客户端增量帧的判据
+  t_mwnm…#D2 · 等 人工 · 18m · 是否回退前缀隔离
+共 3 条 · 其中冲突 1 条
+```
+
+- **只读**：不 answer / supersede / 投递 / 排队；账本不存在就回「无待决策」，**不会创建目录**。
+- **回答仍在会话里**：看板点一行只 `tabs.open(该决策 owner)`；进去用 `collab_decide { action:"answer" }`。
+- 冲突行的 TTL 是 24h 自动作废的剩余时间；已过期不显示 TTL（但也不会被清单隐藏）。
+- owner 不是 `ses_…`（例如人工）→ 显示 `人工`，看板里不可点。
+
+## 一点十八、投递节奏与增量（0.9.6）
 
 消息不是越勤越好：实测 p50 间隔 20s、最长 151 条连续（<2min），69% 是完整状态镜像，**纯短回执 0 条**。
 所以从 0.9.6 起有两条规则 —— **2 分钟合并** 与 **无增量不发**。

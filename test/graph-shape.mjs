@@ -35,6 +35,9 @@ import { join, resolve } from 'node:path';
 process.env.COLLAB_MESSAGES_FILE = join(tmpdir(), 'collab-test-messages.jsonl');
 process.env.COLLAB_DB_FILE = join(tmpdir(), 'collab-test.db');
 process.env.COLLAB_CONTRACT_DIR = join(tmpdir(), 'collab-test-contract');
+// 0.9.7 (`11-21-collab-decision-inbox`): `buildSnapshot` also reads the decision
+// ledger — pin it so this suite never scans the operator's real `~/.config`.
+process.env.COLLAB_DECISIONS_DIR = mkdtempSync(join(tmpdir(), 'collab-graph-decisions-'));
 
 const entry = resolve(import.meta.dirname, '../dist/index.js');
 const built = await import(`file://${entry}`);

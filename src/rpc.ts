@@ -100,6 +100,57 @@ export interface SnapshotContract {
   drift?: SnapshotContractDrift;
 }
 
+/**
+ * 0.9.7 (`11-21-collab-decision-inbox`): one **open** decision, as the board
+ * reads it. Display only — a projection of `collab-decisions/<key>.json`,
+ * derived server-side by `core/decision-inbox.ts` so the GUI / TUI bundles never
+ * touch the filesystem.
+ */
+export interface SnapshotDecision {
+  /** The ledger subject: a thread id (`t_…`) or a hand-off id (`b_…`). */
+  key: string;
+  /** `D1`, `D2`, … — unique **per key**, never reused. */
+  id: string;
+  question: string;
+  /** The session that may answer (`ses_…`); anything else reads as 人工. */
+  owner: string;
+  /** Epoch ms of the open; `0` when the ledger row had no usable `at`. */
+  at: number;
+  /** `now − at`, clamped at 0. */
+  ageMs: number;
+  /** `conflict` entries are the ones a thread is waiting on (24h TTL). */
+  origin: 'manual' | 'conflict';
+  /** Conflict only: ms left before the automatic supersede; absent when expired. */
+  ttlLeftMs?: number;
+  /** `at` was missing / unusable — the row prints `?` instead of an age. */
+  unknownAt?: boolean;
+}
+
+/**
+ * The board's decision inbox. **Optional and absent when nothing is open** — the
+ * 0.9.6 payload stays byte-for-byte identical (a machine that never used the
+ * decision ledger has no `decisions` key), which is the same compatibility rule
+ * the optional `contract` block follows.
+ */
+export interface SnapshotDecisions {
+  /** Open decisions found in the keys the inbox actually scanned. */
+  total: number;
+  conflicts: number;
+  /** The longest wait, for `最老 4.2h`. */
+  oldestAgeMs: number;
+  /** At most `DECISION_INBOX_LIMIT` rows, oldest first. */
+  items: SnapshotDecision[];
+  /**
+   * The ledger had more keys than `DECISION_INBOX_SCAN_LIMIT`, so `total` /
+   * `items` describe the scanned subset only. Absent = a complete scan.
+   */
+  truncated?: boolean;
+  /** Ledger files present (only when `truncated`). */
+  keys?: number;
+  /** Ledger files read (only when `truncated`). */
+  scannedKeys?: number;
+}
+
 /** One session the host lists, as the panel groups it. */
 export interface SnapshotSession {
   /** OpenCode session id (`ses_…`) — the same id the tool context reports. */
@@ -265,6 +316,12 @@ export interface Snapshot {
    * so a degraded index never hides a lease or a hand-off.
    */
   index?: SnapshotIndex;
+  /**
+   * 0.9.7 (`11-21-collab-decision-inbox`): the open decision ledger, oldest
+   * first. Optional and **absent when nothing is open** — an older server omits
+   * it, and a machine with an empty ledger answers exactly like 0.9.6.
+   */
+  decisions?: SnapshotDecisions;
   /** The server answered. A rejected call never produces a snapshot at all. */
   reachable: true;
 }
@@ -413,7 +470,38 @@ export const CollabState = {
             )
           },
           // 0.9.0 (R4): optional — an older server omits it (no marker).
-          index: obj({ available: bool, reason: str }, ['available'])
+          index: obj({ available: bool, reason: str }, ['available']),
+          // 0.9.7 (`11-21-collab-decision-inbox`): optional — absent when the
+          // ledger has no open decision (an older server omits it too).
+          decisions: obj(
+            {
+              total: num,
+              conflicts: num,
+              oldestAgeMs: num,
+              items: {
+                type: 'array',
+                items: obj(
+                  {
+                    key: str,
+                    id: str,
+                    question: str,
+                    owner: str,
+                    at: num,
+                    ageMs: num,
+                    origin: str,
+                    ttlLeftMs: num,
+                    unknownAt: bool
+                  },
+                  ['key', 'id', 'question', 'owner', 'at', 'ageMs', 'origin']
+                )
+              },
+              // 0.9.7 (review): present only when the scan was bounded.
+              truncated: bool,
+              keys: num,
+              scannedKeys: num
+            },
+            ['total', 'conflicts', 'oldestAgeMs', 'items']
+          )
         },
         ['at', 'reachable', 'sessions', 'locks', 'handoffs', 'queue']
       )

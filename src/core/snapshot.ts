@@ -26,6 +26,7 @@ import type {
 } from '../rpc.ts';
 import { asObject, mtime, sessionState, truncate, withTimeout } from '../util.ts';
 import { contractFile, readContract, TODO_DONE_STATUSES, type Contract } from './contract.ts';
+import { snapshotDecisions } from './decision-inbox.ts';
 import { driftUnresolved, evaluate, type DriftEvaluation } from './drift.ts';
 import { freezeFor } from './freeze.ts';
 import { stateOf } from './locks.ts';
@@ -453,7 +454,22 @@ export async function buildSnapshot(source: SnapshotSource, input?: unknown, now
         .sort((left, right) => right.ageMs - left.ageMs || left.queueId.localeCompare(right.queueId))
     : [];
 
-  return { at: now, sessions, locks: leases, handoffs, queue, ...(index ? { index } : {}), reachable: true };
+  // 0.9.7 (`11-21-collab-decision-inbox`): the machine's open decisions, oldest
+  // first. Read-only (the ledger reader never creates the directory), bounded
+  // to `DECISION_INBOX_LIMIT` rows, and **omitted entirely when nothing is
+  // open** so a 0.9.6 payload is byte-for-byte unchanged.
+  const decisions = snapshotDecisions(now);
+
+  return {
+    at: now,
+    sessions,
+    locks: leases,
+    handoffs,
+    queue,
+    ...(index ? { index } : {}),
+    ...(decisions ? { decisions } : {}),
+    reachable: true
+  };
 }
 
 export function createSnapshotReader(source: SnapshotSource): SnapshotReader {

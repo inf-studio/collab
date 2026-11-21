@@ -172,7 +172,7 @@ const grantFileOf = sid => join(process.env.COLLAB_GRANT_DIR, `${sid}.json`);
 
 // --- 1. the tool surface is complete and unchanged
 expect(
-  'R8 the package registers the twenty-eight collab_* tools + collab_report',
+  'R8 the package registers the twenty-nine collab_* tools + collab_report',
   readonlyHost.tools.map(definition => definition.name).join(',') ===
     [
       'collab_list',
@@ -202,7 +202,8 @@ expect(
       'collab_progress',
       'collab_todo',
       'collab_fact',
-      'collab_decide'
+      'collab_decide',
+      'collab_decision_inbox'
     ].join(','),
   readonlyHost.tools.map(definition => definition.name).join(',')
 );

@@ -3,6 +3,7 @@ import { acceptTool } from './accept.ts';
 import { archiveTool } from './archive.ts';
 import { broadcastTool } from './broadcast.ts';
 import { decideTool } from './decide.ts';
+import { decisionInboxTool } from './decision-inbox.ts';
 import { decisionsTool } from './decisions.ts';
 import { followupTool } from './followup.ts';
 import { grantTool } from './grant.ts';
@@ -77,7 +78,10 @@ export function registerTools(kit: ToolKit): ToolDefinition[] {
     factTool(kit),
     // 0.9.5 (`11-20-collab-decide`): the decision ledger, 27 → 28.
     // `open` / `answer` / `supersede` / `list` — thread **and** hand-off paths.
-    decideTool(kit)
+    decideTool(kit),
+    // 0.9.7 (`11-21-collab-decision-inbox`): the read-only human inbox, 28 → 29.
+    // Every open decision, oldest first; writes / delivers nothing.
+    decisionInboxTool(kit)
   ];
   return definitions.map(definition =>
     definition.name === 'collab_report'

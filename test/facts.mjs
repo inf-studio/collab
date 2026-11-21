@@ -11,7 +11,7 @@
  * no `~/.config/opencode/collab-*`. `compare` is clock/git free (an explicit
  * local state), so the fresh/stale/conflict cases need no repository.
  *
- *   1. surface: 28 tools, `collab_fact` once, four actions, version 0.9.6
+ *   1. surface: 29 tools, `collab_fact` once, four actions, version 0.9.6
  *   2. settle + list: sequential ids, active visible, grade required,
  *      explicit `unknown` is listable as `grade=unknown`
  *   3. `relayed` / `unknown` facts are refused as evidence (by text and by
@@ -202,9 +202,9 @@ const seedInbox = (sid, messages) =>
   });
 
 // ============================================================ 1) surface
-section('1) surface: 28 tools + collab_fact');
+section('1) surface: 29 tools + collab_fact');
 expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
-expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
+expect('29 tools are registered', tools.length === 29, `${tools.length} tools`);
 expect(
   'collab_fact is registered exactly once',
   tools.filter(definition => definition.name === 'collab_fact').length === 1,

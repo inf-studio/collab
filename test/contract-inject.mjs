@@ -170,7 +170,7 @@ const blockLines = text => text.split('\n').filter(line => line.trim().length > 
 // ================================================================ 1) surface
 section('1) tool surface + version');
 expect('PLUGIN_VERSION / package.json agree (0.9.6)', internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6', `${internals.PLUGIN_VERSION} vs ${pkg.version}`);
-expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
+expect('29 tools are registered', tools.length === 29, `${tools.length} tools`);
 for (const name of ['collab_mission', 'collab_progress', 'collab_todo']) {
   const registrations = tools.filter(definition => definition.name === name).length;
   expect(`${name} is registered exactly once`, registrations === 1, `${registrations} registration(s)`);

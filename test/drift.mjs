@@ -26,7 +26,7 @@
  *  13. a future `time` deadline outranks the 24h fallback
  *  14. mainline close / progress light → lastAdvancedAt moves, counter clears
  *  15. truncation branch: full sections + lowered budget → `[progress]` dropped
- *  16. surface: 28 tools, mission enum grew, legacy string wakeWhen still works
+ *  16. surface: 29 tools, mission enum grew, legacy string wakeWhen still works
  *  17. review A: advance once, then 5 quiet rounds → `[drift]` on the **5th**
  *      quiet round (the counter must not lag after an advance)
  *  18. review B: block → 25h → `[drift]` → resume → the next round is quiet
@@ -556,8 +556,8 @@ expect(
 );
 
 // ============================================ 16) surface + pure functions
-section('16) surface now 28 tools (facts ledger) + pure wake/evaluate helpers');
-expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
+section('16) surface now 29 tools (decision inbox) + pure wake/evaluate helpers');
+expect('29 tools are registered', tools.length === 29, `${tools.length} tools`);
 expect(
   'collab_mission grew three actions, collab_todo kept its five',
   JSON.stringify(tool('collab_mission').input.properties.action.enum) ===

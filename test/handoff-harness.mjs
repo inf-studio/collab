@@ -276,6 +276,9 @@ const dbFile = join(dir, 'collab.db');
 process.env.COLLAB_DB_FILE = dbFile;
 // 0.9.1: the context hook reads/stamps the session contract — pin it too.
 process.env.COLLAB_CONTRACT_DIR = join(dir, 'contract');
+// 0.9.7 (`11-21-collab-decision-inbox`): `buildSnapshot` also scans the decision
+// ledger — pin it to an empty temp dir (hermetic; never the operator's real one).
+process.env.COLLAB_DECISIONS_DIR = join(dir, 'decisions');
 
 // The broadcast store is a global directory; point it at a temp dir so the
 // harness never touches ~/.config/opencode/collab-broadcast/.
@@ -9303,8 +9306,8 @@ await expectFail(
 
 // --- S98n: registered exactly once; the description states the contract.
 expect(
-  'S98 collab_freeze is registered exactly once (… → 23 → 28 tools)',
-  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 28,
+  'S98 collab_freeze is registered exactly once (… → 23 → 29 tools)',
+  tools.filter(definition => definition.name === 'collab_freeze').length === 1 && tools.length === 29,
   `${tools.filter(definition => definition.name === 'collab_freeze').length} registration(s) / ${tools.length} tool(s)`
 );
 const s98Desc = String(tool('collab_freeze').description);
@@ -10873,8 +10876,8 @@ expect(
 
 // --- S102j: registered exactly once; the surface is 21 tools; description states the contract.
 expect(
-  'S102 collab_threads is registered exactly once and the surface is 26 collab_* tools',
-  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 28,
+  'S102 collab_threads is registered exactly once and the surface is 29 collab_* tools',
+  tools.filter(definition => definition.name === 'collab_threads').length === 1 && tools.length === 29,
   `${tools.length} tools / ${tools.filter(definition => definition.name === 'collab_threads').length} collab_threads`
 );
 const s102Desc = String(tool('collab_threads').description);
@@ -11360,7 +11363,7 @@ expect(
     /≤20 条/.test(String(s105SendSchema.properties.excluded.description)) &&
     /≤10 条/.test(String(s105SendSchema.properties.need.description)) &&
     /≤200 字/.test(String(s105SendSchema.properties.minimalTest.description)) &&
-    tools.length === 28,
+    tools.length === 29,
   `${tools.length} tools / ${JSON.stringify(Object.keys(s105SendSchema?.properties ?? {}))}`
 );
 

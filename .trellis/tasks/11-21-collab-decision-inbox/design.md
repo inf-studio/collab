@@ -60,7 +60,13 @@ collab_decision_inbox { owner?: "ses_…", limit?: number /* 默认 20 */ }
 
 - 新工具注册后工具数 29；既有 28 个工具输出不变；
 - 账本不存在/损坏 → 空集，不建目录；
-- 回滚：`git restore -- src/tools/index.ts src/tools/decision-inbox.ts src/gui.tsx src/tui.tsx` + `rm src/core/decision-inbox.ts`。
+- 聚合**不复用** `readAllDecisions` 的 500 截断（它保留最新 500 个 key，会丢掉最老待办并低报 total）；
+  显式 `DECISION_INBOX_SCAN_LIMIT`（默认 2000），超过时 header 写「已扫描 M/N」+ 一行
+  `⚠账本 N 个 key，仅扫描 M 个（可能漏更老待办）`，不得把扫描数写成「共 N 条」；扫描结果按
+  目录 mtime + 文件数缓存 2s（看板轮询周期）。
+- 回滚：`git restore -- src/rpc.ts src/core/snapshot.ts src/constants.ts src/index.ts src/tools/index.ts src/gui.tsx src/tui.tsx`
+  + `rm src/core/decision-inbox.ts src/core/decision-view.ts src/tools/decision-inbox.ts`。
+  （`src/index.ts` 必须一起恢复：它 import 了被删模块，否则 `tsc` 失败。）
 
 ## 7. 测试
 

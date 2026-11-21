@@ -11,7 +11,7 @@
  * no `~/.config/opencode/collab-*` (every global path is pinned *before* the
  * import because the constants are read once at module load).
  *
- *   1. surface: 28 tools, `collab_decide` once, four actions, 0.9.5
+ *   1. surface: 29 tools, `collab_decide` once, four actions, 0.9.5
  *   2. thread path: open → list sees it (no hand-off record involved)
  *   3. bid path: open works too, and the two keys never share a `D#` namespace
  *   4. only the owner may answer (a non-owner is refused, nothing written)
@@ -187,13 +187,13 @@ const THREAD = 't_decide_thread';
 const THREAD_REMOTE = 't_decide_remote';
 
 // ============================================================ 1) surface
-section('1) surface: 28 tools + collab_decide');
+section('1) surface: 29 tools + collab_decide');
 expect(
   'PLUGIN_VERSION / package.json agree (0.9.6)',
   internals.PLUGIN_VERSION === pkg.version && pkg.version === '0.9.6',
   `${internals.PLUGIN_VERSION} vs ${pkg.version}`
 );
-expect('28 tools are registered', tools.length === 28, `${tools.length} tools`);
+expect('29 tools are registered', tools.length === 29, `${tools.length} tools`);
 expect(
   'collab_decide is registered exactly once',
   tools.filter(definition => definition.name === 'collab_decide').length === 1,
