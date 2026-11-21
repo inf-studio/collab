@@ -42,6 +42,15 @@ collab_decision_inbox { owner?: "ses_…", limit?: number /* 默认 20 */ }
 - 列表行：`#D3 · 等 <会话短名> · 4.2h · <问题>`；冲突行用 `warn` tone；
 - **不提供 answer/supersede 按钮**（写动作留后续）。
 
+### 4.1 点击行为：只跳会话（零写入）
+
+- 整行点击 → `tabs.open` 跳到该决策的 `owner` 会话（复用 0.8.1 的行内跳转能力）；
+- `owner` 缺失或不是 `ses_…`（例如「人工」）→ 行不可点，hover 提示「该决策没有对应会话」；
+- **不投递、不排队、不写任何文件**：看板不成为第二个写入面；
+- 跳转失败（会话已归档/不存在）→ toast，不改变任何状态。
+
+> 人类在那个会话里自己回答；会话侧的 `[decide]` 注入与 `collab_decide answer` 仍由会话模型执行。
+
 ## 5. TUI
 
 - 详情区追加一行：`待决策 3（最老 4.2h）`；无 → 不显示；
@@ -64,6 +73,7 @@ collab_decision_inbox { owner?: "ses_…", limit?: number /* 默认 20 */ }
 | 冲突 TTL | 剩 19.8h / 过期不显示 |
 | limit | 20 条上限 + 「还有 N 条」 |
 | 只读 | 目录 mtime 不变 |
+| 点击跳转 | 触发 `tabs.open(ownerSid)`；`owner` 缺失时不可点；全程零写入 |
 
 变异：
 1. 排序改成 `at` 降序 → 断言必红；
