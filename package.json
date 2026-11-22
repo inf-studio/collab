@@ -1,6 +1,6 @@
 {
   "name": "@inf-studio/collab",
-  "version": "0.10.0-rc.1",
+  "version": "0.10.0-rc.2",
   "description": "Cross-session collaboration for OpenCode: twenty-nine native collab_* tools, resource leases (exclusive/shared + TTL + FIFO queue), a thread/inbox protocol, delivery acknowledgement (admitted/seen), bounded resend, a cross-workspace hand-off chain (broadcast / score / atomic claim / receipt), a pull-only review queue for protected sessions, automatic (reversible) archival of spawned sessions, a workspace facts ledger (settle / retract / invalidate, evidence grades, three-state freshness, pair glossary), a decision ledger (open / answer / supersede, owner-exclusive answers, conflict escalation, requester/implementer/decider/verifier roles), a read-only human decision inbox (every open decision, oldest wait first, conflict TTL), a rebuildable SQLite projection of the message history, and read-only status views for the desktop sidebar and the TUI (experimental).",
   "keywords": [
     "collab",

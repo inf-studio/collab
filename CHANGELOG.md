@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.10.0-rc.2] - 2026-11-22
+
+> **预发布（dist-tag `next`）**：在 rc.1 基础上带 5 条遗留修复 + `metrics` 三计数（raw/kept/delivered）。
+> `raw ≥ kept ≥ msg_count` 在全量日成立；**升级当天是部分计数**（历史不回填）。
+> 正式版 `0.10.0` 按计划观察后发布，`latest` 仍指 `0.9.6`。
+
 > **metrics 三计数**（`11-22-collab-metrics-dual`）：`metrics` 从「只记交付数」扩成
 > `raw_count` / `kept_count` / `msg_count` 三个并列计数（同一管道内 `raw ≥ kept ≥ msg_count`，
 > `raw = kept + noop`），工具面仍 **29**，不新增工具。行格式多两列（旧行 NULL 显示 `-`）。
