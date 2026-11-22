@@ -346,10 +346,10 @@ export async function recordMessage(envelope: MessageEnvelope, options: StoreOpt
  *
  * A partial row is a **merge**, not a replace (`COALESCE(excluded.x, metrics.x)`):
  * the pacing path owns `msg_count` / `noop_count` / `late_count` /
- * `median_gap_ms`, while the facts path writes `retract_count`. Two writers on
- * the same day must not erase each other's fields — an omitted field keeps what
- * is stored. Never throws: a failed metrics write is a log line, and the
- * projection is rebuildable anyway.
+ * `raw_count` / `kept_count` / `median_gap_ms`, while the facts path writes
+ * `retract_count`. Two writers on the same day must not erase each other's
+ * fields — an omitted field keeps what is stored. Never throws: a failed
+ * metrics write is a log line, and the projection is rebuildable anyway.
  */
 export interface MetricsRowInput {
   day: string;
@@ -373,6 +373,14 @@ export interface MetricsRowInput {
    */
   noop_count?: number | null;
   late_count?: number | null;
+  /**
+   * 0.10.x (`11-22-collab-metrics-dual`): `raw_count` / `kept_count`, same
+   * `null` = unknown rule as `noop_count`. Written by both the delivery path
+   * (today, from the pacing counters) and `rebuild` (every day, from
+   * `counters[day]`; a day without them stays NULL).
+   */
+  raw_count?: number | null;
+  kept_count?: number | null;
 }
 
 const METRIC_FIELDS = [
@@ -383,7 +391,9 @@ const METRIC_FIELDS = [
   'drift_ms',
   'median_gap_ms',
   'noop_count',
-  'late_count'
+  'late_count',
+  'raw_count',
+  'kept_count'
 ] as const;
 
 /**
@@ -849,12 +859,14 @@ export async function indexMetrics(options: StoreOptions & { limit?: number } = 
     const rows = (
       handle
         .prepare(
-          'SELECT day, msg_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day DESC LIMIT ?'
+          'SELECT day, msg_count, raw_count, kept_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day DESC LIMIT ?'
         )
         .all(limit) as Record<string, any>[]
     ).map(row => ({
       day: String(row.day),
       msgCount: nullableCount(row.msg_count),
+      rawCount: nullableCount(row.raw_count),
+      keptCount: nullableCount(row.kept_count),
       noopCount: nullableCount(row.noop_count),
       lateCount: nullableCount(row.late_count),
       medianGapMs: nullableCount(row.median_gap_ms)

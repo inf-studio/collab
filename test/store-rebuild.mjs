@@ -925,9 +925,11 @@ appendMetricsMessage('msg_metrics_3', mDay1 + 40_000);
 appendMetricsMessage('msg_metrics_4', mDay2);
 appendMetricsMessage('msg_metrics_5', mDay2 + 5_000);
 appendMetricsMessage('msg_metrics_6', mDay3);
+// 0.10.x (`11-22-collab-metrics-dual`): days 1–2 carry the three delivery
+// counts (raw ≥ kept ≥ msg_count); day 3 has no counters at all → NULL.
 const mCounters = {
-  [mDay(mDay1)]: { noop: 5, late: 1 },
-  [mDay(mDay2)]: { noop: 2, late: 0 }
+  [mDay(mDay1)]: { noop: 5, late: 1, raw: 20, kept: 15 },
+  [mDay(mDay2)]: { noop: 2, late: 0, raw: 9, kept: 7 }
 };
 writeJson(metricsPacing, {
   v: internals.PACING_VERSION,
@@ -956,11 +958,13 @@ const readMetricRows = async path => {
   // would have hidden the "counters expired" rows behind a fake zero.
   const num = value => (value === null || value === undefined ? null : Number(value));
   const rows = handle
-    .prepare('SELECT day, msg_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day')
+    .prepare('SELECT day, msg_count, raw_count, kept_count, noop_count, late_count, median_gap_ms FROM metrics ORDER BY day')
     .all()
     .map(row => ({
       day: String(row.day),
       msg_count: num(row.msg_count),
+      raw_count: num(row.raw_count),
+      kept_count: num(row.kept_count),
       noop_count: num(row.noop_count),
       late_count: num(row.late_count),
       median_gap_ms: num(row.median_gap_ms)
@@ -996,10 +1000,12 @@ expect(
   `${JSON.stringify(rebuiltSideRows)} vs ${JSON.stringify(writeSideRows)}`
 );
 expect(
-  'F3 缺失的 pacing 计数写 NULL（不是 0）：01-07 无 counters 行 → noop/late 为 null',
+  'F3 缺失的 pacing 计数写 NULL（不是 0）：01-07 无 counters 行 → noop/late/raw/kept 为 null',
   rebuiltSideRows[2]?.day === mDay(mDay3) &&
     rebuiltSideRows[2]?.noop_count === null &&
     rebuiltSideRows[2]?.late_count === null &&
+    rebuiltSideRows[2]?.raw_count === null &&
+    rebuiltSideRows[2]?.kept_count === null &&
     writeSideRows[2]?.noop_count === 0,
   JSON.stringify({
     rebuilt: rebuiltSideRows[2] ?? null,
@@ -1017,12 +1023,16 @@ expect(
   JSON.stringify(rebuiltSideRows)
 );
 expect(
-  'R1 noop_count / late_count 来自 collab-pacing.json 的 counters[day]（有计数时逐字一致）',
+  'R1 noop_count / late_count / raw_count / kept_count 来自 collab-pacing.json 的 counters[day]（有计数时逐字一致）',
   rebuiltSideRows[0]?.noop_count === 5 &&
     rebuiltSideRows[0]?.late_count === 1 &&
+    rebuiltSideRows[0]?.raw_count === 20 &&
+    rebuiltSideRows[0]?.kept_count === 15 &&
     rebuiltSideRows[1]?.noop_count === 2 &&
-    rebuiltSideRows[1]?.late_count === 0,
-  JSON.stringify(rebuiltSideRows.map(row => `${row.day}:${row.noop_count}/${row.late_count}`))
+    rebuiltSideRows[1]?.late_count === 0 &&
+    rebuiltSideRows[1]?.raw_count === 9 &&
+    rebuiltSideRows[1]?.kept_count === 7,
+  JSON.stringify(rebuiltSideRows.map(row => `${row.day}:${row.noop_count}/${row.late_count}/${row.raw_count}/${row.kept_count}`))
 );
 expect(
   'R1 幂等：两次 rebuild 的 metrics checksum（以及整表 checksum）相同',
@@ -1253,11 +1263,13 @@ writeJson(configFile, { storage: 'sqlite' });
   writeJson(configFile, { storage: 'sqlite', dbPath: nitsDb });
   const nitsListed = await runIndexTool({ action: 'metrics' });
   const lineOfDay = day =>
-    nitsListed.content.split('\n').find(line => line.startsWith(`${day} · msg `)) ?? '';
+    nitsListed.content.split('\n').find(line => line.startsWith(`${day} · raw `)) ?? '';
   expect(
     'F3 `collab_index metrics` 对过期计数显示 `-`（当天行仍是真实值）',
     lineOfDay(mDay(oldDayTime)).includes('noop - · late -') &&
-      lineOfDay(mDay(recentDayTime)).includes('noop 3 · late 2'),
+      lineOfDay(mDay(oldDayTime)).includes('raw - · kept -') &&
+      lineOfDay(mDay(recentDayTime)).includes('noop 3 · late 2') &&
+      lineOfDay(mDay(recentDayTime)).includes('raw - · kept -'),
     `${lineOfDay(mDay(oldDayTime))} | ${lineOfDay(mDay(recentDayTime))}`
   );
   expect(
@@ -1320,15 +1332,17 @@ const readRebuild = await rebuildIndex({
 });
 await new Promise(resolve => setTimeout(resolve, 1100));
 writeJson(configFile, { storage: 'sqlite', dbPath: readDb });
-/** The rendered daily rows, in output order (`day · msg … · gap …`). */
-const metricLinesOf = content => content.split('\n').filter(line => /^\d{4}-\d{2}-\d{2} · msg /.test(line));
+/** The rendered daily rows, in output order (`day · raw … · gap …`). */
+const metricLinesOf = content => content.split('\n').filter(line => /^\d{4}-\d{2}-\d{2} · raw /.test(line));
 const readBefore = statSync(readDb);
 const listed = await runIndexTool({ action: 'metrics' });
 const readAfter = statSync(readDb);
+// readPacing above has no raw/kept (a day recorded before those counters
+// existed) → they must print `-`, exactly like an expired counter.
 const expectedMetricLines = [
-  `${mDay(rDay3)} · msg 1 · noop - · late - · gap 0ms`,
-  `${mDay(rDay2)} · msg 2 · noop 2 · late 0 · gap 5000ms`,
-  `${mDay(rDay1)} · msg 3 · noop 5 · late 1 · gap 20000ms`
+  `${mDay(rDay3)} · raw - · kept - · msg 1 · noop - · late - · gap 0ms`,
+  `${mDay(rDay2)} · raw - · kept - · msg 2 · noop 2 · late 0 · gap 5000ms`,
+  `${mDay(rDay1)} · raw - · kept - · msg 3 · noop 5 · late 1 · gap 20000ms`
 ];
 expect(
   'R1 `metrics` 按日期倒序输出 3 天，数值与 rebuild 写入的 `metrics` 表逐字一致',
@@ -1362,7 +1376,7 @@ closeDb();
 const withNull = await runIndexTool({ action: 'metrics' });
 expect(
   'R5 NULL 字段显示 `-`（不把「没写过」变成 0）',
-  metricLinesOf(withNull.content)[0] === '2030-01-01 · msg - · noop - · late - · gap -',
+  metricLinesOf(withNull.content)[0] === '2030-01-01 · raw - · kept - · msg - · noop - · late - · gap -',
   metricLinesOf(withNull.content)[0] ?? '-'
 );
 // R3: an existing projection with no `metrics` row is empty, not an error.

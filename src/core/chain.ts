@@ -27,6 +27,7 @@ import {
   resendDue,
   unackedDue
 } from './ack.ts';
+import { recordKept } from './pacing.ts';
 import {
   allBroadcasts,
   declineAsked,
@@ -652,6 +653,8 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           body: text
         })
       );
+      // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery → `raw` + `kept`.
+      await recordKept(Date.now());
       return { delivered: true, message: admitted?.id };
     } catch (error) {
       // `error` (not just its text) is returned so the calling tool can file a
@@ -754,6 +757,8 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
             body: noteText
           })
         );
+        // 0.10.x: the `[ack]` loop is a direct delivery → `raw` + `kept`.
+        await recordKept(Date.now());
         // F1: merge into the *current* record. The requester's `applyAck` may
         // have stamped `seenAt` while this prompt was being admitted; writing
         // back the pre-await snapshot would drop it (→ an extra resend 2h
@@ -855,6 +860,9 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           body: resendBody
         })
       );
+      // 0.10.x: a resend is a real delivery (raw/kept +1); `msg_count` keeps
+      // excluding `_r<n>` via `isResendID` — that asymmetry is documented.
+      await recordKept(now);
       // F1: merge into the current record. An `[ack]` for the very cid can land
       // while this prompt is being admitted — that `seenAt` must survive, or the
       // resend itself creates the false "unacked" it was meant to avoid.

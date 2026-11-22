@@ -30,7 +30,7 @@
  */
 import { PACING_RETRY_MS } from '../constants.ts';
 import { errText, log } from '../log.ts';
-import type { DeltaSnapshot, PacingItem, PacingState, PacingWindow } from '../types.ts';
+import type { DeltaSnapshot, PacingDayCounters, PacingItem, PacingState, PacingWindow } from '../types.ts';
 import {
   armFlush,
   baselineKey,
@@ -339,7 +339,15 @@ export async function recordSentBaseline(
   );
 }
 
-/** Record a withheld turn: `collab_status` reads these two numbers. */
+/**
+ * Record a turn the gate **suppressed**: `raw` + `noop` in one write.
+ *
+ * 0.10.x (`11-22-collab-metrics-dual`): a suppressed turn still *entered* the
+ * delivery decision, so it counts in `raw` — the whole point of the three
+ * counts is that `raw` (what the unbatched version would have sent) can be
+ * compared with `kept` (what the gate let through) and `msg_count` (what was
+ * delivered). Bumping only `noop` here would silently make `raw === kept`.
+ */
 export async function recordNoop(
   sessionID: string | undefined,
   now = Date.now(),
@@ -348,6 +356,7 @@ export async function recordNoop(
   const sid = String(sessionID ?? '').trim();
   await updatePacing(
     state => {
+      bumpCounter(state, 'raw', now);
       bumpCounter(state, 'noop', now);
       if (!sid) return;
       const current = state.noops[sid] ?? { count: 0, at: 0 };
@@ -357,6 +366,14 @@ export async function recordNoop(
   );
 }
 
+/**
+ * The gate-passed turn's counter write lives with the other counters in
+ * `./pacing.ts` (`recordKept`) — one implementation for the dispatch path and
+ * the direct deliveries alike. Re-exported here so the public surface
+ * (`__internals.recordKept`) and existing importers keep working.
+ */
+export { recordKept } from './pacing.ts';
+
 /** How many turns of this session were withheld as "no increment" (read-only). */
 export function noopInfo(sessionID: string | undefined, options: PacingOptions = {}): { count: number; at: number } {
   const sid = String(sessionID ?? '').trim();
@@ -364,8 +381,8 @@ export function noopInfo(sessionID: string | undefined, options: PacingOptions =
   return readPacing(options).noops[sid] ?? { count: 0, at: 0 };
 }
 
-/** Today's counters (used by the receipt and the metrics row). */
-export function pacingCounters(now = Date.now(), options: PacingOptions = {}): { noop: number; late: number } {
+/** Today's counters (used by the receipt, `collab_status` and the metrics row). */
+export function pacingCounters(now = Date.now(), options: PacingOptions = {}): PacingDayCounters {
   return counterOf(readPacing(options), now);
 }
 

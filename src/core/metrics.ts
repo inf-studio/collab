@@ -14,21 +14,39 @@
  * under the "one global database, kept forever" policy.
  *
  * The module is pure except `readPacingCounters` (a tolerant read of the pacing
- * file): `noop_count` / `late_count` have their only write point there. A
- * missing / unreadable / foreign-version file is `{}` — never a throw, never a
- * fabricated number; a day absent from `counters` yields `null` (unknown), not
- * `0` (F3, 0.10.x: the counters are pruned after 30 days while rebuild covers
- * 180, so `0` was a claim the data could not support).
+ * file): `raw_count` / `kept_count` / `noop_count` / `late_count` have their
+ * only write point there. A missing / unreadable / foreign-version file is `{}`
+ * — never a throw, never a fabricated number; a day absent from `counters`
+ * yields `null` (unknown), not `0` (F3, 0.10.x: the counters are pruned after
+ * 30 days while rebuild covers 180, so `0` was a claim the data could not
+ * support). The same holds per field for `raw` / `kept`, which a counters entry
+ * written before 0.10.x does not have (`11-22-collab-metrics-dual`).
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PACING_FILE, PACING_VERSION } from '../constants.ts';
 import { errText, log } from '../log.ts';
 import type { PacingDayCounters } from '../types.ts';
 
-/** One `metrics` row: the four fields the pacing path owns. */
+/** One `metrics` row: the fields the pacing path owns. */
 export interface DayMetricsRow {
   day: string;
+  /** Actually delivered messages (one batch = one). */
   msg_count: number;
+  /**
+   * 0.10.x (`11-22-collab-metrics-dual`): the three counts of the delivery
+   * pipeline — `raw ≥ kept ≥ msg_count`:
+   *
+   *   - `raw`  every message that reached the delivery decision (incl. the ones
+   *            the no-increment gate suppresses and the ones a window merges);
+   *   - `kept` the ones the gate let through, before the window merge;
+   *   - `msg_count` what was really delivered (a batch is one message).
+   *
+   * `null` = **unknown**, not zero: a day recorded before the counters existed
+   * (or whose counters were pruned) has no such number, and back-filling one
+   * would be a guess. `collab_index metrics` prints `-` for these.
+   */
+  raw_count: number | null;
+  kept_count: number | null;
   /**
    * `null` = the counter is **unknown**, not zero. `pacing` keeps only
    * `PACING_COUNTER_KEEP_DAYS` days (30) while `rebuild` covers a 180-day
@@ -76,6 +94,10 @@ export function isResendID(id: string): boolean {
  * after the retention window) or never existed: the row carries `null`, never a
  * fabricated `0`. The delivery path always passes a real counter object (it only
  * ever writes *today*), so its rows keep real numbers.
+ *
+ * `raw` / `kept` follow the same rule one level deeper: a counters entry written
+ * before those fields existed keeps them `undefined` → the row gets `null`, not
+ * `0` (a day that logged messages before the upgrade must not claim "0 raw").
  */
 export function aggregateDay(
   day: string,
@@ -85,10 +107,19 @@ export function aggregateDay(
   return {
     day,
     msg_count: times.length,
+    raw_count: counterValue(counters, 'raw'),
+    kept_count: counterValue(counters, 'kept'),
     noop_count: counters ? counters.noop : null,
     late_count: counters ? counters.late : null,
     median_gap_ms: medianGapMs(times)
   };
+}
+
+/** A counter that may be absent on older data — absent is NULL, never `0`. */
+function counterValue(counters: PacingDayCounters | null, key: 'raw' | 'kept'): number | null {
+  if (!counters) return null;
+  const value = counters[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 /** Group message timestamps by local day, resends excluded (shared by both writers). */
@@ -121,11 +152,20 @@ export function daysWithMessages(messages: { id: string; sentAt: number }[]): st
 export function normalizeCounters(raw: unknown): Record<string, PacingDayCounters> {
   const out: Record<string, PacingDayCounters> = {};
   for (const [day, countersRaw] of Object.entries(raw && typeof raw === 'object' ? raw : {})) {
-    const value = countersRaw as Record<string, unknown>;
-    out[day] = {
+    const value = (countersRaw && typeof countersRaw === 'object' ? countersRaw : {}) as Record<string, unknown>;
+    const counters: PacingDayCounters = {
       noop: Math.max(0, Number(value.noop) || 0),
       late: Math.max(0, Number(value.late) || 0)
     };
+    // 0.10.x: `raw` / `kept` are optional — a day recorded before they existed
+    // stays *undefined* (→ `metrics` NULL), not 0. Presence is what decides; an
+    // explicit `null` is "unknown" too and must not become `0` (no fake zero).
+    for (const key of ['raw', 'kept'] as const) {
+      if (!(key in value) || value[key] === null || value[key] === undefined) continue;
+      const count = Number(value[key]);
+      if (Number.isFinite(count)) counters[key] = Math.max(0, count);
+    }
+    out[day] = counters;
   }
   return out;
 }

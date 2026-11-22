@@ -456,9 +456,40 @@ export function counterOf(state: PacingState, now = Date.now()): PacingDayCounte
 export function bumpCounter(state: PacingState, key: keyof PacingDayCounters, now = Date.now(), by = 1): PacingDayCounters {
   const day = dayKey(now);
   const current = state.counters[day] ?? { noop: 0, late: 0 };
-  const next = { ...current, [key]: current[key] + by };
+  // 0.10.x: `raw` / `kept` are optional on a counters entry written by an older
+  // build — the first bump of today starts them from 0, it never rewrites the
+  // other fields (they keep their stored values).
+  const next: PacingDayCounters = { ...current, [key]: (Number(current[key]) || 0) + by };
   state.counters[day] = next;
   return next;
+}
+
+/**
+ * Record one **delivered** message in `raw` + `kept` (both or neither, so
+ * `raw ≥ kept` cannot invert on a partial write).
+ *
+ * 0.10.x (`11-22-collab-metrics-dual`): the one counting function shared by
+ * every delivery point. Two families call it:
+ *
+ *   - `dispatch` (after the no-increment gate let a turn through, before the
+ *     window / direct choice — a later window merge does not subtract);
+ *   - the **direct** deliveries that never enter `dispatch`: `collab_escalate`,
+ *     the freeze notice, `notifyRequester`, `[ack]`, the bounded resend and the
+ *     defect report. They cannot be suppressed, so they count as `raw` + `kept`
+ *     (and only **after** the host accepted the prompt — a failed delivery is
+ *     not a message).
+ *
+ * A resend (`msg_…_r<n>`) is a real delivery: it moves `raw` / `kept` by one
+ * while `msg_count` keeps excluding it (same rule as before this change).
+ */
+export async function recordKept(now = Date.now(), options: PacingOptions = {}): Promise<void> {
+  await updatePacing(
+    state => {
+      bumpCounter(state, 'raw', now);
+      bumpCounter(state, 'kept', now);
+    },
+    options
+  );
 }
 
 /* ---------------------------------------------------------------- metrics */
@@ -475,7 +506,8 @@ export function pacingMetrics(day: string, counters: PacingDayCounters, options:
 }
 
 /**
- * Persist today's four fields into `collab.db`'s `metrics` row. Throttled by
+ * Persist today's `metrics` fields (`raw` / `kept` / `msg_count` / `noop_count`
+ * / `late_count` / `median_gap_ms`) into `collab.db`. Throttled by
  * `PACING_METRICS_TTL_MS` unless `force` is set (the flush path calls it; a
  * per-message recompute would read the whole log every time). A `storage:json`
  * install has no projection — the row is skipped, never synthesized.

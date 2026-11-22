@@ -303,6 +303,13 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - `messages.resend_of` 标记重发行（`_r<n>`）；统计消息数时必须排除，否则重发会被重复计数。
 - `messages_fts` 截的是 **8192 字符**（CJK ≈ 24KB），不是 8KB 字节；文档不要写成字节。
 - `backfill` 只写 `meta.backfilled`，**不造 `messages` 行**（历史正文不可得；造空行会污染计数与 FTS）。
+
+### 投递计数三列（raw / kept / msg）
+- `raw_count` = **进入投递管道的每一条**；`kept_count` = 未被抑制的条数；`msg_count` = 实际交付（排除 `_r<n>` 重发）。
+- 计数时机：**窗口分支在入窗前计**（入管即计数）；**直投分支在 `prompt` 成功后计**（失败不计数）。唯一例外是窗口分支——flush 失败/重试会留下 `raw > msg`，这正是 `raw ≥ kept ≥ msg_count` 的由来。
+- 全量日恒等式：`raw = kept + noop`；`raw ≥ kept ≥ msg_count`。**升级当天是部分计数**（历史消息只进 `msg`、历史 noop 不回填），该日不等式可不成立，文档必须写明。
+- 全量埋点：dispatch 之外还有 7 个直投点（escalate / freeze / 缺陷上报 / resend / notifyRequester / `[ack]` / deliverAsk），漏一处就会让 `msg > raw`；每处都必须走同一个 `recordKept`。
+- 老库首读：`metrics` 表还是旧结构时 `collab_index metrics` 会报 `no such column`；先做一次投递（自动 `ALTER`）或先 `rebuild`。
 - **指标读取走工具、不直连库**：`collab_index { action:"metrics" }` 是唯一入口（默认 `limit:30`、按 day 倒序、覆盖范围报整表）；
   NULL 显示 `-`，不做二次计算；**先 `existsSync` 再 `openDb`**，读路径不得建库或建表（`ensureSchema` 只有 `rebuild` 调）。
 - **metrics 的 NULL 是「未知」不是 0**：`noop_count` / `late_count` 来自 `collab-pacing.json` 的 `counters[day]`，

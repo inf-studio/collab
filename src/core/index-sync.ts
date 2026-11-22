@@ -106,7 +106,8 @@ CREATE TABLE IF NOT EXISTS progress    (sid TEXT, milestone TEXT, title TEXT, do
 CREATE TABLE IF NOT EXISTS metrics     (day TEXT PRIMARY KEY, msg_count INTEGER, fact_count INTEGER,
                                        retract_count INTEGER, idle_count INTEGER,
                                        drift_ms INTEGER, median_gap_ms INTEGER,
-                                       noop_count INTEGER, late_count INTEGER);
+                                       noop_count INTEGER, late_count INTEGER,
+                                       raw_count INTEGER, kept_count INTEGER);
 `;
 
 /**
@@ -132,7 +133,7 @@ const NEW_COLUMNS: Record<string, Record<string, string>> = {
   locks: { reason: 'TEXT', record_json: 'TEXT' },
   queue: { seen: 'INTEGER', issue_path: 'TEXT', bid: 'TEXT', revoked_at: 'INTEGER', item_json: 'TEXT' },
   messages: { resend_of: 'TEXT' },
-  metrics: { noop_count: 'INTEGER', late_count: 'INTEGER' }
+  metrics: { noop_count: 'INTEGER', late_count: 'INTEGER', raw_count: 'INTEGER', kept_count: 'INTEGER' }
 };
 
 /** Create missing tables/columns. Idempotent; a new table is created by `DDL`. */

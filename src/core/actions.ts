@@ -62,6 +62,7 @@ import {
   sanitizeFreezeReason
 } from './freeze.ts';
 import { createLineage } from './lineage.ts';
+import { recordKept } from './pacing.ts';
 import { fmtTtl } from './locks.ts';
 import { enqueue, listFor, queueDir, queueID } from './owner-queue.ts';
 import { recordMessage } from './index-db.ts';
@@ -492,6 +493,9 @@ export async function escalateAction(actions: ActionContext, input: EscalateInpu
       body: urgentBody
     })
   );
+  // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery is a `raw` + `kept`
+  // unit too (0.9.6's counters only saw the `dispatch` path).
+  await recordKept(now);
   // R3: what the host really did — `steer` on an idle target degrades to `queue`.
   const actual = String(admitted?.delivery ?? mode);
   const marked = markUrgent(record, { at: Date.now(), reason, by: me });
@@ -650,6 +654,8 @@ export async function freezeAction(actions: ActionContext, input: FreezeInput): 
         await recordMessage(
           makeEnvelope({ id: `msg_${cid}`, from: me, to: sid, sentAt: at, kind: 'notify', body })
         );
+        // 0.10.x: the freeze notice is a direct delivery → `raw` + `kept`.
+        await recordKept(at);
         receipts.push({ to: sid, cid, ...(admitted?.id ? { messageId: String(admitted.id) } : {}), at });
       } catch (error) {
         receipts.push({ to: sid, cid, at, error: errText(error) });

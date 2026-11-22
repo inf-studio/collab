@@ -831,6 +831,19 @@ export interface PacingWindow {
 export interface PacingDayCounters {
   noop: number;
   late: number;
+  /**
+   * 0.10.x (`11-22-collab-metrics-dual`): every message that reached the
+   * delivery decision — **including** the ones the no-increment gate suppresses
+   * and the ones a window later merges. Absent on a day recorded before this
+   * counter existed: `metrics.raw_count` is then NULL (unknown), never `0`.
+   */
+  raw?: number;
+  /**
+   * 0.10.x: the messages the gate let through, **before** the window merge.
+   * `kept = raw - noop` (`noop` is suppressed-per-message), so
+   * `raw ≥ kept ≥ msg_count` holds for this pipeline. Absent = NULL, same rule.
+   */
+  kept?: number;
 }
 
 /** The pacing buffer + counters + the "last delivered" baselines (delta). */
@@ -916,6 +929,9 @@ export interface IndexStats {
 export interface MetricsDayRow {
   day: string;
   msgCount: number | null;
+  /** 0.10.x: missing on a row written before the counter existed (NULL, `-`). */
+  rawCount: number | null;
+  keptCount: number | null;
   noopCount: number | null;
   lateCount: number | null;
   medianGapMs: number | null;

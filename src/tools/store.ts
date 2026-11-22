@@ -61,13 +61,17 @@ function metricsCoverageLine(stats: { metricsRange?: { first: string; last: stri
  * 0.9.7 (`11-21-collab-index-metrics`): one day per line so the output drops
  * straight into a before/after table. A stored NULL prints `-` — the view never
  * turns "never written" into a zero (R5).
+ *
+ * 0.10.x (`11-22-collab-metrics-dual`): the three delivery counts come first
+ * (`raw ≥ kept ≥ msg`), then the gate / SLA counters. A row recorded before
+ * `raw` / `kept` existed prints `-` for them, exactly like an expired counter.
  */
 const metricText = (value: number | null): string => (value === null ? '-' : String(value));
 
 function metricsRowLine(row: MetricsDayRow): string {
-  return `${row.day} · msg ${metricText(row.msgCount)} · noop ${metricText(row.noopCount)} · late ${metricText(row.lateCount)} · gap ${
-    row.medianGapMs === null ? '-' : `${row.medianGapMs}ms`
-  }`;
+  return `${row.day} · raw ${metricText(row.rawCount)} · kept ${metricText(row.keptCount)} · msg ${metricText(row.msgCount)} · noop ${metricText(
+    row.noopCount
+  )} · late ${metricText(row.lateCount)} · gap ${row.medianGapMs === null ? '-' : `${row.medianGapMs}ms`}`;
 }
 
 function renderRebuild(result: RebuildResult, action: 'rebuild' | 'backfill'): string {
@@ -106,9 +110,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
     description:
       'Maintain the rebuildable message index (`collab.db`). `stats` is read-only and reports the projection ' +
       '(tables, rows, backend) or why it is unavailable; `metrics` is read-only too and lists the per-day ' +
-      '`metrics` rows newest first (day · msg_count · noop_count · late_count · median_gap_ms, `limit` default 30) ' +
-      'with the day range they cover (`-` = NULL: the pacing counters for that day expired after their 30-day retention, ' +
-      'so the count is unknown, not zero). `rebuild` re-creates it from `collab-messages.jsonl` + ' +
+      '`metrics` rows newest first (day · raw_count · kept_count · msg_count · noop_count · late_count · median_gap_ms, ' +
+      '`limit` default 30) with the day range they cover (`-` = NULL: the counter is unknown — expired after the 30-day ' +
+      'retention, or recorded before raw/kept existed — not zero). `rebuild` re-creates it from `collab-messages.jsonl` + ' +
       'the `collab-*.json` files into a temp file, fsyncs and atomically renames (idempotent: the same input ' +
       'gives the same row counts and per-table checksums; a failure keeps the old database). It also recomputes ' +
       'the per-day `metrics` rows from the message log (resends excluded) and the pacing counters, and `stats` ' +
@@ -174,7 +178,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             `backfilled=${stats.backfilled}${stats.rebuiltAt ? `  rebuilt_at=${new Date(stats.rebuiltAt).toISOString()}` : ''}`,
             // F3 (0.10.x): pacing counters are pruned after 30 days while rebuild
             // covers 180 — a missing count is NULL (unknown), never 0.
-            '注: metrics 的 noop/late 为 NULL = 该日 pacing 计数已过期/缺失（不是 0），`collab_index metrics` 显示 `-`。',
+            // 0.10.x: `raw` / `kept` follow the same rule (and are absent on
+            // rows written before the counters existed).
+            '注: metrics 的 raw/kept 与 noop/late 同为 NULL = 该日 pacing 计数已过期/缺失（不是 0；raw/kept 不追溯回填）。',
             '只读：stats 不建库、不写入（没有索引时看板显示 [索引不可用]）。'
           ].join('\n')
         };
@@ -215,9 +221,9 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             : coverage
         );
         // F3 (0.10.x): a `-` is not a zero — say what it means where it shows.
-        if (listing.rows.some(row => row.noopCount === null || row.lateCount === null)) {
+        if (listing.rows.some(row => row.noopCount === null || row.lateCount === null || row.rawCount === null || row.keptCount === null)) {
           lines.push(
-            `注: \`-\` = 该日 pacing 计数已过期/缺失（NULL，不是 0；counters 只保留 ${PACING_COUNTER_KEEP_DAYS} 天）。`
+            `注: \`-\` = 该日计数已过期/缺失（NULL，不是 0；counters 只保留 ${PACING_COUNTER_KEEP_DAYS} 天，raw/kept 不追溯回填）。`
           );
         }
         lines.push('只读：metrics 不建库、不写入、不触发 rebuild。');

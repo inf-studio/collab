@@ -34,6 +34,7 @@ import { isValidBid, readBroadcast } from './claim.ts';
 import { classify, metaOf } from './errors.ts';
 import type { DefectClass } from './errors.ts';
 import { createLineage } from './lineage.ts';
+import { recordKept } from './pacing.ts';
 import { recordMessage } from './index-db.ts';
 import { makeEnvelope } from './envelope.ts';
 
@@ -469,6 +470,9 @@ export function createReporter({ ctx, readConfig }: ReporterDeps): Reporter {
       await recordMessage(
         makeEnvelope({ id: `msg_${cid}`, from: REPORT_FROM, to: sid, sentAt: evidence.at, kind: 'note', body })
       );
+      // 0.10.x (`11-22-collab-metrics-dual`): the defect note is a direct
+      // delivery → `raw` + `kept` (a failed prompt above never reaches here).
+      await recordKept(evidence.at);
       return { signature: evidence.signature, files, delivered: true, reason: 'note 已投递' };
     } catch (error) {
       log(`report delivery failed (${sid}): ${errText(error)}`);

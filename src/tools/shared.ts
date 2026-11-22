@@ -31,7 +31,7 @@ import { conflictRefusal, defineTerm, pairKey, recordConflict } from '../core/gl
 import { workspaceFacts, workspaceOf } from '../core/facts.ts';
 import { localSnapshot } from '../core/tri-state.ts';
 import { createLineage } from '../core/lineage.ts';
-import { batchKind, batchThread, refreshMetrics, renderWindow, windowFlushAt, windowItems } from '../core/pacing.ts';
+import { batchKind, batchThread, recordKept, refreshMetrics, renderWindow, windowFlushAt, windowItems } from '../core/pacing.ts';
 import type { Reporter } from '../core/report.ts';
 import { appendThreadMessage } from '../core/storage.ts';
 import type { InboxStore, ThreadStore } from '../core/storage.ts';
@@ -1013,6 +1013,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       urgent: kind === 'request' || Boolean(input?.blocked) || Boolean(bid) || force
     });
     if (config.suppressNoDelta && !delta.any) {
+      // 0.10.x: a suppressed turn still counts as `raw` (it would have been a
+      // message before batching); `recordNoop` writes `raw` + `noop` together.
       await recordNoop(me0, admittedAt);
       if (me0) {
         try {
@@ -1058,7 +1060,15 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       windowMs: config.windowMs,
       directKinds: config.directKinds
     });
+    let countedAtEntry = false;
     if (policy === 'window') {
+      // 0.10.x (`11-22-collab-metrics-dual`): the **window** branch counts at
+      // pipeline entry (before the buffer write): the message has entered the
+      // delivery pipeline, and the later flush / merge / retry must not move
+      // `raw` / `kept` again. The direct branch counts only after the host
+      // accepted the prompt (a refused prompt is not a delivery).
+      await recordKept(admittedAt);
+      countedAtEntry = true;
       const item: PacingItem = {
         id: `msg_${cid}`,
         target: sessionID,
@@ -1115,6 +1125,11 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       basedOn,
       ...(bid ? { bid } : {})
     });
+    // 0.10.x (`11-22-collab-metrics-dual`): a **direct** delivery counts only
+    // once the host accepted the prompt (`admitOne` throws otherwise) — a
+    // failed prompt must move neither `raw` nor `kept`. A window that could not
+    // be buffered already counted at entry, so the fallback must not count twice.
+    if (!countedAtEntry) await recordKept(admittedAt);
 
     // 0.9.6: the counterpart has now really received this turn — the next delta
     // is measured against what it knows, not against what we tried to send.
@@ -1320,6 +1335,10 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         }),
         { dbPath: config.dbPath, storage: config.storage }
       );
+      // 0.10.x (`11-22-collab-metrics-dual`): a takeover request (broadcast ask /
+      // wake / spawned claim) is a direct delivery — `raw` + `kept` like every
+      // other prompt. A repeated wake reuses the cid but is still a delivery.
+      await recordKept(at);
       // F1 (review): merge into the *current* record — this write happens after
       // an `await`, so a concurrent `seenAt` (the receiver's `[ack]`) must not
       // be overwritten by the pre-await snapshot.

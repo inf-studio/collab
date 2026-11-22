@@ -96,6 +96,7 @@ import {
   pacingPolicy,
   pendingWindows,
   noopInfo,
+  recordKept,
   recordNoop,
   recordSentBaseline,
   resetPacingRuntime
@@ -887,6 +888,7 @@ export const __internals = {
   noopInfo,
   lastSentOf,
   recordSentBaseline,
+  recordKept,
   recordNoop,
   pacingCounters,
   computeDelta,

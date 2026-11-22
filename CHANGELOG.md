@@ -5,6 +5,31 @@
 
 ## [Unreleased]
 
+> **metrics 三计数**（`11-22-collab-metrics-dual`）：`metrics` 从「只记交付数」扩成
+> `raw_count` / `kept_count` / `msg_count` 三个并列计数（同一管道内 `raw ≥ kept ≥ msg_count`，
+> `raw = kept + noop`），工具面仍 **29**，不新增工具。行格式多两列（旧行 NULL 显示 `-`）。
+
+### Added
+
+- **`metrics.raw_count` / `metrics.kept_count`（0.10.x）**：投递侧在 `collab-pacing.json` 的
+  `counters[day]` 新增 `raw` / `kept` 两个计数（`raw` = 每一条进入投递的，含随后被抑制、被窗口合并的；
+  `kept` = 未被「无增量」抑制的条数，合并前），`aggregateDay` 把它们写进 `metrics` 表的两列（nullable），
+  `collab_index { action:"metrics" }` 每行变为
+  `day · raw R · kept K · msg M · noop N · late L · gap G`。这解决了「624 条基线（原始发送量）与 24h 25 条交付
+  （交付量）直接相减」的口径错误：**624 是 raw 口径**，交付降幅要看 `kept → msg_count`。
+  **全量埋点**：`raw` / `kept` 不只覆盖 dispatch —— 加急 `[URGENT]`、冻结通知 `[frozen]`、`notifyRequester`、
+  `[ack]` 回环、受限重发 `_r<n>`、缺陷上报 note 六个直投点走**同一个** `recordKept`（`src/core/pacing.ts`），
+  直投在宿主接受 prompt 后才 +1（失败投递不计数；窗口分支按「入窗口」计数，flush 失败/重试不再加减）；
+  修掉了实测的 `5×escalate → msg=5, raw=1`。重发计入 `raw/kept`，`msg_count` 仍按 `isResendID`
+  排除；受保护目标的 owner-queue 路径不投递、不计数。
+  `rebuild` 从 `counters[day]` 重算（与写入侧同一个 `aggregateDay`），两次 rebuild checksum 不变；
+  0.10.x 之前的老数据没有这两个字段 → **NULL（`-`），不回填、不猜**。**升级当天是部分计数**（`raw` / `kept`
+  只从升级后开始累计；该日 `raw ≥ kept ≥ msg_count` 可能不成立，典型 `raw=1, kept=1, msg=16`），次日起才是全量日。
+  `test/metrics-dual.mjs`（63 项）覆盖 10/2/8/3 的 PRD 用例、直投场景的第二组、六个直投点各 `Δraw=Δkept=1`、
+  `deliverAsk`（broadcast spawn）与幂等重复广播（`Δ=0`）、直投 prompt 抛错不计数、重算一致性 / checksum、
+  老数据 NULL 与渲染、升级当天形状；两条强制变异（抑制路径不 `raw +1`、重算不回读 counters）均实测必红。
+  口径、升级当天与「升级后老库首读」限制见 `docs/collab.md` §11.27。
+
 > 0.10.x 遗留小修（`11-21-collab-0p9-nits`）：五条低风险修正，工具面仍 **29**，不改任何工具的输出契约
 > （仅 `metrics` 的 NULL 显示语义）。版本号留给 0.10.0 正式版。
 
