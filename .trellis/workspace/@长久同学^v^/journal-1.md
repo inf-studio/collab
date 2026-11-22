@@ -29,3 +29,13 @@
   `collab_index metrics`（11-20: 9 条/gap 210s；11-21: 20 条/gap 220s）。
 - mac：配置与 `~/.cache/opencode/npm/@inf-studio/collab@0.10.0-rc.1` 均就位，**待重启 Desktop**。
 - 待补：满 24h（22:03 后）的指标对比表；mac 重启后 4 条核验。
+
+## 2026-11-22 · 0.10.0-rc.2（三计数 + 5 条遗留修复）
+
+- 内容：`metrics` 三计数（raw/kept/delivered，全量埋点 7 个直投点）+ F3/F4/F5/emoji/mtime 五条修复。
+- 口径：全量日 `raw = kept + noop`、`raw ≥ kept ≥ msg_count`；升级当天为部分计数（历史不回填）。
+- CI：`45022043527` success；dist-tags `latest: 0.9.6` / `next: 0.10.0-rc.2`。
+- Linux：`collab:active:v0.10.0-rc.2`；实机 rebuild 39ms，`metrics 覆盖 2026-11-20–2026-11-22（3 天）`，
+  历史三天的 raw/kept 显示 `-`（旧 counters 无字段，预期）。
+- mac：配置与 `~/.cache/opencode/npm/@inf-studio/collab@0.10.0-rc.2` 就位，**待重启 Desktop**。
+- 待办：mac 重启后 4 条核验；正式版 0.10.0 观察后发布；每日 22:05 cron 持续采集。
