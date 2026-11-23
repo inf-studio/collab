@@ -772,4 +772,4 @@ export const DECISION_INBOX_CACHE_MS = 2000;
 export const CONFLICT_DECISION_OPTIONS = ['以我方为准', '以对方为准', '重新测量'];
 
 /** Keep in sync with `package.json` (`the harness asserts equality`). */
-export const PLUGIN_VERSION = '0.10.0-rc.2';
+export const PLUGIN_VERSION = '0.10.0-rc.3';

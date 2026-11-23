@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.10.0-rc.3] - 2026-11-23
+
+> **预发布（dist-tag `next`）**：在 rc.2 基础上加 **计数标记 `rawSeq` + `uncounted` 诊断**——
+> 从本版起，没有标记的消息行会被按日点名，方便判断 `msg > raw` 是「漏埋」还是「混版本」。
+> 注意：诊断**向前生效**，不能追溯历史差异（历史行无标记，`uncounted` 会等于 `msg`）。
+
 > **计数标记 + 未计数诊断**（`11-23-collab-metrics-attribution`）：rc.2 第一个完整日出现
 > `raw 12 · kept 12 · msg 13`（`msg > raw` 差 1），从外部无法区分「某条路径漏埋」与「其它会话仍在跑升级前的插件」。
 > 现在每条被计数的 message 行带 `rawSeq`（当日 `kept` 值），`collab_index { action:"metrics" }` 每行追加

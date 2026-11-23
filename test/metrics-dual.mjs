@@ -760,8 +760,11 @@ expect(
   diagnosedLine
 );
 expect(
-  'the note says what an unmarked row means and refuses to guess a version',
-  /没有计数标记（rawSeq）/.test(diagnosed) && /不猜版本/.test(diagnosed),
+  'the note names the three sources and says only uncounted=0 is proof',
+  /没有计数标记（rawSeq）/.test(diagnosed) &&
+    /三种来源/.test(diagnosed) &&
+    /假阳性/.test(diagnosed) &&
+    /只有 uncounted = 0/.test(diagnosed),
   diagnosed.split('\n').find(line => line.includes('没有计数标记')) ?? '-'
 );
 const unmarkedRows = liveRows().filter(
