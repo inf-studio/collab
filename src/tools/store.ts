@@ -65,14 +65,36 @@ function metricsCoverageLine(stats: { metricsRange?: { first: string; last: stri
  * 0.10.x (`11-22-collab-metrics-dual`): the three delivery counts come first
  * (`raw ≥ kept ≥ msg`), then the gate / SLA counters. A row recorded before
  * `raw` / `kept` existed prints `-` for them, exactly like an expired counter.
+ *
+ * 0.10.0 (`11-23-collab-metrics-attribution`, R2): every line ends with
+ * `uncounted N` — the message rows of that day that carry **no** count marker
+ * (`rawSeq`, resends `_r<n>` excluded). `N > 0` is flagged on the line itself
+ * (`⚠未计数`): the day's `msg` may then exceed `raw` for a reason the numbers
+ * alone cannot tell apart (a row written before the marker, or a plugin
+ * instance that delivered without counting).
  */
 const metricText = (value: number | null): string => (value === null ? '-' : String(value));
 
-function metricsRowLine(row: MetricsDayRow): string {
+function metricsRowLine(row: MetricsDayRow, uncounted: number): string {
   return `${row.day} · raw ${metricText(row.rawCount)} · kept ${metricText(row.keptCount)} · msg ${metricText(row.msgCount)} · noop ${metricText(
     row.noopCount
-  )} · late ${metricText(row.lateCount)} · gap ${row.medianGapMs === null ? '-' : `${row.medianGapMs}ms`}`;
+  )} · late ${metricText(row.lateCount)} · gap ${row.medianGapMs === null ? '-' : `${row.medianGapMs}ms`} · uncounted ${uncounted}${
+    uncounted > 0 ? ' ⚠未计数' : ''
+  }`;
 }
+
+/**
+ * The one explanation of `uncounted`, printed only when a shown day has any.
+ * It deliberately does **not** guess a version: a row without the marker and a
+ * row whose writer skipped the count are indistinguishable from the data (a
+ * mixed-version install is the case this exists for).
+ */
+const UNCOUNTED_NOTE =
+  '注: uncounted N = 当日 message 行里没有计数标记（rawSeq）的条数（`_r<n>` 重发不计入）。' +
+  '三种来源在数据上无法区分：① 0.10.0 之前写入（当时没有计数机制，行也没被计数）；' +
+  '② 0.10.x-rc.2 写入（已计数但尚未写标记 → 假阳性）；③ 本版本某条投递路径漏埋。' +
+  '因此 uncounted > 0 只说明「存在未标记行」，不等于「一定漏计」；只有 uncounted = 0 能确定当日全部计入。' +
+  '本诊断向前生效，不能追溯历史差异；归因历史差异请按 from 会话的插件版本 + kind 是否直投点核对。';
 
 function renderRebuild(result: RebuildResult, action: 'rebuild' | 'backfill'): string {
   if (!result.ok) {
@@ -110,9 +132,13 @@ export function indexTool(kit: ToolKit): ToolDefinition {
     description:
       'Maintain the rebuildable message index (`collab.db`). `stats` is read-only and reports the projection ' +
       '(tables, rows, backend) or why it is unavailable; `metrics` is read-only too and lists the per-day ' +
-      '`metrics` rows newest first (day · raw_count · kept_count · msg_count · noop_count · late_count · median_gap_ms, ' +
-      '`limit` default 30) with the day range they cover (`-` = NULL: the counter is unknown — expired after the 30-day ' +
-      'retention, or recorded before raw/kept existed — not zero). `rebuild` re-creates it from `collab-messages.jsonl` + ' +
+      '`metrics` rows newest first (day · raw_count · kept_count · msg_count · noop_count · late_count · median_gap_ms · ' +
+      'uncounted, `limit` default 30) with the day range they cover (`-` = NULL: the counter is unknown — expired after the 30-day ' +
+      'retention, or recorded before raw/kept existed — not zero). `uncounted N` is the count of the message rows ' +
+      'of that day with **no count marker** (`rawSeq`, resends `_r<n>` excluded): a row without the marker was never counted ' +
+      '(written before the marker existed, or by an instance that missed its count — the two cannot be told apart), ' +
+      'and a day with `uncounted > 0` is flagged `⚠未计数` — that is how a `msg > raw` gap is attributed. ' +
+      '`rebuild` re-creates it from `collab-messages.jsonl` + ' +
       'the `collab-*.json` files into a temp file, fsyncs and atomically renames (idempotent: the same input ' +
       'gives the same row counts and per-table checksums; a failure keeps the old database). It also recomputes ' +
       'the per-day `metrics` rows from the message log (resends excluded) and the pacing counters, and `stats` ' +
@@ -208,9 +234,13 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             ].join('\n')
           };
         }
+        // 0.10.0 (R2/R3): `uncounted` comes with the rows — same projection, so
+        // the flag and `msg_count` describe the same population; a row without
+        // the marker is never back-filled.
+        const uncounted = listing.uncounted ?? {};
         const lines = [
           `metrics 逐日: ${listing.dbPath}  backend=${listing.backend ?? '?'}`,
-          ...listing.rows.map(metricsRowLine)
+          ...listing.rows.map(row => metricsRowLine(row, uncounted[row.day] ?? 0))
         ];
         const range = listing.range;
         const coverage = range ? `覆盖 ${range.first}–${range.last}（${range.days} 天）` : '覆盖 无';
@@ -226,6 +256,8 @@ export function indexTool(kit: ToolKit): ToolDefinition {
             `注: \`-\` = 该日计数已过期/缺失（NULL，不是 0；counters 只保留 ${PACING_COUNTER_KEEP_DAYS} 天，raw/kept 不追溯回填）。`
           );
         }
+        // 0.10.0 (R2): only explain a flag that is actually on screen.
+        if (listing.rows.some(row => (uncounted[row.day] ?? 0) > 0)) lines.push(UNCOUNTED_NOTE);
         lines.push('只读：metrics 不建库、不写入、不触发 rebuild。');
         return { content: lines.join('\n') };
       }

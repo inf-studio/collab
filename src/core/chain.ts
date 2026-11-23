@@ -642,19 +642,24 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
         }
       });
       // 0.9.0 (R1): the requester note is a delivered message too.
+      // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery → `raw` + `kept`.
+      // 0.10.0 (`11-23-collab-metrics-attribution`, R1): count first, stamp the
+      // row with the value `recordKept` returned (`rawSeq`) — one producer. One
+      // timestamp for both, so the row and its counter cannot land on two days.
+      const at = Date.now();
+      const rawSeq = await recordKept(at);
       await recordMessage(
         makeEnvelope({
           id: `msg_${cid}`,
           ...(threadID ? { threadId: threadID } : {}),
           from: String(record.claim?.by ?? from ?? 'handoff'),
           to: target,
-          sentAt: Date.now(),
+          sentAt: at,
           kind,
-          body: text
+          body: text,
+          ...(typeof rawSeq === 'number' ? { rawSeq } : {})
         })
       );
-      // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery → `raw` + `kept`.
-      await recordKept(Date.now());
       return { delivered: true, message: admitted?.id };
     } catch (error) {
       // `error` (not just its text) is returned so the calling tool can file a
@@ -747,18 +752,21 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
         });
         // 0.9.0 (R1): the ack is a message (`kind:"ack"`). The `seenAt` guard
         // above means one ack per delivery, so this is one line per ack.
+        // 0.10.x: the `[ack]` loop is a direct delivery → `raw` + `kept`.
+        // 0.10.0 (R1): count first, stamp the row with the returned value.
+        const ackAt = Date.now();
+        const ackSeq = await recordKept(ackAt);
         await recordMessage(
           makeEnvelope({
             id: `msg_${noteCid}`,
             from: me,
             to: requester,
-            sentAt: Date.now(),
+            sentAt: ackAt,
             kind: 'ack',
-            body: noteText
+            body: noteText,
+            ...(typeof ackSeq === 'number' ? { rawSeq: ackSeq } : {})
           })
         );
-        // 0.10.x: the `[ack]` loop is a direct delivery → `raw` + `kept`.
-        await recordKept(Date.now());
         // F1: merge into the *current* record. The requester's `applyAck` may
         // have stamped `seenAt` while this prompt was being admitted; writing
         // back the pre-await snapshot would drop it (→ an extra resend 2h
@@ -849,6 +857,11 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
       // 0.9.0 (R1): a resend is a real delivery, so it gets its own row
       // (`_r<n>`): the original message id is kept for the receiver's de-dup,
       // which is exactly why the history needs the suffix to tell them apart.
+      // 0.10.x: a resend is a real delivery (raw/kept +1); `msg_count` keeps
+      // excluding `_r<n>` via `isResendID` — that asymmetry is documented.
+      // 0.10.0 (R1): the row still gets the marker (it *was* counted); only the
+      // `uncounted` diagnostic skips `_r<n>` rows.
+      const resendSeq = await recordKept(now);
       await recordMessage(
         makeEnvelope({
           id: `msg_${cid}_r${resends}`,
@@ -857,12 +870,10 @@ export function createHandoffChain(ctx: CollabContext, readConfig: ConfigReader)
           to: target,
           sentAt: now,
           kind: 'request',
-          body: resendBody
+          body: resendBody,
+          ...(typeof resendSeq === 'number' ? { rawSeq: resendSeq } : {})
         })
       );
-      // 0.10.x: a resend is a real delivery (raw/kept +1); `msg_count` keeps
-      // excluding `_r<n>` via `isResendID` — that asymmetry is documented.
-      await recordKept(now);
       // F1: merge into the current record. An `[ack]` for the very cid can land
       // while this prompt is being admitted — that `seenAt` must survive, or the
       // resend itself creates the false "unacked" it was meant to avoid.

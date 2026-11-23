@@ -47,7 +47,7 @@ import { envelopeHead } from './envelope.ts';
 import { readFreezes } from './freeze.ts';
 import { freezeFor } from './freeze-pure.ts';
 import { allLocks } from './locks.ts';
-import { aggregateDay, daysWithMessages, readPacingCounters, timesByDay } from './metrics.ts';
+import { aggregateDay, dayStart, daysWithMessages, readPacingCounters, timesByDay, uncountedByDay } from './metrics.ts';
 import type { DayMetricsRow } from './metrics.ts';
 import { allQueueItems } from './owner-queue.ts';
 import { appendMessage, readMessages } from './store.ts';
@@ -833,6 +833,57 @@ function nullableCount(value: unknown): number | null {
 }
 
 /**
+ * 0.10.0 (`11-23-collab-metrics-attribution`, R2): per-day `uncounted` counts,
+ * read from the **same projection** the rows come from.
+ *
+ * The marker lives in `messages.envelope` (`rawSeq`, written by `recordMessage`),
+ * so one query over the shown days is enough — no new column, no second write
+ * path, and legacy rows (no marker) come back as uncounted with no back-fill.
+ * Deriving it here (rather than from the JSONL) keeps `uncounted` and
+ * `msg_count` describing the same population even when the database was built
+ * from another log (`rebuild --messagesFile`, the harnesses), which is exactly
+ * the case where a cross-source count would silently lie.
+ *
+ * Bounded: one query from the oldest **shown** day. Resends are excluded inside
+ * `uncountedByDay` — the same rule `msg_count` uses.
+ */
+function uncountedOf(handle: DbHandle, days: string[]): Record<string, number> {
+  const oldest = [...days].sort()[0];
+  if (!oldest) return {};
+  let rows: Record<string, any>[];
+  try {
+    rows = handle
+      .prepare('SELECT id, sent_at AS sentAt, envelope FROM messages WHERE sent_at >= ?')
+      .all(dayStart(oldest)) as Record<string, any>[];
+  } catch (error) {
+    log(`uncounted read failed: ${errText(error)}`);
+    return {};
+  }
+  const seen = rows.map(row => {
+    const rawSeq = rawSeqIn(row?.envelope);
+    return {
+      id: String(row?.id ?? ''),
+      sentAt: Number(row?.sentAt) || 0,
+      ...(rawSeq !== undefined ? { rawSeq } : {})
+    };
+  });
+  const counts = uncountedByDay(seen);
+  return Object.fromEntries([...counts.entries()].filter(([day]) => days.includes(day)));
+}
+
+/** The marker inside a stored envelope head — tolerant, absent stays absent. */
+function rawSeqIn(envelope: unknown): number | undefined {
+  if (typeof envelope !== 'string' || !envelope) return undefined;
+  try {
+    const value = JSON.parse(envelope) as Record<string, unknown>;
+    const rawSeq = Number(value?.rawSeq);
+    return Number.isFinite(rawSeq) && rawSeq > 0 ? rawSeq : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 0.9.7 (`11-21-collab-index-metrics`): the daily `metrics` rows, newest day
  * first. **Read-only in the strict sense** (R2): a missing database is
  * *reported*, never created, and nothing is written — the numbers come straight
@@ -872,7 +923,11 @@ export async function indexMetrics(options: StoreOptions & { limit?: number } = 
       medianGapMs: nullableCount(row.median_gap_ms)
     }));
     const range = metricsCoverage(handle);
-    return { ...base, available: true, backend: handle.backend, rows, ...(range ? { range } : {}) };
+    const uncounted = uncountedOf(
+      handle,
+      rows.map(row => row.day)
+    );
+    return { ...base, available: true, backend: handle.backend, rows, uncounted, ...(range ? { range } : {}) };
   } catch (error) {
     log(`index metrics read failed: ${errText(error)}`);
     return { ...base, available: false, reason: dbRuntimeState().broken?.reason ?? errText(error) };

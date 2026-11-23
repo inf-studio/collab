@@ -65,7 +65,7 @@ import { readMessages } from './store.ts';
 
 // 0.9.7: the pacing path and `rebuild` share one aggregation (`./metrics.ts`).
 // Re-exported so the public surface (`__internals`) and the tests keep working.
-export { dayKey, isResendID, medianGapMs } from './metrics.ts';
+export { dayKey, isResendID, medianGapMs, uncountedByDay } from './metrics.ts';
 export type { DayMetricsRow as PacingMetricsRow } from './metrics.ts';
 export { PACING_VERSION };
 
@@ -169,6 +169,7 @@ function normalizeItem(raw: unknown): PacingItem | undefined {
     grade: String(value.grade ?? 'unknown'),
     basedOn,
     mode: String(value.mode ?? 'queue'),
+    ...(Number(value.rawSeq) > 0 ? { rawSeq: Number(value.rawSeq) } : {}),
     ...(factIds.length ? { factIds } : {}),
     ...(value.factId ? { factId: String(value.factId) } : {}),
     ...(value.bid ? { bid: String(value.bid) } : {}),
@@ -481,15 +482,24 @@ export function bumpCounter(state: PacingState, key: keyof PacingDayCounters, no
  *
  * A resend (`msg_…_r<n>`) is a real delivery: it moves `raw` / `kept` by one
  * while `msg_count` keeps excluding it (same rule as before this change).
+ *
+ * 0.10.0 (`11-23-collab-metrics-attribution`, R1): returns the day's **new
+ * `kept` value** — the number the message row is stamped with (`rawSeq`), so
+ * "was this row counted?" is answered by the counter itself and there is no
+ * second sequence generator to drift. `undefined` = the counters file was
+ * unavailable, i.e. **nothing was counted**: the caller then writes an
+ * unmarked row, which is exactly what `metrics` reports as `uncounted`.
  */
-export async function recordKept(now = Date.now(), options: PacingOptions = {}): Promise<void> {
-  await updatePacing(
+export async function recordKept(now = Date.now(), options: PacingOptions = {}): Promise<number | undefined> {
+  const updated = await updatePacing(
     state => {
       bumpCounter(state, 'raw', now);
-      bumpCounter(state, 'kept', now);
+      const counters = bumpCounter(state, 'kept', now);
+      return Number(counters.kept) || 0;
     },
     options
   );
+  return updated?.result;
 }
 
 /* ---------------------------------------------------------------- metrics */

@@ -21,6 +21,12 @@
  * 30 days while rebuild covers 180, so `0` was a claim the data could not
  * support). The same holds per field for `raw` / `kept`, which a counters entry
  * written before 0.10.x does not have (`11-22-collab-metrics-dual`).
+ *
+ * 0.10.0 (`11-23-collab-metrics-attribution`): the message rows themselves carry
+ * the count marker (`rawSeq`, stamped by `recordKept`), so this module also owns
+ * `uncountedByDay` — the per-day count of rows that were never counted. It is
+ * derived at read time (`collab_index metrics`), not stored: no column, no
+ * second aggregation, no back-fill of legacy rows.
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { PACING_FILE, PACING_VERSION } from '../constants.ts';
@@ -87,6 +93,41 @@ export function isResendID(id: string): boolean {
 }
 
 /**
+ * 0.10.0 (`11-23-collab-metrics-attribution`, R2/R3): per-day `uncounted` — the
+ * message rows that carry **no count marker** (`rawSeq`).
+ *
+ * Why this is a *display* figure and not a `metrics` column: it answers "did
+ * every row get counted?", which the row itself already records. Deriving it
+ * from the stored rows at read time needs no schema change and no second write
+ * path — and a legacy row stays uncounted instead of being back-filled.
+ *
+ * Rules, in order:
+ *
+ *   - a row is **counted** when `rawSeq` is a positive number (`recordKept`
+ *     stamped it at delivery time);
+ *   - `_r<n>` resend rows are **never** counted here, marked or not: they are
+ *     excluded from `msg_count` too, and a resend written by an older instance
+ *     would otherwise show up as a defect of this version (S10);
+ *   - a legacy row (written before the marker existed) has no field → uncounted.
+ *     Absence is the signal; it is **not** back-filled with `0`.
+ *
+ * Rows without `rawSeq` cannot be attributed further: a row older than the
+ * marker and a row a mixed-version instance wrote without counting look
+ * identical, so the view says "no marker" instead of guessing a version.
+ */
+export function uncountedByDay(messages: { id: string; sentAt: number; rawSeq?: number }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const message of messages) {
+    if (isResendID(message.id)) continue;
+    const counted = typeof message.rawSeq === 'number' && Number.isFinite(message.rawSeq) && message.rawSeq > 0;
+    if (counted) continue;
+    const day = dayKey(message.sentAt);
+    out.set(day, (out.get(day) ?? 0) + 1);
+  }
+  return out;
+}
+
+/**
  * One day's row — the single aggregation implementation. `times` are that day's
  * message timestamps with resend rows **already excluded** (see `timesByDay`).
  *
@@ -120,6 +161,13 @@ function counterValue(counters: PacingDayCounters | null, key: 'raw' | 'kept'): 
   if (!counters) return null;
   const value = counters[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Local midnight of a `dayKey` (`2026-11-23` → the epoch ms it starts at). */
+export function dayStart(day: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(day ?? '').trim());
+  if (!match) return 0;
+  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
 }
 
 /** Group message timestamps by local day, resends excluded (shared by both writers). */

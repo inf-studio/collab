@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "metrics 字段与聚合"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "无标记/老数据的降级"}

@@ -482,6 +482,11 @@ export async function escalateAction(actions: ActionContext, input: EscalateInpu
   }
   // 0.9.0 (R1): every admitted delivery is a message too (`kind:"notify"`), so
   // the history is complete without changing this action's result. Best-effort.
+  // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery is a `raw` + `kept`
+  // unit too (0.9.6's counters only saw the `dispatch` path).
+  // 0.10.0 (`11-23-collab-metrics-attribution`, R1): count first and stamp the
+  // row with the value `recordKept` returned — one producer for the marker.
+  const rawSeq = await recordKept(now);
   await recordMessage(
     makeEnvelope({
       id: `msg_${cid}`,
@@ -490,12 +495,10 @@ export async function escalateAction(actions: ActionContext, input: EscalateInpu
       to: targetSid,
       sentAt: now,
       kind: 'notify',
-      body: urgentBody
+      body: urgentBody,
+      ...(typeof rawSeq === 'number' ? { rawSeq } : {})
     })
   );
-  // 0.10.x (`11-22-collab-metrics-dual`): a direct delivery is a `raw` + `kept`
-  // unit too (0.9.6's counters only saw the `dispatch` path).
-  await recordKept(now);
   // R3: what the host really did — `steer` on an idle target degrades to `queue`.
   const actual = String(admitted?.delivery ?? mode);
   const marked = markUrgent(record, { at: Date.now(), reason, by: me });
@@ -651,11 +654,20 @@ export async function freezeAction(actions: ActionContext, input: FreezeInput): 
           }
         });
         // 0.9.0 (R1): the freeze notice is a delivered message (`notify`).
+        // 0.10.x: the freeze notice is a direct delivery → `raw` + `kept`, and
+        // the row carries the returned value as its count marker (0.10.0 R1).
+        const rawSeq = await recordKept(at);
         await recordMessage(
-          makeEnvelope({ id: `msg_${cid}`, from: me, to: sid, sentAt: at, kind: 'notify', body })
+          makeEnvelope({
+            id: `msg_${cid}`,
+            from: me,
+            to: sid,
+            sentAt: at,
+            kind: 'notify',
+            body,
+            ...(typeof rawSeq === 'number' ? { rawSeq } : {})
+          })
         );
-        // 0.10.x: the freeze notice is a direct delivery → `raw` + `kept`.
-        await recordKept(at);
         receipts.push({ to: sid, cid, ...(admitted?.id ? { messageId: String(admitted.id) } : {}), at });
       } catch (error) {
         receipts.push({ to: sid, cid, at, error: errText(error) });

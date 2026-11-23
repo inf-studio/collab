@@ -288,6 +288,10 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - **指标**：`metrics` 每日一行 `msg_count`（按 id 形状 `_r<n>` **排除重发行**）/ `noop_count` / `late_count` /
   `median_gap_ms`（当天**全机**相邻间隔中位数）；
   刷新由投递路径触发、≤1 分钟一次（`PACING_METRICS_TTL_MS`），`storage:"json"` 跳过。
+- **计数标记与 `uncounted`（0.10.0）**：投递成功并被计数后，行上写 `rawSeq` = `recordKept` 返回的当日新 `kept` 值
+  （**一个生产者**，不要另算序号）；`collab_index metrics` 每行追加 `uncounted N`（当日无 `rawSeq` 的 message 行，
+  `_r<n>` 重发除外），`N > 0` 行尾标 `⚠未计数`。口径必须与 `msg_count` **同源**（同一份投影），老行计入但不回填、
+  不猜版本；`msg > raw` 时先用它归因。
 - 测试：`test/pacing.mjs`（120s 用注入时钟，不等真实 2 分钟）；变异 `PACING_TEST_WINDOW_MS=0` 必须让「10 条合并为 1」变红。
   回放数字是**合成数据估计**（按 PRD gap 分位 + 151 连发重建、**两 target 轮转**）：25% 增量率 → 5.11× / p50 410s；
   31% 是上界参考（4.46×），**不跨口径比较临界值**。
@@ -310,6 +314,10 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
 - 全量日恒等式：`raw = kept + noop`；`raw ≥ kept ≥ msg_count`。**升级当天是部分计数**（历史消息只进 `msg`、历史 noop 不回填），该日不等式可不成立，文档必须写明。
 - 全量埋点：dispatch 之外还有 7 个直投点（escalate / freeze / 缺陷上报 / resend / notifyRequester / `[ack]` / deliverAsk），漏一处就会让 `msg > raw`；每处都必须走同一个 `recordKept`。
 - 老库首读：`metrics` 表还是旧结构时 `collab_index metrics` 会报 `no such column`；先做一次投递（自动 `ALTER`）或先 `rebuild`。
+- **计数标记 `rawSeq` 与 `uncounted`**：投递成功时把当日 `kept` 序号写进 message 行（唯一生产者是 `recordKept`，避免序号与行漂移）；窗口批量行取窗口内最大序号。
+- **「无标记」≠「没计数」**：`uncounted > 0` 只说明存在未标记行，来源有三种（0.10.0 之前 / **0.10.x-rc.2 已计数但无标记 → 假阳性** / 本版本漏埋），数据上无法区分；**只有 `uncounted = 0` 能证明当日全部计入**。
+- **诊断向前生效**：历史行没有标记，`uncounted` 会等于 `msg`，**不能**用它追溯历史差异；归因历史时应按 `from` 会话的插件版本 + 该行 `kind` 是否直投点来核对。
+- 不要为了「让历史干净」去回填 `rawSeq`——那会把「未标记」这个信号直接抹掉。
 - **指标读取走工具、不直连库**：`collab_index { action:"metrics" }` 是唯一入口（默认 `limit:30`、按 day 倒序、覆盖范围报整表）；
   NULL 显示 `-`，不做二次计算；**先 `existsSync` 再 `openDb`**，读路径不得建库或建表（`ensureSchema` 只有 `rebuild` 调）。
 - **metrics 的 NULL 是「未知」不是 0**：`noop_count` / `late_count` 来自 `collab-pacing.json` 的 `counters[day]`，

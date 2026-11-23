@@ -467,12 +467,22 @@ export function createReporter({ ctx, readConfig }: ReporterDeps): Reporter {
       });
       // 0.9.0 (R1): the defect note is a delivered message (`kind:"note"`); the
       // evidence file stays the primary artefact, this is only the history.
-      await recordMessage(
-        makeEnvelope({ id: `msg_${cid}`, from: REPORT_FROM, to: sid, sentAt: evidence.at, kind: 'note', body })
-      );
       // 0.10.x (`11-22-collab-metrics-dual`): the defect note is a direct
       // delivery → `raw` + `kept` (a failed prompt above never reaches here).
-      await recordKept(evidence.at);
+      // 0.10.0 (`11-23-collab-metrics-attribution`, R1): count first, stamp the
+      // row with the returned `kept` value as its marker.
+      const rawSeq = await recordKept(evidence.at);
+      await recordMessage(
+        makeEnvelope({
+          id: `msg_${cid}`,
+          from: REPORT_FROM,
+          to: sid,
+          sentAt: evidence.at,
+          kind: 'note',
+          body,
+          ...(typeof rawSeq === 'number' ? { rawSeq } : {})
+        })
+      );
       return { signature: evidence.signature, files, delivered: true, reason: 'note 已投递' };
     } catch (error) {
       log(`report delivery failed (${sid}): ${errText(error)}`);

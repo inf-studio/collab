@@ -551,6 +551,13 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     factIds: string[];
     basedOn: MessageEnvelope['basedOn'];
     bid?: string;
+    /**
+     * 0.10.0 (`11-23-collab-metrics-attribution`, R1): the `kept` value the
+     * window branch already consumed at pipeline entry. Present = "already
+     * counted, do not count again" (the buffer-unavailable fallback); absent =
+     * count now, after the prompt was accepted.
+     */
+    rawSeq?: number;
   }): Promise<{ admitted?: SessionPromptResult; thread?: Awaited<ReturnType<ThreadStore['update']>> }> {
     const config = readConfig();
     const text = envelope({
@@ -580,6 +587,14 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     });
     // 0.9.0 (`11-20-collab-store`, R1/R2): JSONL first (the truth), then the
     // projection. Both are side paths — the host already admitted the message.
+    //
+    // 0.10.0 (`11-23-collab-metrics-attribution`, R1): the count and the marker
+    // come from **one** place — `recordKept` returns the day's new `kept` value
+    // and that number is stamped on the row (`rawSeq`). The count happens here,
+    // right after the prompt was accepted (a failed prompt never reaches this
+    // line), and *before* the row is written. A window that already counted at
+    // entry passes its value in, so the fallback path never counts twice.
+    const rawSeq = typeof input.rawSeq === 'number' ? input.rawSeq : await recordKept(input.sentAt);
     await recordMessage(
       makeEnvelope({
         id: `msg_${input.cid}`,
@@ -591,7 +606,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         body: input.body,
         basedOn: input.basedOn,
         grade: input.grade,
-        ...(input.factIds.length ? { factIds: input.factIds } : {})
+        ...(input.factIds.length ? { factIds: input.factIds } : {}),
+        ...(typeof rawSeq === 'number' ? { rawSeq } : {})
       }),
       { dbPath: config.dbPath, storage: config.storage }
     );
@@ -646,6 +662,12 @@ export function createToolKit(deps: ToolDeps): ToolKit {
     const sentAt = window.openedAt;
     const items: EnvelopeItem[] = windowItems(window);
     const factIds = dedupe(window.items.flatMap(item => item.factIds ?? []).map(String));
+    // 0.10.0 (`11-23-collab-metrics-attribution`, R1): the batch row is **one**
+    // message, so it carries one marker — the highest `kept` value its items
+    // already consumed at pipeline entry. Items buffered by a pre-marker plugin
+    // have none: the row then stays unmarked and `uncounted` shows it, which is
+    // the mixed-version case this diagnostic exists for.
+    const batchSeq = window.items.reduce((best, item) => Math.max(best, Number(item.rawSeq) || 0), 0);
 
     // 1) The delivery itself. **Only this** decides `ok:false` — a failure here
     //    means the counterpart really received nothing, so the window goes back
@@ -693,7 +715,8 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           basedOn: first.basedOn,
           grade: first.grade as EnvelopeGrade,
           ...(factIds.length ? { factIds } : {}),
-          items
+          items,
+          ...(batchSeq > 0 ? { rawSeq: batchSeq } : {})
         }),
         { dbPath: config.dbPath, storage: config.storage }
       );
@@ -1060,15 +1083,18 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       windowMs: config.windowMs,
       directKinds: config.directKinds
     });
-    let countedAtEntry = false;
+    let countedAtEntry: number | undefined;
     if (policy === 'window') {
       // 0.10.x (`11-22-collab-metrics-dual`): the **window** branch counts at
       // pipeline entry (before the buffer write): the message has entered the
       // delivery pipeline, and the later flush / merge / retry must not move
       // `raw` / `kept` again. The direct branch counts only after the host
       // accepted the prompt (a refused prompt is not a delivery).
-      await recordKept(admittedAt);
-      countedAtEntry = true;
+      // 0.10.0 (`11-23-collab-metrics-attribution`, R1): the returned value is
+      // the marker — carried on the item (and written on the batch row at flush)
+      // or, if the buffer is unusable, passed to `admitOne` so the fallback
+      // delivery is not counted twice.
+      countedAtEntry = await recordKept(admittedAt);
       const item: PacingItem = {
         id: `msg_${cid}`,
         target: sessionID,
@@ -1085,6 +1111,7 @@ export function createToolKit(deps: ToolDeps): ToolKit {
         ...(factIds.length ? { factIds } : {}),
         ...(factIds.length ? { factId: factIds[0] } : {}),
         ...(bid ? { bid } : {}),
+        ...(countedAtEntry !== undefined ? { rawSeq: countedAtEntry } : {}),
         baseline
       };
       const queued = await enqueueWindow(item, { windowMs: config.windowMs });
@@ -1123,13 +1150,15 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       grade,
       factIds,
       basedOn,
-      ...(bid ? { bid } : {})
+      ...(bid ? { bid } : {}),
+      // 0.10.0 (R1): a window that could not be buffered already counted at
+      // entry — `admitOne` then only stamps the marker, it does not count again.
+      ...(countedAtEntry !== undefined ? { rawSeq: countedAtEntry } : {})
     });
     // 0.10.x (`11-22-collab-metrics-dual`): a **direct** delivery counts only
-    // once the host accepted the prompt (`admitOne` throws otherwise) — a
-    // failed prompt must move neither `raw` nor `kept`. A window that could not
-    // be buffered already counted at entry, so the fallback must not count twice.
-    if (!countedAtEntry) await recordKept(admittedAt);
+    // once the host accepted the prompt — `admitOne` counts right after the
+    // prompt and stamps the row with the returned value (`rawSeq`), so there is
+    // one counting site, not two.
 
     // 0.9.6: the counterpart has now really received this turn — the next delta
     // is measured against what it knows, not against what we tried to send.
@@ -1323,6 +1352,12 @@ export function createToolKit(deps: ToolDeps): ToolKit {
       // 0.9.0 (`11-20-collab-store`, R1): the takeover request is a message too
       // — one envelope per `cid`, so a wake / resend of the same hand-off does
       // not grow the history (the `id` is derived from that reused `cid`).
+      // 0.10.0 (`11-23-collab-metrics-attribution`, R1): count first, then stamp
+      // the row with the returned `kept` value — the marker has one producer.
+      // A takeover request (broadcast ask / wake / spawned claim) is a direct
+      // delivery: `raw` + `kept` like every other prompt; a repeated wake reuses
+      // the cid but is still a delivery.
+      const rawSeq = await recordKept(at);
       await recordMessage(
         makeEnvelope({
           id: `msg_${cid}`,
@@ -1331,14 +1366,11 @@ export function createToolKit(deps: ToolDeps): ToolKit {
           to: target,
           sentAt: at,
           kind: 'request',
-          body: askBody
+          body: askBody,
+          ...(typeof rawSeq === 'number' ? { rawSeq } : {})
         }),
         { dbPath: config.dbPath, storage: config.storage }
       );
-      // 0.10.x (`11-22-collab-metrics-dual`): a takeover request (broadcast ask /
-      // wake / spawned claim) is a direct delivery — `raw` + `kept` like every
-      // other prompt. A repeated wake reuses the cid but is still a delivery.
-      await recordKept(at);
       // F1 (review): merge into the *current* record — this write happens after
       // an `await`, so a concurrent `seenAt` (the receiver's `[ack]`) must not
       // be overwritten by the pre-await snapshot.

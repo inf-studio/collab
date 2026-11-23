@@ -771,6 +771,19 @@ export interface MessageEnvelope {
    * within a thread is the array order, never the flush time.
    */
   items?: EnvelopeItem[];
+  /**
+   * 0.10.0 (`11-23-collab-metrics-attribution`, R1): the **count marker** — the
+   * day's `kept` counter value this delivery produced (`recordKept` returns it,
+   * so the number and the row cannot drift apart). A row **without** it is
+   * *unmarked*, which does **not** imply "uncounted": it may come from
+   * ① pre-0.10.0 (no counting at all), ② 0.10.x-rc.2 (counted, marker not yet
+   * written → false positive), or ③ a delivery path missed in this version.
+   * `collab_index { action:"metrics" }` reports those rows per day as
+   * `uncounted N` (resends `_r<n>` excluded) and the note spells the three
+   * cases out. Only `uncounted = 0` proves a day is fully counted.
+   * Absent — never `0` — on every row written before this version.
+   */
+  rawSeq?: number;
   /** sha256 of this line's body chunk (hex). */
   sha256?: string;
   /** 0-based part index + total, only for a split body. */
@@ -812,6 +825,14 @@ export interface PacingItem extends EnvelopeItem {
   factId?: string;
   /** Hand-off this item closes; a `bid` item is never windowed (lease + ack chain). */
   bid?: string;
+  /**
+   * 0.10.0 (`11-23-collab-metrics-attribution`, R1): the `kept` value this item
+   * already consumed at pipeline entry (`dispatch` counts before buffering).
+   * Carried through the persisted window so the batch row written at flush can
+   * still say "this row was counted" — a reload must not turn it into a false
+   * `uncounted`. A number here is **not** an extra count, only the marker.
+   */
+  rawSeq?: number;
   /** The delta baseline to record once this item is *delivered* (0.9.6 R3). */
   baseline?: DeltaSnapshot;
 }
@@ -945,6 +966,13 @@ export interface IndexMetrics {
   reason?: string;
   /** Newest day first, at most `limit` rows. */
   rows: MetricsDayRow[];
+  /**
+   * 0.10.0 (`11-23-collab-metrics-attribution`, R2): per-day `uncounted` — the
+   * message rows of that day **without** the count marker (`rawSeq`), `_r<n>`
+   * resends excluded. Derived from the same projection at read time (not a
+   * column, never back-filled); absent when nothing was read.
+   */
+  uncounted?: Record<string, number>;
   /** The whole table's span (not just the shown rows); absent when empty. */
   range?: { first: string; last: string; days: number };
 }

@@ -34,6 +34,12 @@
  *      → NULL, then a partial `raw=1` against a full-day `msg_count` — legal and
  *      visibly different from a full-coverage day; an explicit `raw:null` never
  *      becomes `0`.
+ *   8. **count marker + `uncounted`** (0.10.0 `11-23-collab-metrics-attribution`):
+ *      every delivered row carries `rawSeq` (the day's new `kept` value, returned
+ *      by `recordKept` and written by `recordMessage` — one producer); a
+ *      hand-written row without it makes the day read `uncounted 1 ⚠未计数`;
+ *      `_r<n>` resends are never counted; a legacy row is uncounted and the view
+ *      says "no marker" without guessing a version.
  *
  * Exits 1 if any check fails.
  */
@@ -349,6 +355,9 @@ expect(
 
 // ------------------------------------- 4) old data → NULL, rendered as `-`
 section('4) counters without raw / kept → NULL (never 0), shown as `-`');
+// An isolated projection: a legacy **row** (no `rawSeq`) + a legacy **counters
+// entry** (noop/late only). `uncounted` is read from the same projection, so the
+// flag and the row describe one population.
 const oldDir = join(root, 'metrics-old');
 mkdirSync(oldDir, { recursive: true });
 const oldMessages = join(oldDir, 'collab-messages.jsonl');
@@ -401,9 +410,14 @@ await settle(1100);
 const listed = await call('collab_index', { action: 'metrics' });
 const printed = listed.split('\n').find(line => line.startsWith(`${oldDay} · raw `)) ?? '';
 expect(
-  '`collab_index metrics` prints raw - · kept - for that day',
-  printed === `${oldDay} · raw - · kept - · msg 1 · noop 2 · late 1 · gap 0ms`,
+  '`collab_index metrics` prints raw - · kept - and the legacy row as uncounted',
+  printed === `${oldDay} · raw - · kept - · msg 1 · noop 2 · late 1 · gap 0ms · uncounted 1 ⚠未计数`,
   printed || listed.split('\n')[0]
+);
+expect(
+  'a legacy row (no count marker) is uncounted and flagged, and the note is printed',
+  printed.endsWith('⚠未计数') && /没有计数标记（rawSeq）/.test(listed),
+  listed.split('\n').find(line => line.includes('没有计数标记')) ?? '-'
 );
 expect(
   'the tool explains `-` (expired / never recorded, not 0)',
@@ -418,9 +432,21 @@ await settle(1100);
 const live = await call('collab_index', { action: 'metrics' });
 const liveLine = live.split('\n').find(line => line.startsWith(`${day} · raw `)) ?? '';
 expect(
-  'the row reads `day · raw 14 · kept 11 · msg 6 · noop 3 · late L · gap G`',
-  new RegExp(`^${day} · raw 14 · kept 11 · msg 6 · noop 3 · late \\d+ · gap \\d+ms$`).test(liveLine),
+  'the row reads `day · raw 14 · kept 11 · msg 6 · noop 3 · late L · gap G · uncounted 0`',
+  new RegExp(`^${day} · raw 14 · kept 11 · msg 6 · noop 3 · late \\d+ · gap \\d+ms · uncounted 0$`).test(liveLine),
   liveLine || live.split('\n')[0]
+);
+/** The live day's rows, resends excluded — the population `msg_count` counts. */
+const liveRows = () =>
+  messageLog().filter(
+    message => internals.dayKey(message.sentAt) === day && !internals.isResendID(message.id)
+  );
+expect(
+  'every non-resend row of the live day carries its marker (rawSeq), so uncounted is 0',
+  liveRows().every(message => typeof message.rawSeq === 'number' && message.rawSeq > 0),
+  liveRows()
+    .map(message => `${message.id}:${message.rawSeq ?? '-'}`)
+    .join(' ')
 );
 console.log(`  · 样例输出: ${liveLine}`);
 
@@ -433,16 +459,21 @@ const deltaOf = async (label, run) => {
   const loggedBefore = messageLog().length;
   const result = await run();
   const after = counters();
+  const written = messageLog().slice(loggedBefore);
   const delta = {
     raw: (after.raw ?? 0) - (before.raw ?? 0),
     kept: (after.kept ?? 0) - (before.kept ?? 0),
     noop: (after.noop ?? 0) - (before.noop ?? 0),
-    logged: messageLog().length - loggedBefore
+    logged: written.length,
+    // 0.10.0 (R1): the row(s) this delivery wrote must carry the marker.
+    marked: written.every(message => typeof message.rawSeq === 'number' && message.rawSeq > 0)
   };
-  console.log(`  · ${label}: Δraw=${delta.raw} Δkept=${delta.kept} Δnoop=${delta.noop} Δmessages=${delta.logged}`);
+  console.log(
+    `  · ${label}: Δraw=${delta.raw} Δkept=${delta.kept} Δnoop=${delta.noop} Δmessages=${delta.logged} marked=${delta.marked}`
+  );
   return { delta, result };
 };
-const exactOne = delta => delta.raw === 1 && delta.kept === 1 && delta.noop === 0;
+const exactOne = delta => delta.raw === 1 && delta.kept === 1 && delta.noop === 0 && delta.marked;
 
 // 6a) 5× escalate — the measured defect (`msg=5, raw=1` before full coverage).
 const escBefore = counters();
@@ -516,13 +547,21 @@ internals.writeBroadcast({
 });
 const resent = await deltaOf('重发 _r1', () => hooks.context({ sessionID: 'ses_a', agent: 'build', system: [], messages: [] }));
 const resendMessage = messageLog().filter(message => internals.isResendID(message.id)).at(-1);
-expect('resend → Δraw=Δkept=1 and one `_r1` row', exactOne(resent.delta) && resent.delta.logged === 1 && Boolean(resendMessage), JSON.stringify(resent.delta));
+expect(
+  'resend → Δraw=Δkept=1 and one `_r1` row',
+  exactOne(resent.delta) && resent.delta.logged === 1 && Boolean(resendMessage),
+  JSON.stringify(resent.delta)
+);
+expect(
+  'the resend row carries the marker too (it *was* counted)',
+  typeof resendMessage?.rawSeq === 'number' && resendMessage.rawSeq > 0,
+  `${resendMessage?.id ?? '-'}: rawSeq=${resendMessage?.rawSeq ?? '-'}`
+);
 expect(
   'the resend row stays out of msg_count (`isResendID`)',
   internals.isResendID(String(resendMessage?.id ?? '')) &&
-    (await internals.refreshMetrics({ force: true, dbPath, storage: 'sqlite' })).msg_count ===
-      messageLog().filter(message => !internals.isResendID(message.id)).length,
-  resendMessage?.id ?? '-'
+    (await internals.refreshMetrics({ force: true, dbPath, storage: 'sqlite' })).msg_count === liveRows().length,
+  `${resendMessage?.id ?? '-'} / msg_count=${liveRows().length}`
 );
 
 // 6e) `notifyRequester` (the ACCEPT note back to the requester): an open record
@@ -660,6 +699,88 @@ expect(
     });
     return state.counters[day]?.raw === undefined && state.counters[day]?.kept === undefined;
   })()
+);
+
+// ------------------ 8) 未计数诊断：uncounted（0.10.0 `11-23-collab-metrics-attribution`）
+section('8) uncounted: rows without the count marker (resends excluded)');
+
+expect(
+  'every delivered row of the live day is counted (uncounted = 0)',
+  (internals.uncountedByDay(messageLog()).get(day) ?? 0) === 0,
+  `${internals.uncountedByDay(messageLog()).get(day) ?? 0}`
+);
+
+// 8a) the rules, without touching the log: absence of the marker counts, and a
+// `_r<n>` resend never does — marked or not (a resend is not a `msg_count`
+// unit either, so attributing it here would report a defect of this version).
+const manualAt = Date.now();
+const rules = internals.uncountedByDay([
+  { id: 'msg_rule_plain', sentAt: manualAt },
+  { id: 'msg_rule_marked', sentAt: manualAt, rawSeq: 4 },
+  { id: 'msg_rule_plain_r1', sentAt: manualAt },
+  { id: 'msg_rule_marked_r2', sentAt: manualAt, rawSeq: 5 }
+]);
+expect(
+  'a row without rawSeq is uncounted; a marked row is not',
+  rules.get(day) === 1,
+  JSON.stringify([...rules.entries()])
+);
+
+// 8b) end to end: one hand-written row without a marker → `uncounted 1 ⚠未计数`.
+// The `_r1` row from 6d is on the same day and must **not** be added to it.
+// `recordMessage` is the delivery path's own writer (log + projection) — calling
+// it **without** `rawSeq` is exactly "a row that was written but never counted".
+// The second row is an **unmarked resend**: `_r<n>` is excluded from `msg_count`
+// and from `uncounted` alike, so it must not move the flag either.
+for (const id of ['msg_manual_uncounted', 'msg_manual_uncounted_r1']) {
+  await internals.recordMessage(
+    internals.makeEnvelope({
+      id,
+      from: 'ses_a',
+      to: 'ses_b',
+      kind: 'note',
+      body: '手工写入：没有计数标记',
+      sentAt: manualAt
+    }),
+    { dbPath, storage: 'sqlite' }
+  );
+}
+const manualRow = await internals.refreshMetrics({ force: true, dbPath, storage: 'sqlite' });
+await settle(1100);
+const diagnosed = await call('collab_index', { action: 'metrics' });
+const diagnosedLine = diagnosed.split('\n').find(line => line.startsWith(`${day} · raw `)) ?? '';
+expect(
+  'the manual row is a real message (msg 17 → 18) while raw/kept do not move',
+  manualRow?.msg_count === 18 && manualRow?.raw_count === 26 && manualRow?.kept_count === 23,
+  JSON.stringify(manualRow ?? null)
+);
+expect(
+  'the day now reads `… · msg 18 … · uncounted 1 ⚠未计数` (the `_r1` row is not counted)',
+  /^.+ · raw 26 · kept 23 · msg 18 · .+ · uncounted 1 ⚠未计数$/.test(diagnosedLine),
+  diagnosedLine
+);
+expect(
+  'the note says what an unmarked row means and refuses to guess a version',
+  /没有计数标记（rawSeq）/.test(diagnosed) && /不猜版本/.test(diagnosed),
+  diagnosed.split('\n').find(line => line.includes('没有计数标记')) ?? '-'
+);
+const unmarkedRows = liveRows().filter(
+  message => !(typeof message.rawSeq === 'number' && message.rawSeq > 0)
+);
+expect(
+  'exactly one unmarked row exists, and it is the hand-written one',
+  unmarkedRows.length === 1 && unmarkedRows[0]?.id === 'msg_manual_uncounted',
+  unmarkedRows.map(message => message.id).join(' ') || '-'
+);
+expect(
+  'an **unmarked** resend row is still excluded from uncounted',
+  messageLog().some(message => message.id === 'msg_manual_uncounted_r1' && message.rawSeq === undefined) &&
+    internals.uncountedByDay([{ id: 'msg_manual_uncounted_r1', sentAt: manualAt }]).size === 0 &&
+    (internals.uncountedByDay(messageLog()).get(day) ?? 0) === 1,
+  messageLog()
+    .filter(message => internals.isResendID(message.id))
+    .map(message => `${message.id}:${message.rawSeq ?? '-'}`)
+    .join(' ')
 );
 
 // ---------------------------------------- 9) never write the real config

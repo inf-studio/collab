@@ -75,7 +75,9 @@
 `counters[day]`；**缺失写 NULL，不是 0**——`counters` 只保留 30 天，更早的日子计数已过期；0.10.x 之前的老数据没有
 `raw`/`kept` 字段，同样 NULL 且不回填，`metrics` 显示 `-`），`stats` 显示 `metrics 覆盖 <首日>–<末日>（N 天）`，无数据写「无」；
 `collab_index { action:"metrics", limit? }`（0.9.7）**只读**打印这些日行（一天一行、按日期倒序，
-`day · raw · kept · msg · noop · late · gap`；`limit` 默认 30，末尾给覆盖范围；NULL 显示 `-`；无库报 `[索引不可用]` 且不建文件）。
+`day · raw · kept · msg · noop · late · gap · uncounted`；`limit` 默认 30，末尾给覆盖范围；NULL 显示 `-`；无库报 `[索引不可用]` 且不建文件）。
+`uncounted N`（0.10.0）是当日**没有计数标记**（`rawSeq`）的 message 行数（`_r<n>` 重发不计入），`N > 0` 行尾标 `⚠未计数`——
+投递成功并计数后，`recordKept` 返回的当日 `kept` 值就是该行的 `rawSeq`；`msg > raw` 时用它归因（旧版本写入 / 混版本漏计，数据上不猜版本）。
 `sinceDays`（默认 180，**0 = 不按时间过滤**）只裁剪投影——`messages` 与 `metrics` 同窗口，JSONL 真源永久保留，
 随时可用 `sinceDays:0` 重建全量。
 回滚：`collab.json` → `"windowMs": 0` + `"suppressNoDelta": false`（逐条投递）。详见 `docs/collab.md` §11.27。

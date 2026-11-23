@@ -73,11 +73,14 @@ export function makeEnvelope(input: {
   deltaOnly?: boolean;
   /** 0.9.6: the items a 2-minute batch merged into this one message. */
   items?: EnvelopeItem[];
+  /** 0.10.0: the day's `kept` counter value this delivery consumed (count marker). */
+  rawSeq?: number;
 }): MessageEnvelope {
   const sentAt = Number(input.sentAt) || Date.now();
   const kind = (KINDS as string[]).includes(input.kind) ? (input.kind as EnvelopeKind) : 'note';
   const grade = input.grade && GRADES.includes(input.grade) ? input.grade : 'unknown';
   const threadId = String(input.threadId ?? '').trim();
+  const rawSeq = Number(input.rawSeq);
   return {
     v: ENVELOPE_VERSION,
     id: String(input.id ?? '').trim() || newMessageID(sentAt),
@@ -91,7 +94,8 @@ export function makeEnvelope(input: {
     grade,
     ...(input.factIds?.length ? { factIds: [...input.factIds] } : {}),
     ...(input.deltaOnly ? { deltaOnly: true } : {}),
-    ...(input.items?.length ? { items: input.items.map(normalizeItem) } : {})
+    ...(input.items?.length ? { items: input.items.map(normalizeItem) } : {}),
+    ...(Number.isFinite(rawSeq) && rawSeq > 0 ? { rawSeq } : {})
   };
 }
 
@@ -190,6 +194,9 @@ function normalizeEnvelope(raw: unknown): MessageEnvelope | undefined {
   if (part && (!Number.isFinite(part.i) || !Number.isFinite(part.n) || part.n < 1 || part.i < 0)) return undefined;
   const kind = (KINDS as string[]).includes(value.kind) ? (value.kind as EnvelopeKind) : 'note';
   const grade = (GRADES as string[]).includes(value.grade) ? (value.grade as EnvelopeGrade) : 'unknown';
+  // 0.10.0 (R1): the count marker survives a read, and **stays absent** when the
+  // line has none — a legacy row must never be back-filled with a made-up `0`.
+  const rawSeq = Number(value.rawSeq);
   const basedOn =
     value.basedOn && typeof value.basedOn === 'object'
       ? {
@@ -212,6 +219,7 @@ function normalizeEnvelope(raw: unknown): MessageEnvelope | undefined {
     ...(Array.isArray(value.factIds) ? { factIds: value.factIds.map(String) } : {}),
     ...(value.deltaOnly === true ? { deltaOnly: true } : {}),
     ...(normalizeItems(value.items).length ? { items: normalizeItems(value.items) } : {}),
+    ...(Number.isFinite(rawSeq) && rawSeq > 0 ? { rawSeq } : {}),
     ...(typeof value.sha256 === 'string' && value.sha256 ? { sha256: value.sha256 } : {}),
     ...(part ? { part } : {})
   };

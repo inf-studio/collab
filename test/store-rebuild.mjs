@@ -1339,10 +1339,12 @@ const listed = await runIndexTool({ action: 'metrics' });
 const readAfter = statSync(readDb);
 // readPacing above has no raw/kept (a day recorded before those counters
 // existed) → they must print `-`, exactly like an expired counter.
+// 0.10.0 (`11-23-collab-metrics-attribution`): these rows were appended without
+// a count marker (`rawSeq`), so each non-resend row is `uncounted` — `_r1` is not.
 const expectedMetricLines = [
-  `${mDay(rDay3)} · raw - · kept - · msg 1 · noop - · late - · gap 0ms`,
-  `${mDay(rDay2)} · raw - · kept - · msg 2 · noop 2 · late 0 · gap 5000ms`,
-  `${mDay(rDay1)} · raw - · kept - · msg 3 · noop 5 · late 1 · gap 20000ms`
+  `${mDay(rDay3)} · raw - · kept - · msg 1 · noop - · late - · gap 0ms · uncounted 1 ⚠未计数`,
+  `${mDay(rDay2)} · raw - · kept - · msg 2 · noop 2 · late 0 · gap 5000ms · uncounted 2 ⚠未计数`,
+  `${mDay(rDay1)} · raw - · kept - · msg 3 · noop 5 · late 1 · gap 20000ms · uncounted 3 ⚠未计数`
 ];
 expect(
   'R1 `metrics` 按日期倒序输出 3 天，数值与 rebuild 写入的 `metrics` 表逐字一致',
@@ -1376,7 +1378,7 @@ closeDb();
 const withNull = await runIndexTool({ action: 'metrics' });
 expect(
   'R5 NULL 字段显示 `-`（不把「没写过」变成 0）',
-  metricLinesOf(withNull.content)[0] === '2030-01-01 · raw - · kept - · msg - · noop - · late - · gap -',
+  metricLinesOf(withNull.content)[0] === '2030-01-01 · raw - · kept - · msg - · noop - · late - · gap - · uncounted 0',
   metricLinesOf(withNull.content)[0] ?? '-'
 );
 // R3: an existing projection with no `metrics` row is empty, not an error.

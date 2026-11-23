@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+> **计数标记 + 未计数诊断**（`11-23-collab-metrics-attribution`）：rc.2 第一个完整日出现
+> `raw 12 · kept 12 · msg 13`（`msg > raw` 差 1），从外部无法区分「某条路径漏埋」与「其它会话仍在跑升级前的插件」。
+> 现在每条被计数的 message 行带 `rawSeq`（当日 `kept` 值），`collab_index { action:"metrics" }` 每行追加
+> `uncounted N`（`_r<n>` 重发除外），`N > 0` 行尾标 `⚠未计数`。工具面仍 **29**。
+
+### Added
+
+- **消息计数标记 `rawSeq`（0.10.0）**：`recordKept` 现在返回该日**新的 `kept` 值**，调用方把它交给
+  `recordMessage` 写进 envelope —— 计数与标记**同一个生产者**，不另造序号。覆盖全部投递点：
+  `dispatch` 直投（`admitOne` 在宿主接受 prompt 后先计数再写行）、窗口批量（入窗时计数，标记随
+  `PacingItem.rawSeq` 落到 flush 那一行，缓冲写盘后重载不丢）、加急 / 冻结通知 / 缺陷上报 /
+  `notifyRequester` / `[ack]` / 受限重发 / `deliverAsk`。`rawSeq` 缺省 = 该行**没有被计数**（不补 0）。
+- **`collab_index { action:"metrics" }` 的 `uncounted N`（0.10.0）**：每行末尾追加当日 `messages` 里**没有
+  `rawSeq`** 的行数（`_r<n>` 重发不计入，与 `msg_count` 同一排除规则），从**同一个投影**读（按展示的最早一天起
+  一次查询，不新增列、不建文件），`N > 0` 行尾标 `⚠未计数` 并附一句说明。老行（0.10.0 之前写入）一律计入，
+  **不回填**：说明列三种来源（0.10.0 之前 / 0.10.x-rc.2 已计数但无标记 → 假阳性 / 本版本漏埋），并注明本诊断**向前生效**、不能追溯历史差异。
+  `msg > raw` 的差额从此可以先看 `uncounted` 归因。
+- `test/metrics-dual.mjs` 63 → **73 项**：正常投递逐点断言 `marked=true` 且当日 `uncounted 0`；手工经
+  `recordMessage` 写入无标记行（含一条无标记 `_r1`）→ `msg 17 → 18`、`raw/kept` 不动、当日读出
+  `uncounted 1 ⚠未计数`；老计数器 + 老行的那天读 `raw - · kept - · msg 1 … · uncounted 1 ⚠未计数`。
+  **强制变异**（工作树副本实测）：① 投递不写标记 → 13 条红；② `_r<n>` 也计入 `uncounted` → 3 条红。
+  `test/store-rebuild.mjs` 的逐字渲染行同步为带 `uncounted` 的新格式。
+
 ## [0.10.0-rc.2] - 2026-11-22
 
 > **预发布（dist-tag `next`）**：在 rc.1 基础上带 5 条遗留修复 + `metrics` 三计数（raw/kept/delivered）。
