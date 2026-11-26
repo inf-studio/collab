@@ -48,3 +48,12 @@
 - 决定：等满一周再发 0.10.0 正式版（`latest` 仍 0.9.6）。
 - 已排一次性 automation `aut_2183a274b0016kbXGIFJnK1pOs`：11-29 10:00 自动检查 11-26..11-29 的三条恒等式并给发布建议。
 - 工作区有 6 个 dirty 文件（`mojo-studio` → `mojoy-studio` 改名，非本会话改动），未触碰、未提交。
+
+## 2026-11-26 · 0.10.0-rc.4（看板滚动修复）
+
+- 修：轮询重建列表导致滚动跳回顶部 → `createStableRows` 按 id 复用行；孤儿行（locks/handoffs/queue）一并稳定化。
+- 测试：panel 130/130（新增 18 条）；夹具加 clamp 模型，退回原 bug 时 `scrollTop` 300→0（可证伪）。
+- 发布：CI `45848808604` success；dist-tags `latest: 0.9.6` / `next: 0.10.0-rc.4`。
+- Linux：`collab:active:v0.10.0-rc.4`。
+- mac：Desktop 已自动升级到 **2.4.2**（CLI 路径变为 `cli/2.4.2-x64/`）；rc.4 已装（cache + 配置），**待重启**。
+- 11-29 10:00 的发布前检查 automation 保持不变。
