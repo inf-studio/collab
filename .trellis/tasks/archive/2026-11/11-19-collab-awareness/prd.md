@@ -2,7 +2,7 @@
 
 ## 问题
 
-会话 A 需要 B 协助时，目前必须**人**提醒 A「用 collab_handoff」；B 收到投递后也不一定知道「回执要 collab_reply / DONE|BLOCKED」。工具存在，但会话不知道何时、用哪个通道——**尤其是跨工作区**（实测链路 A(issues-wt) → B(mojo-studio)）。
+会话 A 需要 B 协助时，目前必须**人**提醒 A「用 collab_handoff」；B 收到投递后也不一定知道「回执要 collab_reply / DONE|BLOCKED」。工具存在，但会话不知道何时、用哪个通道——**尤其是跨工作区**（实测链路 A(issues-wt) → B(mojoy-studio)）。
 
 ## 需求
 

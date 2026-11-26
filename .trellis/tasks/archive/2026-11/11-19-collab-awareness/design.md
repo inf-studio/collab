@@ -10,7 +10,7 @@
 
 - N：`listSessions({ directory: workspace, limit: 100 })` 里 `id !== me`、非子会话（`parentID` 空）、未归档；
 - M：**其它工作区**先去重出 directory 集合，再各自 `listSessions({ directory, limit: 20 })` 计活跃数；
-  本次证据里的 A(issues-wt)/B(mojo-studio) 正属于这种情况。
+  本次证据里的 A(issues-wt)/B(mojoy-studio) 正属于这种情况。
 - 只有 `N=0` 时把前半句省略，只留 `其它工作区候选 M（collab_broadcast，需提案）`；`M=0` 同理。
 
 ## 2. 去噪与成本

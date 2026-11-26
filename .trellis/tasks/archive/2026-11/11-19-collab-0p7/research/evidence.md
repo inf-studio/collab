@@ -1,6 +1,6 @@
 # 证据包（来自 ses_e0e3…Fm8Z，thread t_mwn1z6bg_6yd7）
 
-链路：A `ses_edc3c78edffeoH5pvKHZie4Mw5`(issues-wt) → B `ses_e0e3d0ffaffeJJdK2CCKLXFm8Z`(mojo-studio) → C `ses_e4c03493fffeY5BT7ed1WwQstQ`(mojo-studio)
+链路：A `ses_edc3c78edffeoH5pvKHZie4Mw5`(issues-wt) → B `ses_e0e3d0ffaffeJJdK2CCKLXFm8Z`(mojoy-studio) → C `ses_e4c03493fffeY5BT7ed1WwQstQ`(mojoy-studio)
 
 ## 交接台账
 - `b_b95c6917a0a1d483` peer A→B，DONE
