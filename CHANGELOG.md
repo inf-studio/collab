@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [0.10.0-rc.4] - 2026-11-26
+
+> **预发布（dist-tag `next`）**：只含一个修复——**看板轮询不再重置滚动**。
+> 行按 id（workspace/sid/bid/queueId）复用，2s 轮询不会重建 DOM；孤儿行也纳入稳定化。
+> 测试夹具加了最小 clamp 模型，使「全量重建」真的把 `scrollTop` 打到 0（可证伪）。
+
 ## [0.10.0-rc.3] - 2026-11-23
 
 > **预发布（dist-tag `next`）**：在 rc.2 基础上加 **计数标记 `rawSeq` + `uncounted` 诊断**——
