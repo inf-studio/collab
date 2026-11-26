@@ -39,3 +39,12 @@
   历史三天的 raw/kept 显示 `-`（旧 counters 无字段，预期）。
 - mac：配置与 `~/.cache/opencode/npm/@inf-studio/collab@0.10.0-rc.2` 就位，**待重启 Desktop**。
 - 待办：mac 重启后 4 条核验；正式版 0.10.0 观察后发布；每日 22:05 cron 持续采集。
+
+## 2026-11-26 · rc.3 观察两天：恒等式成立，等满一周再发正式版
+
+- 11-24：raw 14 / kept 14 / msg 14 / noop 0 / uncounted 0 —— `raw = kept + noop`、`kept ≥ msg` 均成立。
+- 11-25：raw 13 / kept 11 / msg 11 / noop 2 / uncounted 0 —— 同样成立。
+- 11-23 的「差 1 条」已可解释：`uncounted 14` = 当天全部行无标记（rc.3 当天才装），不是漏埋。
+- 决定：等满一周再发 0.10.0 正式版（`latest` 仍 0.9.6）。
+- 已排一次性 automation `aut_2183a274b0016kbXGIFJnK1pOs`：11-29 10:00 自动检查 11-26..11-29 的三条恒等式并给发布建议。
+- 工作区有 6 个 dirty 文件（`mojo-studio` → `mojoy-studio` 改名，非本会话改动），未触碰、未提交。
