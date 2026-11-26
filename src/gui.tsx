@@ -37,7 +37,7 @@
  *     from the remote server, local rows from the local one — one source at a
  *     time, never mixed.
  */
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from 'solid-js';
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, type Accessor } from 'solid-js';
 import { createStore } from 'solid-js/store';
 import {
   Command,
@@ -58,6 +58,7 @@ import {
 import { CollabState } from './rpc.ts';
 import type { ActionReceipt, Snapshot, SnapshotContract, SnapshotDecision, SnapshotHandoff, SnapshotLock, SnapshotQueueItem } from './rpc.ts';
 import { buildBoard, boardOrphans, type BoardOrphans, type BoardSession, type BoardWorkspace } from './core/board.ts';
+import { createStableRows } from './core/stable-rows.ts';
 import { contractBadge, contractRows, type ContractRowKey } from './core/contract-view.ts';
 import { decisionRowText } from './core/decision-view.ts';
 import { buildGraph, GRAPH_NODE_LIMIT, type GraphEdge, type GraphLevel, type GraphNode } from './core/graph.ts';
@@ -481,17 +482,23 @@ function ContractBadge(props: { contract?: SnapshotContract }) {
   );
 }
 
-function SpawnRow(props: { child: BoardSession['spawned'][number] }) {
+/**
+ * 0.10.0 (`11-26-collab-board-scroll`): one `↳` line of the detail pane. Reads a
+ * **stable row** accessor (`item`) so a 2 s poll that only changes contents
+ * updates this node instead of replacing it.
+ */
+function SpawnRow(props: { item: Accessor<BoardSession['spawned'][number]> }) {
+  const child = () => props.item();
   return (
-    <div class="collab-row collab-spawn" title={props.child.sid}>
+    <div class="collab-row collab-spawn" title={child().sid}>
       <span class="collab-spawn-mark">↳</span>
-      <span class="collab-mono collab-muted">{shortSid(props.child.sid)}</span>
-      <span class="collab-badge">{props.child.state}</span>
-      <Show when={props.child.archived}>
+      <span class="collab-mono collab-muted">{shortSid(child().sid)}</span>
+      <span class="collab-badge">{child().state}</span>
+      <Show when={child().archived}>
         <span class="collab-badge collab-muted">[archived]</span>
       </Show>
-      <Show when={props.child.title}>
-        <span class="collab-row-title collab-muted">{props.child.title}</span>
+      <Show when={child().title}>
+        <span class="collab-row-title collab-muted">{child().title}</span>
       </Show>
     </div>
   );
@@ -575,49 +582,54 @@ function HandoffRow(props: { handoff: SnapshotHandoff }) {
  * session (single-select, `sid`-keyed); the rows that belong to it render in the
  * right detail pane, so the row carries no inline detail of its own and the list
  * stays narrow.
+ *
+ * 0.10.0 (`11-26-collab-board-scroll`): `item` is a **stable row accessor** — the
+ * node is created once per `sid` and only its contents follow the poll. Read it
+ * as `session()` everywhere (never destructured) so field updates stay reactive.
  */
 function SessionRow(props: {
-  session: BoardSession;
+  item: Accessor<BoardSession>;
   current: string;
   selected: boolean;
   onSelect: () => void;
 }) {
   const ctx = usePlugin();
   const store = storeFor(ctx);
+  const session = () => props.item();
   /** Jump to this session's tab. Read the server from the snapshot's source: the
    * rows all come from one server, and a remote one is the interesting case. */
   const jump = (): void => {
     const server = store.state.source?.server ?? ctx.sessions.current()?.server?.id;
     try {
       if (!server) throw new Error('no server');
-      ctx.tabs.open({ server, id: props.session.sid }, { focus: true });
+      ctx.tabs.open({ server, id: session().sid }, { focus: true });
     } catch {
-      ctx.toast.show({ title: ctx.t('row.jumpFailed'), description: props.session.sid, variant: 'error' });
+      ctx.toast.show({ title: ctx.t('row.jumpFailed'), description: session().sid, variant: 'error' });
     }
   };
   const copy = (): void => {
     void ctx.system
-      .copy(props.session.sid)
-      .then(() => ctx.toast.show({ title: ctx.t('row.copied'), description: props.session.sid, variant: 'success' }))
+      .copy(session().sid)
+      .then(() => ctx.toast.show({ title: ctx.t('row.copied'), description: session().sid, variant: 'success' }))
       .catch(() => ctx.toast.show({ title: ctx.t('row.copyFailed'), variant: 'error' }));
   };
   return (
     <button
       type="button"
       class={`collab-row collab-session${props.selected ? ' collab-session-selected' : ''}`}
-      title={props.session.sid}
+      title={session().sid}
       aria-pressed={props.selected}
       onClick={props.onSelect}
     >
       <span class="collab-caret">{props.selected ? '›' : '·'}</span>
-      <span class={`collab-dot${props.session.busy ? ' collab-dot-busy' : ''}`} />
-      <span class="collab-row-body"><span class="collab-row-main"><span class="collab-row-title collab-link" title={`${props.session.title} · ${ctx.t('row.jumpHint')}`} onClick={event => { event.stopPropagation?.(); jump(); }}>{props.session.title}</span><Show when={props.session.sid === props.current}><span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span></Show><SessionBadges session={props.session} /></span><span class="collab-row-meta"><span class="collab-badge">{props.session.agent}</span><span class="collab-mono collab-muted collab-link" title={`${props.session.sid} · ${ctx.t('row.copyHint')}`} onClick={event => { event.stopPropagation?.(); copy(); }}>{shortSid(props.session.sid)}</span><ContractBadge contract={props.session.contract} /></span></span>
+      <span class={`collab-dot${session().busy ? ' collab-dot-busy' : ''}`} />
+      <span class="collab-row-body"><span class="collab-row-main"><span class="collab-row-title collab-link" title={`${session().title} · ${ctx.t('row.jumpHint')}`} onClick={event => { event.stopPropagation?.(); jump(); }}>{session().title}</span><Show when={session().sid === props.current}><span class="collab-badge collab-tone-success">{ctx.t('panel.current')}</span></Show><SessionBadges session={session()} /></span><span class="collab-row-meta"><span class="collab-badge">{session().agent}</span><span class="collab-mono collab-muted collab-link" title={`${session().sid} · ${ctx.t('row.copyHint')}`} onClick={event => { event.stopPropagation?.(); copy(); }}>{shortSid(session().sid)}</span><ContractBadge contract={session().contract} /></span></span>
     </button>
   );
 }
 
 function GroupView(props: {
-  group: BoardWorkspace;
+  item: Accessor<BoardWorkspace>;
   current: string;
   selected: string | null;
   selectedWorkspace: string | null;
@@ -627,8 +639,14 @@ function GroupView(props: {
   onSelectWorkspace: (workspace: string) => void;
 }) {
   const ctx = usePlugin();
-  const label = () => workspaceLabel(props.group.workspace) || ctx.t('panel.global');
-  const archivedKey = () => `archived:${props.group.workspace}`;
+  const group = () => props.item();
+  const label = () => workspaceLabel(group().workspace) || ctx.t('panel.global');
+  const archivedKey = () => `archived:${group().workspace}`;
+  // 0.10.0 (`11-26-collab-board-scroll`): one stable row per `sid`. While the
+  // membership is unchanged the rows (and their DOM nodes) survive the 2 s poll;
+  // a title / badge change only re-renders that row's contents.
+  const sessions = createStableRows(() => group().sessions, session => session.sid);
+  const archived = createStableRows(() => group().archived, session => session.sid);
   return (
     <section class="collab-group">
       <header class="collab-head">
@@ -638,44 +656,44 @@ function GroupView(props: {
             session (L2). */}
         <button
           type="button"
-          class={`collab-ws${props.selectedWorkspace === props.group.workspace ? ' collab-ws-selected' : ''}`}
-          title={props.group.workspace || undefined}
-          aria-pressed={props.selectedWorkspace === props.group.workspace}
-          onClick={() => props.onSelectWorkspace(props.group.workspace)}
+          class={`collab-ws${props.selectedWorkspace === group().workspace ? ' collab-ws-selected' : ''}`}
+          title={group().workspace || undefined}
+          aria-pressed={props.selectedWorkspace === group().workspace}
+          onClick={() => props.onSelectWorkspace(group().workspace)}
         >
           <span class="collab-head-label">{label()}</span>
         </button>
         <span class="collab-muted">
           {ctx.t('panel.workspaceCounts', {
-            sessions: props.group.counts.sessions,
-            locks: props.group.counts.locks,
-            handoffs: props.group.counts.handoffs,
-            archived: props.group.counts.archived
+            sessions: group().counts.sessions,
+            locks: group().counts.locks,
+            handoffs: group().counts.handoffs,
+            archived: group().counts.archived
           })}
         </span>
       </header>
-      <For each={props.group.sessions}>
-        {session => (
+      <For each={sessions()}>
+        {row => (
           <SessionRow
-            session={session}
+            item={row.value}
             current={props.current}
-            selected={props.selected === session.sid}
-            onSelect={() => props.onSelect(session.sid)}
+            selected={props.selected === row.value().sid}
+            onSelect={() => props.onSelect(row.value().sid)}
           />
         )}
       </For>
-      <Show when={props.group.archived.length}>
+      <Show when={archived().length}>
         <button type="button" class="collab-archived" onClick={() => props.onToggle(archivedKey())}>
-          {props.expanded(archivedKey()) ? '▾' : '▸'} {ctx.t('panel.archived', { count: props.group.archived.length })}
+          {props.expanded(archivedKey()) ? '▾' : '▸'} {ctx.t('panel.archived', { count: archived().length })}
         </button>
         <Show when={props.expanded(archivedKey())}>
-          <For each={props.group.archived}>
-            {session => (
+          <For each={archived()}>
+            {row => (
               <SessionRow
-                session={session}
+                item={row.value}
                 current={props.current}
-                selected={props.selected === session.sid}
-                onSelect={() => props.onSelect(session.sid)}
+                selected={props.selected === row.value().sid}
+                onSelect={() => props.onSelect(row.value().sid)}
               />
             )}
           </For>
@@ -1495,8 +1513,11 @@ function ActionRow(props: { session: BoardSession; enabled: boolean }) {
 function DetailItems(props: { session: BoardSession; current: string }) {
   const ctx = usePlugin();
   const session = () => props.session;
+  // 0.10.0: `↳` rows are keyed by spawn id, so a poll with the same children
+  // keeps those nodes (the rest of this pane is rebuilt only when it must be).
+  const spawned = createStableRows(() => session().spawned, child => child.sid);
   const empty = () =>
-    !session().locks.length && !session().handoffs.length && !session().queue.length && !session().spawned.length;
+    !session().locks.length && !session().handoffs.length && !session().queue.length && !spawned().length;
   return (
     <div class="collab-items">
       <Show when={session().locks.length}>
@@ -1511,9 +1532,9 @@ function DetailItems(props: { session: BoardSession; current: string }) {
         <div class="collab-sub">{ctx.t('panel.detailQueue', { count: session().queue.length })}</div>
         <For each={session().queue}>{item => <QueueRow item={item} />}</For>
       </Show>
-      <Show when={session().spawned.length}>
-        <div class="collab-sub">{ctx.t('panel.detailSpawned', { count: session().spawned.length })}</div>
-        <For each={session().spawned}>{child => <SpawnRow child={child} />}</For>
+      <Show when={spawned().length}>
+        <div class="collab-sub">{ctx.t('panel.detailSpawned', { count: spawned().length })}</div>
+        <For each={spawned()}>{row => <SpawnRow item={row.value} />}</For>
       </Show>
       <Show when={empty()}>
         <div class="collab-empty">{ctx.t('panel.detailEmpty')}</div>
@@ -1601,10 +1622,24 @@ function PanelView(props: { session: { id: string } }) {
     onCleanup(() => query.removeEventListener?.('change', onChange));
   }
 
-  const groups = createMemo(() =>
+  const board = createMemo(() =>
     store.state.data ? buildBoard(store.state.data, [], Date.now(), props.session.id) : []
   );
-  const orphans = createMemo(() => boardOrphans(store.state.data, groups()));
+  // 0.10.0 (`11-26-collab-board-scroll`): the sidebar renders **stable rows**, one
+  // per workspace path. A poll whose membership is unchanged answers the same
+  // array reference, so `<For>` keeps every group/session node and the sidebar's
+  // scroll position; field changes arrive through `row.value()`.
+  const groupRows = createStableRows(board, group => group.workspace);
+  // A workspace that only owns orphan rows (no session of its own) has no group
+  // to render — the orphans section shows its rows. Filtering the **rows** (not
+  // the raw board) keeps every surviving row's identity intact.
+  const visibleGroups = createMemo(() =>
+    groupRows().filter(row => {
+      const group = row.value();
+      return group.sessions.length > 0 || group.archived.length > 0;
+    })
+  );
+  const orphans = createMemo(() => boardOrphans(store.state.data, board()));
   const hasOrphans = (): boolean =>
     orphans().locks.length > 0 || orphans().handoffs.length > 0 || orphans().queue.length > 0;
 
@@ -1612,7 +1647,7 @@ function PanelView(props: { session: { id: string } }) {
   const selectedSession = createMemo((): BoardSession | undefined => {
     const sid = selected();
     if (!sid) return undefined;
-    for (const workspace of groups()) {
+    for (const workspace of board()) {
       const hit = [...workspace.sessions, ...workspace.archived].find(session => session.sid === sid);
       if (hit) return hit;
     }
@@ -1638,7 +1673,7 @@ function PanelView(props: { session: { id: string } }) {
   createEffect(() => {
     const workspace = selectedWorkspace();
     if (workspace === null || !store.state.data) return;
-    if (groups().some(group => group.workspace === workspace)) return;
+    if (board().some(group => group.workspace === workspace)) return;
     setSelectedWorkspace(null);
     ctx.toast.show({
       title: ctx.t('panel.title'),
@@ -1707,14 +1742,14 @@ function PanelView(props: { session: { id: string } }) {
             even when the board has no session rows (a decision can outlive the
             session that opened it). Read-only; a row opens its owner session. */}
         <DecisionInbox />
-        <Show when={groups().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
+        <Show when={board().length || hasOrphans()} fallback={<div class="collab-empty">{ctx.t('panel.empty')}</div>}>
           <div class={`collab-split${narrow() ? ' collab-split-narrow' : ''}`}>
             <Show when={!narrow() || (!selected() && selectedWorkspace() === null)}>
               <section class="collab-sidebar">
-                <For each={groups().filter(group => group.sessions.length || group.archived.length)}>
-                  {group => (
+                <For each={visibleGroups()}>
+                  {row => (
                     <GroupView
-                      group={group}
+                      item={row.value}
                       current={props.session.id}
                       selected={selected()}
                       selectedWorkspace={selectedWorkspace()}

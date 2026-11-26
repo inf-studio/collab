@@ -1141,6 +1141,7 @@ PanelView                       （唯一的 2 s store 仍在这里；不新增�
 | --- | --- |
 | 单选 | `createSignal<string \| null>`（按 **sid**，跨快照稳定）；选中的行加 `collab-session-selected` 与 `›`，再点同一行 = 取消 |
 | 轮询不重置 | 选中/展开/窄屏判定都是**组件本地信号**；`sharedStore` 每 2 s 换 `data` 不触碰它们（测试用 `data-collab-at` 计数证明「期间确实换过一次快照」） |
+| 行复用（0.10.0） | 分组 / 会话行 / `↳` 行按 id 复用（`src/core/stable-rows.ts`）：成员不变时 2 s 轮询**不重建 DOM**，只更新行内容；此前每次快照都换新对象，长列表（25+ 会话）每两秒跳回顶部 |
 | 消失清空 | `createEffect` 检查选中的 sid 是否仍在 `buildBoard()` 的活跃或已归档列表里；不在才清空 + `ctx.toast.show`「该会话已不在快照中」。**没有快照**（adopt / 一次失败）不算消失——保留行，由横幅解释 |
 | 归档 | 会话被归档后**仍存在**于快照与 `archived[]`，详情继续显示并带 `[archived]`；只有真的离开快照才清空 |
 | 窄窗口 | `matchMedia('(max-width: 640px)')`（没有 `matchMedia` 的宿主 = 宽屏）：单栏时 `selected ? 详情 : 列表`，详情顶部给「← 返回列表」；CSS 里同一断点把 grid 收成一列（`@media (max-width:640px)`） |

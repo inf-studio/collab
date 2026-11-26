@@ -74,7 +74,26 @@ class Elem {
     // fire it for real; the default rect is the 640×360 canvas at the origin.
     this.listeners = new Map();
     this.rect = null;
+    // 0.10.0 (`11-26-collab-board-scroll`): a real browser keeps the scroll
+    // position of a container whose children are *updated*; the fixture must at
+    // least give the container a writable position, or "the poll reset it" is
+    // untestable. `scrollHeight` is derived from the rendered row count, so a
+    // rebuilt list would answer a different height than a reused one only if it
+    // also changed the number of rows — identity is asserted separately.
+    this.scrollTop = 0;
     this.style = { cssText: '', setProperty() {}, removeProperty() {} };
+  }
+  get scrollHeight() {
+    let rows = 0;
+    const walk = node => {
+      for (const child of node.childNodes ?? []) {
+        if (child.nodeType !== 1) continue;
+        if (String(child.className).split(' ').includes('collab-row')) rows += 1;
+        walk(child);
+      }
+    };
+    walk(this);
+    return 40 + rows * 24;
   }
   get firstChild() {
     return this.childNodes[0] ?? null;
@@ -712,6 +731,20 @@ function findIn(root, predicate) {
   };
   walk(root);
   return hit;
+}
+
+/** Every matching element, document order — for "did the poll replace the list?" */
+function findAllIn(root, predicate) {
+  const hits = [];
+  const walk = node => {
+    if (!node) return;
+    if (node.nodeType === 1) {
+      if (predicate(node)) hits.push(node);
+      for (const child of node.childNodes ?? []) walk(child);
+    }
+  };
+  walk(root);
+  return hits;
 }
 
 /** Click through Solid's delegated listener, with the node as `target`. */
@@ -2350,6 +2383,144 @@ const CONTRACT = {
     (el?.textContent ?? '').includes('待决策 3（⚠1）（已扫描 2000/5200 key）'),
     JSON.stringify((el?.textContent ?? '').slice(0, 120))
   );
+  dispose();
+}
+
+/* ---------- 16. 0.10.0 (`11-26-collab-board-scroll`): rows are reused -------
+ *
+ * The panel polls every 2 s and `buildBoard` derives new objects each time, so
+ * the *previous* rendering replaced every row (and the sidebar jumped to the
+ * top). These checks pin the three properties the design asks for:
+ *
+ *   PN16  same members, changed title → same DOM nodes, content updated in place;
+ *   PN16b same poll → the sidebar's `scrollTop` / `scrollHeight` survive;
+ *   PN16c add / remove one session → exactly one node appears / disappears.
+ *
+ * The mutation (returning a fresh row object per poll) fails PN16/PN16b; making
+ * the field update replace the node fails PN16.
+ */
+
+const SCROLL_WS = '/data/project/scroll';
+const scrollSession = index => ({
+  sid: `ses_scroll_${String(index).padStart(3, '0')}`,
+  title: `scroll row ${index}`,
+  agent: 'build',
+  busy: false,
+  workspace: SCROLL_WS
+});
+
+{
+  let scrollReply = {
+    at: 0,
+    reachable: true,
+    sessions: Array.from({ length: 40 }, (_, index) => scrollSession(index)),
+    locks: [],
+    handoffs: [],
+    queue: []
+  };
+  let scrollLoads = 0;
+  const scrollClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        scrollLoads += 1;
+        return { ...scrollReply, at: scrollLoads };
+      }
+    })
+  };
+  const SCROLL_SESSION = serverSession('ses_scroll_000', 'srv-scroll', scrollClient);
+  const h = harness(SCROLL_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SCROLL_SESSION);
+  const text = () => el?.textContent ?? '';
+  const isSessionRow = node => String(node.className).split(' ').includes('collab-session');
+  const rows = () => findAllIn(el, isSessionRow);
+  const sidebar = () => findIn(el, node => String(node.className).split(' ').includes('collab-sidebar'));
+  /** Rows live inside `<section class="collab-group">`, itself inside the sidebar. */
+  const inSidebar = node => {
+    for (let cursor = node; cursor; cursor = cursor.parentNode) if (cursor === sidebar()) return true;
+    return false;
+  };
+
+  const before = rows();
+  expect(
+    'PN16 a 40-session workspace renders 40 session rows in the sidebar',
+    before.length === 40 && before.every(inSidebar),
+    `${before.length} rows`
+  );
+
+  // The user is looking at the bottom of a long list.
+  const pane = sidebar();
+  pane.scrollTop = 300;
+  const heightBefore = pane.scrollHeight;
+  const atBefore = el.getAttribute('data-collab-at');
+  const loadsBefore = scrollLoads;
+
+  // The next poll only changes a title (membership and order are identical).
+  scrollReply = {
+    ...scrollReply,
+    sessions: scrollReply.sessions.map(session =>
+      session.sid === 'ses_scroll_000' ? { ...session, title: 'scroll row 0 (renamed)' } : session
+    )
+  };
+  await sleep(2100);
+
+  const after = rows();
+  expect(
+    'PN16 a poll really replaced the snapshot during the wait (loads and `at` both moved)',
+    scrollLoads > loadsBefore && el.getAttribute('data-collab-at') !== atBefore,
+    `${loadsBefore} → ${scrollLoads} loads; at ${atBefore} → ${el.getAttribute('data-collab-at')}`
+  );
+  expect(
+    'PN16 same members: every row is the **same DOM node** after the poll (no rebuild)',
+    after.length === before.length && before.every((node, index) => node === after[index]),
+    `${before.filter((node, index) => node !== after[index]).length} of ${before.length} replaced`
+  );
+  expect(
+    'PN16 … and the changed title updated that node in place',
+    (() => {
+      const renamed = after.find(node => node.textContent.includes('scroll row 0 (renamed)'));
+      return Boolean(renamed) && before.includes(renamed) && !renamed.textContent.includes('scroll row 0scroll');
+    })(),
+    JSON.stringify(after.find(node => node.textContent.includes('scroll row 0'))?.textContent ?? '')
+  );
+  expect(
+    'PN16b the sidebar is the same node, and its scrollTop / scrollHeight survived the poll',
+    sidebar() === pane && pane.scrollTop === 300 && pane.scrollHeight === heightBefore,
+    JSON.stringify({ same: sidebar() === pane, scrollTop: pane.scrollTop, height: [heightBefore, pane.scrollHeight] })
+  );
+
+  // Membership change: one session appears → exactly one node is added.
+  scrollReply = { ...scrollReply, sessions: [...scrollReply.sessions, scrollSession(40)] };
+  await sleep(2100);
+  const grown = rows();
+  const addedNode = grown.find(node => !before.includes(node));
+  expect(
+    'PN16c adding a session adds exactly one node; the other 40 keep their identity',
+    grown.length === 41 &&
+      before.every(node => grown.includes(node)) &&
+      grown.filter(node => !before.includes(node)).length === 1,
+    `${before.length} → ${grown.length}; new nodes ${grown.filter(node => !before.includes(node)).length}`
+  );
+  expect(
+    'PN16c … the new row is the added session, mounted in the same sidebar',
+    Boolean(addedNode) && inSidebar(addedNode) && addedNode.textContent.includes('scroll row 40'),
+    JSON.stringify({ text: addedNode?.textContent ?? '(missing)', mounted: inSidebar(addedNode) })
+  );
+
+  // … and disappears → exactly that node is removed, the rest stay.
+  scrollReply = { ...scrollReply, sessions: scrollReply.sessions.filter(session => session.sid !== 'ses_scroll_040') };
+  await sleep(2100);
+  const shrunk = rows();
+  expect(
+    'PN16c removing it detaches only that node; the surviving 40 are still the same objects',
+    shrunk.length === 40 &&
+      before.every(node => shrunk.includes(node)) &&
+      !shrunk.includes(addedNode) &&
+      addedNode.parentNode === null,
+    `${grown.length} → ${shrunk.length}; survivor identity ${before.filter(node => shrunk.includes(node)).length}/${before.length}`
+  );
+
   dispose();
 }
 
