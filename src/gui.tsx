@@ -708,22 +708,32 @@ function GroupView(props: {
  * gone, a hand-off from a session outside this snapshot, the caller's queue
  * when it is not listed). 0.5.3's flat view showed them; the tree must not drop
  * a row its own header counted. Same `boardOrphans` helper as the TUI.
+ *
+ * 0.10.0 (`11-26-collab-board-scroll`): these rows live inside the sidebar — one
+ * of the panel's scroll containers (the outer `.collab-panel` scrolls too when
+ * the host gives it a bounded height) — so they get the same stable rows as the
+ * tree (`lock.resource` / `handoff.bid` / `queue.queueId`). Without it an orphan
+ * row was detached and re-attached on every 2 s poll, which jitters (and resets)
+ * a list scrolled to the bottom.
  */
 function OrphanView(props: { orphans: BoardOrphans; current: string }) {
   const ctx = usePlugin();
+  const locks = createStableRows(() => props.orphans.locks, lock => lock.resource);
+  const handoffs = createStableRows(() => props.orphans.handoffs, handoff => handoff.bid);
+  const queue = createStableRows(() => props.orphans.queue, item => item.queueId);
   return (
     <section class="collab-group collab-orphans">
-      <Show when={props.orphans.locks.length}>
-        <div class="collab-sub">{ctx.t('panel.orphanLocks', { count: props.orphans.locks.length })}</div>
-        <For each={props.orphans.locks}>{lock => <LockRow lock={lock} current={props.current} />}</For>
+      <Show when={locks().length}>
+        <div class="collab-sub">{ctx.t('panel.orphanLocks', { count: locks().length })}</div>
+        <For each={locks()}>{row => <LockRow lock={row.value()} current={props.current} />}</For>
       </Show>
-      <Show when={props.orphans.handoffs.length}>
-        <div class="collab-sub">{ctx.t('panel.orphanHandoffs', { count: props.orphans.handoffs.length })}</div>
-        <For each={props.orphans.handoffs}>{handoff => <HandoffRow handoff={handoff} />}</For>
+      <Show when={handoffs().length}>
+        <div class="collab-sub">{ctx.t('panel.orphanHandoffs', { count: handoffs().length })}</div>
+        <For each={handoffs()}>{row => <HandoffRow handoff={row.value()} />}</For>
       </Show>
-      <Show when={props.orphans.queue.length}>
-        <div class="collab-sub">{ctx.t('panel.orphanQueue', { count: props.orphans.queue.length })}</div>
-        <For each={props.orphans.queue}>{item => <QueueRow item={item} />}</For>
+      <Show when={queue().length}>
+        <div class="collab-sub">{ctx.t('panel.orphanQueue', { count: queue().length })}</div>
+        <For each={queue()}>{row => <QueueRow item={row.value()} />}</For>
       </Show>
     </section>
   );

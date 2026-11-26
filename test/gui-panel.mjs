@@ -75,12 +75,14 @@ class Elem {
     this.listeners = new Map();
     this.rect = null;
     // 0.10.0 (`11-26-collab-board-scroll`): a real browser keeps the scroll
-    // position of a container whose children are *updated*; the fixture must at
-    // least give the container a writable position, or "the poll reset it" is
-    // untestable. `scrollHeight` is derived from the rendered row count, so a
-    // rebuilt list would answer a different height than a reused one only if it
-    // also changed the number of rows — identity is asserted separately.
+    // position of a container whose children are *updated*, but clamps it when
+    // the content shrinks below `scrollTop + clientHeight` (a container that is
+    // emptied / rebuilt ends at 0). Both parts matter here: the design's R3
+    // ("滚动保持") is only falsifiable if a rebuild can actually move the
+    // position, so the fixture models the clamp instead of storing an inert
+    // number. `scrollHeight` is derived from the rendered rows.
     this.scrollTop = 0;
+    this.clientHeight = 240;
     this.style = { cssText: '', setProperty() {}, removeProperty() {} };
   }
   get scrollHeight() {
@@ -94,6 +96,12 @@ class Elem {
     };
     walk(this);
     return 40 + rows * 24;
+  }
+  /** The browser rule: content shrank → never scroll past the end (never forward). */
+  clampScroll() {
+    if (!(this.scrollTop > 0)) return;
+    const max = Math.max(0, this.scrollHeight - this.clientHeight);
+    if (this.scrollTop > max) this.scrollTop = max;
   }
   get firstChild() {
     return this.childNodes[0] ?? null;
@@ -121,6 +129,7 @@ class Elem {
     const index = this.childNodes.indexOf(node);
     if (index >= 0) this.childNodes.splice(index, 1);
     node.parentNode = null;
+    this.clampScrollChain();
     return node;
   }
   replaceChild(node, old) {
@@ -130,7 +139,12 @@ class Elem {
       node.parentNode = this;
       old.parentNode = null;
     }
+    this.clampScrollChain();
     return old;
+  }
+  /** A removal shrinks **every** scrolling ancestor's content, not just `this`. */
+  clampScrollChain() {
+    for (let cursor = this; cursor; cursor = cursor.parentNode) cursor.clampScroll?.();
   }
   setAttribute(name, value) {
     this.attrs[name] = String(value);
@@ -163,6 +177,7 @@ class Elem {
   set textContent(value) {
     this.childNodes = [];
     if (String(value) !== '') this.appendChild(new TextNode(value));
+    this.clampScrollChain();
   }
   cloneNode(deep) {
     const copy = new Elem(this.tagName);
@@ -2394,10 +2409,16 @@ const CONTRACT = {
  *
  *   PN16  same members, changed title → same DOM nodes, content updated in place;
  *   PN16b same poll → the sidebar's `scrollTop` / `scrollHeight` survive;
- *   PN16c add / remove one session → exactly one node appears / disappears.
+ *   PN16c add / remove one session → exactly one node appears / disappears;
+ *   PN16d a re-sort (busy-first) moves the same nodes, content does not cross;
+ *   PN16e orphan rows in the sidebar are reused too.
  *
- * The mutation (returning a fresh row object per poll) fails PN16/PN16b; making
- * the field update replace the node fails PN16.
+ * PN16b is **falsifiable**, not a constant: the mini DOM models the browser's
+ * clamp (`scrollHeight - clientHeight` when children are removed, see `Elem`).
+ * A full rebuild detaches every row, the sidebar's content collapses, and the
+ * scroll position lands on 0 — with stable rows nothing is detached. Mutation 1
+ * (fresh row objects per poll) therefore fails PN16b as well as PN16 / PN16c;
+ * mutation 2 (a key that follows the content) fails PN16.
  */
 
 const SCROLL_WS = '/data/project/scroll';
@@ -2436,6 +2457,7 @@ const scrollSession = index => ({
   const isSessionRow = node => String(node.className).split(' ').includes('collab-session');
   const rows = () => findAllIn(el, isSessionRow);
   const sidebar = () => findIn(el, node => String(node.className).split(' ').includes('collab-sidebar'));
+  const groupSection = () => findIn(el, node => String(node.className).split(' ').includes('collab-group'));
   /** Rows live inside `<section class="collab-group">`, itself inside the sidebar. */
   const inSidebar = node => {
     for (let cursor = node; cursor; cursor = cursor.parentNode) if (cursor === sidebar()) return true;
@@ -2443,6 +2465,7 @@ const scrollSession = index => ({
   };
 
   const before = rows();
+  const groupBefore = groupSection();
   expect(
     'PN16 a 40-session workspace renders 40 session rows in the sidebar',
     before.length === 40 && before.every(inSidebar),
@@ -2475,6 +2498,11 @@ const scrollSession = index => ({
     'PN16 same members: every row is the **same DOM node** after the poll (no rebuild)',
     after.length === before.length && before.every((node, index) => node === after[index]),
     `${before.filter((node, index) => node !== after[index]).length} of ${before.length} replaced`
+  );
+  expect(
+    'PN16 the workspace group row itself is also the same node',
+    Boolean(groupBefore) && groupSection() === groupBefore,
+    JSON.stringify({ same: groupSection() === groupBefore })
   );
   expect(
     'PN16 … and the changed title updated that node in place',
@@ -2517,8 +2545,200 @@ const scrollSession = index => ({
     shrunk.length === 40 &&
       before.every(node => shrunk.includes(node)) &&
       !shrunk.includes(addedNode) &&
+      Boolean(addedNode) &&
       addedNode.parentNode === null,
     `${grown.length} → ${shrunk.length}; survivor identity ${before.filter(node => shrunk.includes(node)).length}/${before.length}`
+  );
+
+  // Re-sort: `buildBoard` puts busy sessions first. The same 40 rows must move,
+  // not be recreated — and no row may end up wearing someone else's content.
+  const bySid = list => new Map(list.map(node => [node.getAttribute('title'), node]));
+  const mapBefore = bySid(shrunk);
+  scrollReply = {
+    ...scrollReply,
+    sessions: scrollReply.sessions.map(session =>
+      session.sid === 'ses_scroll_020' ? { ...session, busy: true } : session
+    )
+  };
+  await sleep(2100);
+  const reordered = rows();
+  const mapAfter = bySid(reordered);
+  const moved = reordered[0]?.getAttribute('title');
+  expect(
+    'PN16d busy-first re-sort moves the same nodes (no row is recreated)',
+    reordered.length === 40 &&
+      moved === 'ses_scroll_020' &&
+      [...mapBefore.keys()].every(sid => mapAfter.get(sid) === mapBefore.get(sid)),
+    JSON.stringify({ first: moved, replaced: [...mapBefore.keys()].filter(sid => mapAfter.get(sid) !== mapBefore.get(sid)).length })
+  );
+  expect(
+    'PN16d … and every row still shows its own title (no content crossed over)',
+    reordered.every(node => {
+      const sid = node.getAttribute('title') ?? '';
+      const index = Number(sid.slice('ses_scroll_'.length));
+      const match = /·scroll row (\d+)/.exec(node.textContent);
+      return Boolean(match) && Number(match[1]) === index && node.textContent.includes(sid);
+    }),
+    JSON.stringify(reordered.slice(0, 3).map(node => node.textContent))
+  );
+  expect(
+    'PN16d … the re-sort did not disturb the scroll position either',
+    pane.scrollTop === 300,
+    JSON.stringify({ scrollTop: pane.scrollTop, height: pane.scrollHeight })
+  );
+
+  dispose();
+}
+
+/* ---------- 16e. orphan rows (inside the sidebar) are reused too -----------
+ *
+ * A lease whose holder is gone / a hand-off from a session outside the snapshot
+ * file as `· 未归属` rows at the bottom of the sidebar — the same scroll
+ * container as the tree. They are derived from the raw snapshot arrays too, so
+ * they need the same stable-row treatment (mutation: feed `props.orphans.*`
+ * straight to `<For>` → the identity assertion goes red).
+ */
+{
+  const orphanBase = () => ({
+    reachable: true,
+    sessions: [],
+    locks: [
+      {
+        resource: 'named:orphan-window',
+        kind: 'named',
+        mode: 'exclusive',
+        holders: ['ses_ghost'],
+        waiters: 0,
+        waiting: [],
+        expiresInMs: 60_000,
+        reason: 'orphan lease'
+      }
+    ],
+    handoffs: [
+      { bid: 'b_orphan01', state: 'open', ageMs: 1_000, from: 'ses_ghost', title: 'orphan work' }
+    ],
+    queue: [{ queueId: 'q_orphan01', target: 'ses_ghost', ageMs: 1_000, summary: 'orphan ask', seen: false }]
+  });
+  let orphanReply = orphanBase();
+  let orphanLoads = 0;
+  const orphanClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        orphanLoads += 1;
+        return { ...orphanReply, at: orphanLoads };
+      }
+    })
+  };
+  const ORPHAN_SESSION = serverSession('ses_orphan_probe', 'srv-orphan', orphanClient);
+  const h = harness(ORPHAN_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, ORPHAN_SESSION);
+  const rows = () => findAllIn(el, node => String(node.className).split(' ').includes('collab-row'));
+
+  const before = rows();
+  expect(
+    'PN16e orphan locks / hand-offs / queue render as three rows in the sidebar',
+    before.length === 3 &&
+      before.some(node => node.textContent.includes('named:orphan-window')) &&
+      before.some(node => node.textContent.includes('b_orphan01')) &&
+      before.some(node => node.textContent.includes('q_orphan01')),
+    JSON.stringify(before.map(node => node.textContent))
+  );
+
+  const loadsBefore = orphanLoads;
+  orphanReply = {
+    ...orphanBase(),
+    locks: [{ ...orphanBase().locks[0], reason: 'orphan lease v2' }],
+    handoffs: [{ ...orphanBase().handoffs[0], title: 'orphan work v2' }],
+    queue: [{ ...orphanBase().queue[0], summary: 'orphan ask v2' }]
+  };
+  await sleep(2100);
+  const after = rows();
+  expect(
+    'PN16e a poll really replaced the snapshot during the wait',
+    orphanLoads > loadsBefore,
+    `${loadsBefore} → ${orphanLoads} loads`
+  );
+  expect(
+    'PN16e every orphan row is the **same DOM node** after the poll',
+    after.length === before.length && before.every((node, index) => node === after[index]),
+    `${before.filter((node, index) => node !== after[index]).length} of ${before.length} replaced`
+  );
+  expect(
+    'PN16e … and their contents updated in place (reason / title / summary)',
+    after.some(node => node.getAttribute('title') === 'orphan lease v2') &&
+      after.some(node => node.textContent.includes('orphan work v2')) &&
+      after.some(node => node.textContent.includes('orphan ask v2')),
+    JSON.stringify(after.map(node => node.textContent))
+  );
+
+  dispose();
+}
+
+/* ---------- 16f. `↳` spawn rows in the detail pane are reused too ---------- */
+{
+  const spawnBase = childTitle => ({
+    reachable: true,
+    sessions: [
+      { sid: 'ses_spawn_parent', title: 'spawn parent', agent: 'build', busy: true, workspace: '/data/project/spawn' },
+      {
+        sid: 'ses_spawn_child',
+        title: childTitle,
+        agent: 'build',
+        busy: false,
+        workspace: '/data/project/spawn',
+        parent: 'ses_spawn_parent'
+      }
+    ],
+    locks: [],
+    handoffs: [
+      {
+        bid: 'b_spawn01',
+        state: 'claimed',
+        ageMs: 1_000,
+        from: 'ses_spawn_parent',
+        claimBy: 'ses_spawn_child',
+        spawned: 'ses_spawn_child',
+        kind: 'spawn',
+        title: 'spawn the child',
+        workspace: '/data/project/spawn'
+      }
+    ],
+    queue: []
+  });
+  let spawnReply = spawnBase('spawn child');
+  let spawnLoads = 0;
+  const spawnClient = {
+    rpc: () => ({
+      snapshot: async () => {
+        spawnLoads += 1;
+        return { ...spawnReply, at: spawnLoads };
+      }
+    })
+  };
+  const SPAWN_SESSION = serverSession('ses_spawn_parent', 'srv-spawn', spawnClient);
+  const h = harness(SPAWN_SESSION, { locale: 'zh' });
+  const dispose = createRoot(disposeRoot => (plugin.setup(h.context), disposeRoot));
+  await sleep(150);
+  const el = renderPanel(h, SPAWN_SESSION);
+  const parentRow = findIn(el, node => String(node.className).includes('collab-session') && node.textContent.includes('spawn parent'));
+  fireClick(parentRow);
+  const spawnRow = () => findIn(el, node => String(node.className).split(' ').includes('collab-spawn'));
+  const first = spawnRow();
+  expect(
+    'PN16f selecting the parent renders its ↳ spawned row',
+    Boolean(first) && first.textContent.includes('spawn child'),
+    JSON.stringify(first?.textContent ?? '(missing)')
+  );
+
+  spawnReply = spawnBase('spawn child v2');
+  await sleep(2100);
+  const second = spawnRow();
+  expect(
+    'PN16f a poll keeps the same ↳ node and updates its title in place',
+    Boolean(first) && second === first && second.textContent.includes('spawn child v2'),
+    JSON.stringify({ same: second === first, text: second?.textContent ?? '(missing)' })
   );
 
   dispose();

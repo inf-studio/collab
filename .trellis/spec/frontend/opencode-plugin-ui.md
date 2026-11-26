@@ -137,6 +137,17 @@ const client = session?.server?.client ?? ctx.client;   // ServerRef.client 已�
   不要给缺 `text` 或 `kind:"note"` 的写法（实测停在 `acked`，看板一直 open）。peer 无 thread 时给
   `collab_send { text:"[handoff] DONE|BLOCKED <bid> <摘要>" }`。
 
+## 2.9.9 轮询列表必须用稳定行（0.10.0）
+
+- 面板每 2s 拉一次快照，派生出的行对象**每次都是新引用**；`<For each={rows()}>` 按引用比较，整棵子树会被重建 →
+  长列表滚动位置被浏览器夹回顶部（实测 25+ 会话的工作区每次轮询都跳）。
+- 用 `createStableRows(items, keyOf)`（`src/core/stable-rows.ts`）：成员不变时**同一数组引用 + 同一 row 对象**，
+  字段变化只 `setValue`；成员增删才产生新数组。
+- **不要用 `<Index>`**：它按下标复用，列表重排（busy 抢前）时内容会串行。
+- 凡在滚动容器内的行都要稳定化，**包括孤儿行**（locks / handoffs / queue）——漏一类，该类行每轮仍被摘挂。
+- 测试：迷你 DOM 必须实现**最小 clamp 模型**（`clientHeight` + 删子节点时沿 parent 链夹 `scrollTop`），
+  否则「滚动保持」断言恒真、打不回原 bug。主assert 用**节点身份**（同一行是同一对象），滚动值是伴生观测。
+
 ## 2.10 看板主从布局
 
 - **GUI 分栏**：左列表（320px 左右）/ 右详情（自适应）；`≤640px`（`max-width:640px`）回落单栏——选中后详情替换列表并给「← 返回列表」。

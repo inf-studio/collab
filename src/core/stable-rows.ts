@@ -58,6 +58,20 @@ export function createStableRows<T>(items: Accessor<readonly T[]>, keyOf: (item:
   let keys: string[] = [];
 
   return createMemo(() => {
+    // Dependency topology — **do not "fix" this into a second effect**: the
+    // `setValue` writes below are intentionally performed *inside* this memo,
+    // before the (possibly unchanged) row array is published.
+    //
+    //   `items()` changes → this memo recomputes → ticks each row's `value`
+    //   signal → each row's own render effect (which reads `row.value()`)
+    //   re-runs → then the memo answers. Returning the *same* array reference
+    //   stops the `<For>` from re-running at all, so a field change reaches
+    //   exactly the one row that reads it, and a membership change reaches the
+    //   `For` as one new array (add / remove, never rebuild).
+    //
+    // The memo itself never reads `value`, so there is no self-dependency
+    // cycle; a reader that did (`contract-view`-style derived memos) would just
+    // be ordered after the write, which is the intent.
     const next: StableRow<T>[] = [];
     const nextKeys: string[] = [];
     const seen = new Set<string>();
